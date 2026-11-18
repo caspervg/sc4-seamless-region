@@ -23,18 +23,22 @@ database, with plate comments that start with "RE 2026-11-18".
 
 | Zoom | Pixels per cell | Pixels per metre | Pitch |
 |---|---|---|---|
-| 1 | 8 | 0.354 | 30 |
-| 2 | 16 | 0.707 | 35 |
-| 3 | 32 | 1.414 | 40 |
-| 4 | 73 | 3.226 | 45 |
-| 5 | 146 | 6.452 | 45 |
+| 1 | 8 | 0.383 | 30 |
+| 2 | 16 | 0.765 | 35 |
+| 3 | 32 | 1.531 | 40 |
+| 4 | 73 | 3.492 | 45 |
+| 5 | 146 | 6.984 | 45 |
 
 - Pixel table `kSC4ViewportCellPixelWidth` at `0x00abace0`. Pitch table at `0x00abaccc`.
 - Zoom 4 is zoom 5 at half size. Render zooms 1, 2, 3 and 4. Show zoom 4 scaled 2x at zoom 5.
-- `GetCityWidthFromOrthoView` (`0x007f8300`) returns 16 * (cos 45 + sin 45) = 22.6274.
-- World units per pixel (camera +0x134) = 22.6274 / (cellPx * magnification).
-- Yaw = (rotation + 1) * 90 - 45 degrees. A height h moves a point up on screen by
+- The view is trimetric, not isometric. The yaw offset at camera +0x118 and the table at
+  `0x00abcfc4` are -pi/8 (-22.5 degrees).
+- `GetCityWidthFromOrthoView` (`0x007f8300`) returns 16 * (cos 22.5 + sin 22.5) = 20.905.
+- World units per pixel (camera +0x134) = 20.905 / (cellPx * magnification).
+- Yaw = (rotation + 1) * 90 - 22.5 degrees. A height h moves a point up on screen by
   h * cos(pitch) * pixelsPerMetre.
+- A 1024 m region step is not a whole number of pixels, so neighbor offsets are
+  fractional on both axes. See `docs/re-notes/viewmath.md` for the exact formulas.
 - The game snaps the projected base city corner to a whole pixel
   (`UpdateCameraPositionParams` `0x007cc290`). Anchor tiles to that corner.
 

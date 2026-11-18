@@ -364,7 +364,8 @@ Large images are split into power-of-two tiles of at most 2048 px.
 |---|---|---|
 | W1 | Foundation | Opus |
 | W2 | A Switching (Opus), B Camera (Fable), C Capture (Fable), D Store (Sonnet), E Render (Fable) | mixed |
-| W3 | F Interaction (Opus), G Batch (Opus), H Export (Sonnet), I Overlay (Opus) | mixed |
+| W3 | F Interaction (Opus), G Batch (Opus), I Overlay (Opus) | Opus |
+| Later | H Export (Sonnet). Deferred, its stub stays in place | Sonnet |
 | W4 | Review: correctness, performance and integration across all modules | Fable |
 
 Each agent works in its own git worktree `C:\Users\caspe\CLionProjects\ssr-wt-<name>` on
