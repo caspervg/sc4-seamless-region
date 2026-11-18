@@ -443,3 +443,68 @@ installed. The checks are the same for both. Tools tab, group "Capture".
 3. Save and exit to the region. No render starts for the closed city, or a render that
    started stops when the city closes. Nothing crashes.
 
+## Batch
+
+Use a small test region with 3 to 5 founded cities and one empty tile. Copy the region first:
+the batch saves every city. The log lines start with `Batch:` in the plugin log. The same lines
+(without the prefix) go to `<Region>/RegionRenders/batch.log`.
+
+### Start
+
+1. Open a city, place a road, do not save. Open Tools, Batch.
+2. Click "Render the region". A popup tells how many cities need a render and what happens.
+   Click Start.
+3. Expected: the window "Rendering the region" shows the city count, the render of the open
+   city first, then "Saving and opening the city" for the next one. The window stops for some
+   seconds while a city loads. The game clock does not run in a city while the batch works.
+4. Log: `Run <id> started in '<city>': N cities to render, M skipped`, then for each city
+   `Opening '<name>' (attempt 1)`, `'<name>' is open after <s> s`, `Rendered '<name>' in ...`.
+5. At the end the game opens the start city again, at the speed it had before. The road is
+   saved. All neighbors show. Log: `Going back to '<start>'`, `Run <id> done: ...`.
+6. Click "Render the region" again. The popup says 0 cities need a render. Log for each city
+   that the batch left: `'<key>' was saved after its render, its render stays up to date`.
+7. "Render all cities again" renders every founded city, also the up to date ones.
+8. The panel shows "Last region render" with rendered, skipped (the empty tile: "Not founded",
+   up to date cities: "Up to date") and failed cities. "Open the batch log" opens batch.log.
+
+### Start refused
+
+- In a city that cannot be saved, or while a render or a switch runs, the buttons are off and
+  the panel tells why. Nothing changes.
+
+### Cancel
+
+1. Start a batch. Click Cancel in the window while the second city renders.
+2. Expected: the button shows "Stopping...", the render stops, the game goes back to the start
+   city. Log: `Cancel requested...`, `The render of '<name>' was cancelled`,
+   `Run <id> cancelled: ...`. batch.json has `"state": "cancelled"` and the cities that are left
+   in `pending`.
+3. Restart the game and open a city of the region. No offer to continue comes.
+
+### Kill the game and continue
+
+1. Start a batch. While the second city renders, end SimCity 4 in the Task Manager.
+2. Start the game and open a city of the region. The window "Continue rendering the region?"
+   comes. Log: `Run <id> did not finish, <n> cities left. Asking whether to continue.`
+3. Click Continue. When the open city is in the queue it is rendered first. The city that was
+   rendering when the game stopped gets one more try (attempt 2). At the end the game goes to
+   the start city of the first start. Log: `Run <id> continues in '<city>'`.
+4. Kill the game again while that same city renders, restart and continue. Now that city fails
+   with "The game stopped twice while it rendered this city." and the batch goes on.
+5. "Not now" hides the window until the next city load. "Stop this render" sets batch.json to
+   `"stopped"` and the offer does not come again.
+
+### A city that fails
+
+- While a batch city renders, click Cancel in the Capture section of the panel (not in the
+  batch window). Expected: that city is in "Failed" with the reason of the capture, the batch
+  goes on with the next city. Log: `Failed '<name>': <reason>`.
+- Make the save file of your start city read-only, then start. The switch away cannot save it
+  (the game shows its own message). Expected: the run stops, you stay in the city. Log:
+  `The region render stopped: Saving '<name>' failed...`.
+- A city that does not load sends the game to the region view. Log: `Failed '<name>': It could
+  not be loaded...`, then `Run <id> interrupted: ...`. Open a city of the region: the offer to
+  continue comes.
+- Go to the region view yourself while the batch runs. Log: `Run <id> interrupted: The city
+  closed ...`. The offer comes at the next city load.
+
