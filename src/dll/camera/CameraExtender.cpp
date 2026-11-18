@@ -594,7 +594,8 @@ void CameraExtender::SetOutsideClearColor(const uint32_t rgba)
                             static_cast<float>(rgba >> 8 & 0xFF) / 255.0f, static_cast<float>(rgba & 0xFF) / 255.0f};
     renderer->SetViewportClearColor(color);
     renderer->ForceFullRedraw();
-    LOG_INFO("Camera: outside clear color 0x{:08X}", rgba);
+    // Debug: a render changes the color twice for every tile on the city edge.
+    LOG_DEBUG("Camera: outside clear color 0x{:08X}", rgba);
 }
 
 void CameraExtender::RestoreOutsideClearColor()
