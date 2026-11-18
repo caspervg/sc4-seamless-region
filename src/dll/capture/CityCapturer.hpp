@@ -15,7 +15,9 @@
 //
 // Writes through TileStore. Restores the game state (zoom, rotation, camera target,
 // magnification, data view, view level, background, clear color, free roam, walls, neighbor
-// drawing, model loading, pause) whether it succeeds, fails, is cancelled or the city closes.
+// drawing, model loading, pause) whether it succeeds, fails or is cancelled. When the city
+// closes during a render, only the state that outlives the city view is put back. The hover
+// tint and the map overlay stay out of the tiles on their own: they check IsRunning().
 // Details: docs/re-notes/capture.md.
 
 #include <array>
@@ -100,7 +102,8 @@ private:
         ViewMath::TileGrid grid;
         CaptureMath::CityOutline outline;
         int tiles = 0;      // tiles that touch the outline
-        bool captured = false;
+        bool started = false;   // its older tiles were deleted, its new tiles are on their way
+        bool captured = false;  // every tile of this run is handed to the store
     };
 
     // What Prepare changed, so Restore puts back exactly that.
@@ -113,8 +116,6 @@ private:
         cS3DVector3 target;
         bool neighborsOff = false;
         bool neighborsBefore = true;
-        bool hoverTintSaved = false;
-        bool hoverTint = false;
         bool freeRoamBefore = false;    // the scroll clamp was already off
         bool freeRoamByCamera = false;  // CameraExtender::SetFreeRoam(true) was called
         bool clampForced = false;       // the capture cleared the scroll clamp flag itself
@@ -152,6 +153,8 @@ private:
     bool TileComplete_();
     void TileDone_();
     bool WriteTestTile_();
+    // Writes meta.json for the tiles that are on disk now. final = the render is complete.
+    bool WriteMeta_(bool final);
 
     void SetClearColor_(uint32_t rgba);
     void RestoreClearColor_();
@@ -167,7 +170,11 @@ private:
     void End_(bool ok, std::string phase, std::string error, bool cityClosing);
     void PhaseText_(char* text, size_t size) const;
     [[nodiscard]] double EtaSeconds_() const;
+    void OnSaveBegin_();
+    void ResumeAfterSave_();
     void OnSaved_();
+    void CancelRenderOnSave_();
+    [[nodiscard]] bool OtherWorkRuns_() const;
 
     ModuleContext ctx_;
     std::function<void(bool ok)> onFinished_;
@@ -175,7 +182,14 @@ private:
     Phase phase_ = Phase::Idle;
     uint32_t stepId_ = 0;
     uint32_t saveToken_ = 0;
-    bool renderOnSavePending_ = false;
+    uint32_t preSaveToken_ = 0;
+    // A save runs inside a render: the game's own clear color and background are back for
+    // the region picture that the save makes.
+    bool saveInsideRender_ = false;
+    uint32_t clearColorNow_ = 0;  // the key color the render draws over at the moment
+    // Render on save: the countdown step, 0 when no save waits for its render. It only lives
+    // inside the city that was saved (OnCityShutdown cancels it).
+    uint32_t renderOnSaveId_ = 0;
     int renderOnSaveTicks_ = 0;
     bool cancelRequested_ = false;
     bool testTile_ = false;

@@ -6,6 +6,7 @@
 
 #include "cISC43DRender.h"
 #include "core/GameAddresses.hpp"
+#include "core/Guard.hpp"
 #include "imgui.h"
 #include "region/RegionIndex.hpp"
 #include "render/RenderAddresses.hpp"
@@ -286,21 +287,24 @@ bool NeighborRenderer::Place_(const Neighbor& neighbor, const CameraFrame& frame
 void NeighborRenderer::PassCallback_(const DrawServicePass pass, const bool begin, void* userData)
 {
     auto* self = static_cast<NeighborRenderer*>(userData);
-    if (pass == DrawServicePass::PreStatic && begin) {
-        // After ClearViewport, before the terrain.
-        if (self->ShouldDraw_()) {
-            self->ctx_.tileCache->BeginDrawPass();
-            self->DrawGroup_(false);
+    // Called from inside the game's Draw: no exception may leave it.
+    Guarded("Neighbors: the draw callback", [&] {
+        if (pass == DrawServicePass::PreStatic && begin) {
+            // After ClearViewport, before the terrain.
+            if (self->ShouldDraw_()) {
+                self->ctx_.tileCache->BeginDrawPass();
+                self->DrawGroup_(false);
+            }
         }
-    }
-    else if (pass == DrawServicePass::PostStatic && !begin) {
-        if (self->ShouldDraw_() && self->ctx_.settings->showFrontNeighbors) {
-            self->DrawGroup_(true);
+        else if (pass == DrawServicePass::PostStatic && !begin) {
+            if (self->ShouldDraw_() && self->ctx_.settings->showFrontNeighbors) {
+                self->DrawGroup_(true);
+            }
         }
-    }
-    else if (pass == DrawServicePass::PreDynamic && begin) {
-        self->Tick_();  // runs every frame
-    }
+        else if (pass == DrawServicePass::PreDynamic && begin) {
+            self->Tick_();  // runs every frame
+        }
+    });
 }
 
 void NeighborRenderer::Tick_()
@@ -571,8 +575,8 @@ void NeighborRenderer::DrawGroup_(const bool front)
 void NeighborRenderer::DrawPanelSection()
 {
     Settings* settings = ctx_.settings;
-    bool changed = ImGui::Checkbox("Draw neighbor cities", &settings->showNeighbors);
-    changed |= ImGui::Checkbox("Draw neighbors in front of the city", &settings->showFrontNeighbors);
+    bool changed = ImGui::Checkbox("Show neighbor cities", &settings->showNeighbors);
+    changed |= ImGui::Checkbox("Show neighbors in front", &settings->showFrontNeighbors);
     if (changed) {
         settings->MarkChanged();
     }

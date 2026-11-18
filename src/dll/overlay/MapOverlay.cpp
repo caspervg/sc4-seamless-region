@@ -17,6 +17,7 @@
 #include "cISC43DRender.h"
 #include "cISC4City.h"
 #include "cISTETerrain.h"
+#include "core/Guard.hpp"
 #include "core/IdleScheduler.hpp"
 #include "core/Messages.hpp"
 #include "imgui.h"
@@ -33,9 +34,6 @@ namespace fs = std::filesystem;
 
 namespace
 {
-    // cSTETerrain::RedisplayTerrain (0x00749850) posts this after the altitudes in a rectangle
-    // changed. data1 = x0 << 16 | x1, data2 = z0 << 16 | z1, in cells. docs/re-notes/overlay.md.
-    constexpr uint32_t kTerrainAltitudeChanged = 0x278E6003;
     // Terraforming posts many messages. Rebuild once the terrain is quiet for this long.
     constexpr auto kTerrainQuiet = std::chrono::milliseconds(500);
     // The game's own decals use depth offset 2 (terrain-decals.md). The overlay draws after them
@@ -149,7 +147,7 @@ bool MapOverlay::Initialize(const ModuleContext& ctx)
         return false;
     }
     terrainToken_ =
-        ctx_.messages->Subscribe(kTerrainAltitudeChanged, [this](cIGZMessage2* message) { OnTerrainChanged_(message); });
+        ctx_.messages->Subscribe(Messages::kTerrainAltitudeChanged, [this](cIGZMessage2* message) { OnTerrainChanged_(message); });
     stop_ = false;
     worker_ = std::thread([this] { WorkerMain_(); });
     sInstance = this;
@@ -244,6 +242,12 @@ void MapOverlay::WorkerMain_()
             decoded = {};
             decoded.epoch = epoch;
             decoded.error = "There is not enough memory for this image";
+        }
+        catch (...) {
+            // Nothing may leave a thread function: that ends the game.
+            decoded = {};
+            decoded.epoch = epoch;
+            decoded.error = "The image could not be read";
         }
 
         lock.lock();
@@ -475,7 +479,7 @@ void MapOverlay::TakeDecoded_(Decoded&& decoded)
 void MapOverlay::UploadThunk_(void*)
 {
     if (sInstance) {
-        sInstance->UploadInFrame_();
+        Guarded("Overlay: the texture upload", [] { sInstance->UploadInFrame_(); });
     }
 }
 
@@ -628,7 +632,7 @@ bool MapOverlay::ShouldDraw_() const
 
 void MapOverlay::DrawThunk_(cIGZWorldDrawContext& context, void* userData)
 {
-    static_cast<MapOverlay*>(userData)->Draw_(context);
+    Guarded("Overlay: the draw callback", [&] { static_cast<MapOverlay*>(userData)->Draw_(context); });
 }
 
 void MapOverlay::Draw_(cIGZWorldDrawContext& context)
@@ -828,7 +832,9 @@ void MapOverlay::DrawPanelSection()
         ImGui::TextWrapped("No image on this city.");
         return;
     }
-    ImGui::TextWrapped("%s", ToUtf8(FromUtf8(state_.imagePath).filename()).c_str());
+    // The file name is the end of the path: no path object every frame.
+    const size_t nameStart = state_.imagePath.find_last_of("/\\");
+    ImGui::TextWrapped("%s", state_.imagePath.c_str() + (nameStart == std::string::npos ? 0 : nameStart + 1));
     if (loading_ || (!texturesReady_ && uploadNext_ < pieces_.size())) {
         ImGui::TextUnformatted("Loading the image...");
     }

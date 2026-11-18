@@ -53,6 +53,18 @@ namespace
         return reinterpret_cast<Fn>(address);
     }
 
+    // The edges to hide in the draw that runs now. None while the region thumbnail writer
+    // (0x005ddec0) draws: it is the only user of another magnification, and the picture and
+    // the border masks it saves into the city file must keep their walls.
+    uint32_t HiddenEdgesForThisDraw()
+    {
+        if (sHiddenGameEdges == 0) {
+            return 0;
+        }
+        const void* camera = GameAccess::CameraControl();
+        return camera && ReadField<float>(camera, CC::kMagnification) == 1.0f ? sHiddenGameEdges : 0;
+    }
+
     void __fastcall UpdateScrollBoundsHook(void* camera, void* edx)
     {
         sUpdateScrollBounds.Original()(camera, edx);
@@ -75,7 +87,7 @@ namespace
     // that matches no edge for the length of the call.
     bool __fastcall DrawSideCliffsHook(void* terrainView, void* edx, void* drawContext)
     {
-        const uint32_t hidden = sHiddenGameEdges;
+        const uint32_t hidden = HiddenEdgesForThisDraw();
         if (hidden == 0) {
             return sDrawSideCliffs.Original()(terrainView, edx, drawContext);
         }
@@ -97,7 +109,7 @@ namespace
     // its vertices with the top row lowered onto the bottom row, which draws nothing.
     bool __fastcall DrawWaterBoxHook(void* terrainView, void* edx, void* drawContext)
     {
-        const uint32_t hidden = sHiddenGameEdges;
+        const uint32_t hidden = HiddenEdgesForThisDraw();
         if (hidden == 0) {
             return sDrawWaterBox.Original()(terrainView, edx, drawContext);
         }
@@ -185,9 +197,11 @@ void CameraExtender::OnCityInit()
              regionExtent_.minX, regionExtent_.maxX, regionExtent_.minZ, regionExtent_.maxZ,
              regionExtent_.valid ? "" : " (no region, game bounds)");
     RefreshNeighborWalls();
-    // The view may not exist yet, and this runs inside the city load. Apply on the next idle tick.
+    // Apply on the next idle tick, not inside the message handler.
     pendingApply_ = true;
-    tickId_ = ctx_.idle->AddRecurring([this] { return Tick_(); });
+    if (tickId_ == 0) {
+        tickId_ = ctx_.idle->AddRecurring([this] { return Tick_(); });
+    }
 }
 
 void CameraExtender::OnCityShutdown()
@@ -206,7 +220,9 @@ void CameraExtender::OnCityShutdown()
         if (clampFlagSaved_) {
             *FieldPtr<uint8_t>(camera, CC::kScrollClampEnabled) = savedClampFlag_;
         }
-        *FieldPtr<float>(camera, CC::kEyeDistance) = ViewMath::kEyeDistance;
+        if (customClip_) {
+            *FieldPtr<float>(camera, CC::kEyeDistance) = ViewMath::kEyeDistance;
+        }
     }
     cityOpen_ = false;
     pendingApply_ = false;
@@ -324,8 +340,12 @@ void CameraExtender::AroundZoomParams(void* camera, void* edx)
     }
     CameraBounds::ClipPlanes clip;
     const bool custom = ComputeClip_(camera, clip);
-    // The original reads the eye distance for the eye offset and for both clip planes.
-    *FieldPtr<float>(camera, CC::kEyeDistance) = custom ? clip.eyeDistance : ViewMath::kEyeDistance;
+    // The original reads the eye distance for the eye offset and for both clip planes. The
+    // field is only written while the module widens the view, and once more to put the
+    // game's value back.
+    if (custom || customClip_) {
+        *FieldPtr<float>(camera, CC::kEyeDistance) = custom ? clip.eyeDistance : ViewMath::kEyeDistance;
+    }
     sZoomParams.Original()(camera, edx);
     ApplyFogShift_(custom ? (clip.eyeDistance - ViewMath::kEyeDistance) / std::cos(ReadField<float>(camera, CC::kPitch))
                           : 0.0f);
@@ -574,7 +594,8 @@ void CameraExtender::SetOutsideClearColor(const uint32_t rgba)
                             static_cast<float>(rgba >> 8 & 0xFF) / 255.0f, static_cast<float>(rgba & 0xFF) / 255.0f};
     renderer->SetViewportClearColor(color);
     renderer->ForceFullRedraw();
-    LOG_INFO("Camera: outside clear color 0x{:08X}", rgba);
+    // Debug: a render changes the color twice for every tile on the city edge.
+    LOG_DEBUG("Camera: outside clear color 0x{:08X}", rgba);
 }
 
 void CameraExtender::RestoreOutsideClearColor()

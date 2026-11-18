@@ -12,7 +12,7 @@ New facts found while building the foundation (W1). Windows 1.1.641. Everything 
 | `[0x00b43ca4]` is a cIGZGDriver* used by `nsTexUtil::ReleaseTexture` | `FUN_0046d650` | medium (fallback only) |
 | `cISC4City` slot +0x1a4 = `IsSaveDisabled()`: true means do not save | header order (index 105), `RequestSaveCity` `0x00455ae0` shows a message and returns false when it is true | high |
 | `cSC4App` +0x50 = cISC4City* | `RequestSaveCity`, `SaveCity` | high |
-| Load messages, in order: `0x26C63340`, `0x26C63341`, `0x26C63342`, `0x26D31EC0`, `0x26D31EC1`, `0xEA8AE29A` | pushes in `LoadCity` `0x004555f0` at `0x00455706` .. `0x004558f3` | high |
+| Load messages, in order: `0x26C63340`, `0x26C63341`, `0x26C63342`, `0x26D31EC0`, `0x26D31EC1`, `0xEA8AE29A`. `0x26D31EC0` is sent, `0x26D31EC1` and `0xEA8AE29A` are posted and arrive after LoadCity returned (see `switching.md`) | pushes in `LoadCity` `0x004555f0` at `0x00455706` .. `0x004558f3` | high |
 | Save messages, in order: `0x26C63343`, `0x26C63346`, (data written), `0x26C63344`, `0x26C63345` | `SaveCity(path)` `0x00455e20` | high for order, names are ours |
 | Camera view change messages: pre `0xA6B79600`, post `0xA6B79620` (kind 0), `0xA6B79601`/`0xA6B79602` (kind 2), `0xA6B79611`/`0xA6B79612` (kind 3), `0xA6B79621` (kind 4), and `0x4A9F2FFE` for kinds 2 and 3 | `SendPreViewChangeMessage` `0x007cc000`, `SendPostViewChangeMessage` `0x007cc0b0`. Which kind is zoom, rotation or move is not confirmed | low |
 | cSC4CameraControl fields +0xb0/+0xb4 = position tweak, set by `SetCameraPositionTweakAdd` `0x007cda20`, called by `cSC43DRender::Draw` with the shake offsets before and after drawing | decompile of `Draw` `0x007cb530` | high |

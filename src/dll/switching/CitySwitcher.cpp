@@ -60,12 +60,8 @@ void CitySwitcher::Shutdown()
     initialized_ = false;
 }
 
-void CitySwitcher::OnCityInit()
-{
-    if (running_) {
-        LOG_DEBUG("Switching: the target city is initialized");
-    }
-}
+// PostCityInit is posted: this runs after the switch task has ended, never inside it.
+void CitySwitcher::OnCityInit() {}
 
 void CitySwitcher::OnCityShutdown()
 {
@@ -201,8 +197,8 @@ void CitySwitcher::Sequence_()
     }
     LOG_INFO("Switching: step 3, presented the last frame in {:.0f} ms", MsSince(step));
 
-    // 4. Close. Sends PreCityShutdown synchronously (all modules' OnCityShutdown) and reloads
-    //    the touching cities, which frees their cISC4RegionalCity holders.
+    // 4. Close. Sends PreCityShutdown (all modules' OnCityShutdown run in this call) and
+    //    reloads the touching cities, which frees their cISC4RegionalCity holders.
     const bool closed = app->CloseCity();
     LOG_INFO("Switching: step 4, CloseCity returned {} in {:.0f} ms", closed, MsSince(step));
     if (GameAccess::City()) {
@@ -231,8 +227,9 @@ void CitySwitcher::Sequence_()
         return;
     }
 
-    // 6. Load. Destroys the old city screen and creates the new one, sends PostCityInit
-    //    synchronously (all modules' OnCityInit).
+    // 6. Load. Destroys the old city screen and creates the new one. It sends PreCityInit and
+    //    only posts PostCityInit and PostCityInitComplete: the modules' OnCityInit runs on a
+    //    later message pump, after this task.
     LOG_INFO("Switching: step 5, loading '{}'", path.ToChar());
     const SC4String savePath(path);
     const bool loaded = app->LoadCity(savePath, holder);
@@ -243,9 +240,9 @@ void CitySwitcher::Sequence_()
     }
 
     lastError_.clear();
-    const CityInfo* now = ctx_.region->Current();
     auto total = start;
-    LOG_INFO("Switching: done, now in '{}', {:.0f} ms in total", now ? now->name : targetName_, MsSince(total));
+    LOG_INFO("Switching: done, '{}' is loaded, {:.0f} ms in total. Its modules start at PostCityInit.", targetName_,
+             MsSince(total));
 }
 
 void CitySwitcher::GoToRegionView_(std::string error)

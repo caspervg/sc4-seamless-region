@@ -4,7 +4,8 @@
 //
 // Sources: cISC4Region::GetAllCities (+0x44), and per cISC4RegionalCity GetPosition (+0x14),
 // GetCitySize (+0x1c), GetCitySaveFilePath (+0x7c) and GetCityName (+0x84). The director
-// calls Refresh at kPostCityInit before any module's OnCityInit. Game thread only.
+// calls Refresh at kPostCityInit before any module's OnCityInit, and ClearCurrent at
+// kPreCityShutdown after the modules' OnCityShutdown. Game thread only.
 
 #include <filesystem>
 #include <string>
@@ -20,6 +21,10 @@ public:
     void Refresh();
     // Forgets the region (director, at PostAppShutdown).
     void Clear();
+    // Forgets which city is played and keeps the list (director, at kPreCityShutdown after
+    // the modules). kPostCityInit is posted, so without this Current() would still name the
+    // closed city after a switch returned, until the next Refresh.
+    void ClearCurrent();
 
     // Sorted by (cellZ, cellX).
     [[nodiscard]] const std::vector<CityInfo>& Cities() const;

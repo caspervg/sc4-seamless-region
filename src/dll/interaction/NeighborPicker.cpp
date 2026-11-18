@@ -15,6 +15,7 @@
 #include "cISTETerrain.h"
 #include "cSC4BaseViewInputControl.h"
 #include "capture/CityCapturer.hpp"
+#include "core/Guard.hpp"
 #include "imgui.h"
 #include "interaction/InteractionAddresses.hpp"
 #include "public/cIGZImGuiService.h"
@@ -28,64 +29,86 @@
 
 // The persistent view input control. It forwards the left button and mouse moves to the
 // picker. Everything it does not take returns false, so the tool stack gets it.
-class NeighborPickerControl final : public cSC4BaseViewInputControl {
-  public:
+class NeighborPickerControl final : public cSC4BaseViewInputControl
+{
+public:
     explicit NeighborPickerControl(NeighborPicker* owner)
-        : cSC4BaseViewInputControl(InteractionAddresses::kPickerControlId), owner_(owner) {}
+        : cSC4BaseViewInputControl(InteractionAddresses::kPickerControlId)
+        , owner_(owner)
+    {
+    }
 
     void Detach() { owner_ = nullptr; }
 
-    bool OnMouseDownL(const int32_t x, const int32_t z, uint32_t) override {
-        return owner_ && owner_->OnMouseDownL(x, z);
+    // The city view calls these: no exception may leave them.
+    bool OnMouseDownL(const int32_t x, const int32_t z, uint32_t) override
+    {
+        bool taken = false;
+        Guarded("Interaction: mouse down", [&] { taken = owner_ && owner_->OnMouseDownL(x, z); });
+        return taken;
     }
 
-    bool OnMouseUpL(const int32_t x, const int32_t z, uint32_t) override { return owner_ && owner_->OnMouseUpL(x, z); }
+    bool OnMouseUpL(const int32_t x, const int32_t z, uint32_t) override
+    {
+        bool taken = false;
+        Guarded("Interaction: mouse up", [&] { taken = owner_ && owner_->OnMouseUpL(x, z); });
+        return taken;
+    }
 
-    bool OnMouseMove(const int32_t x, const int32_t z, uint32_t) override {
+    bool OnMouseMove(const int32_t x, const int32_t z, uint32_t) override
+    {
         if (owner_) {
             owner_->OnMouseMove(x, z);
         }
         return false;
     }
 
-    bool OnMouseExit() override {
+    bool OnMouseExit() override
+    {
         if (owner_) {
             owner_->OnMouseExit();
         }
         return false;
     }
 
-  private:
+private:
     NeighborPicker* owner_;
 };
 
-namespace {
-constexpr float kEdgeStepMetres = 16.0f;
-constexpr float kRegionCellMetres = 1024.0f;
-constexpr uint32_t kTintColor = SC4WorldColor(0.55f, 0.80f, 1.0f, 0.38f);
-constexpr size_t kMeshReserve = 2048;
-constexpr const char* kConfirmPopup = "Leave this city?##SeamlessRegionConfirm";
+namespace
+{
+    constexpr float kEdgeStepMetres = 16.0f;
+    constexpr float kRegionCellMetres = 1024.0f;
+    constexpr uint32_t kTintColor = SC4WorldColor(0.55f, 0.80f, 1.0f, 0.38f);
+    constexpr size_t kMeshReserve = 2048;
+    constexpr const char* kConfirmPopup = "Leave this city?##SeamlessRegionConfirm";
 
-const SC4WorldStyle kBackStyle{.blend = SC4WorldBlend::Alpha, .depth = SC4WorldDepth::HiddenBehindScene};
-const SC4WorldStyle kFrontStyle{.blend = SC4WorldBlend::Alpha, .depth = SC4WorldDepth::AlwaysOnTop};
+    const SC4WorldStyle kBackStyle{.blend = SC4WorldBlend::Alpha, .depth = SC4WorldDepth::HiddenBehindScene};
+    const SC4WorldStyle kFrontStyle{.blend = SC4WorldBlend::Alpha, .depth = SC4WorldDepth::AlwaysOnTop};
 
-uint64_t NowMs() {
-    return static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
-            .count());
+    uint64_t NowMs()
+    {
+        return static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+                .count());
+    }
+
+    bool ImGuiWantsMouse(const ModuleContext& ctx)
+    {
+        return ctx.imgui && ImGui::GetCurrentContext() && ImGui::GetIO().WantCaptureMouse;
+    }
+
+    const char* SizeLabel(const int size)
+    {
+        return size >= 4 ? "Large city" : size >= 2 ? "Medium city" : "Small city";
+    }
 }
-
-bool ImGuiWantsMouse(const ModuleContext& ctx) {
-    return ctx.imgui && ImGui::GetCurrentContext() && ImGui::GetIO().WantCaptureMouse;
-}
-
-const char* SizeLabel(const int size) { return size >= 4 ? "Large city" : size >= 2 ? "Medium city" : "Small city"; }
-} // namespace
 
 NeighborPicker::NeighborPicker() = default;
 NeighborPicker::~NeighborPicker() = default;
 
-bool NeighborPicker::Initialize(const ModuleContext& ctx) {
+bool NeighborPicker::Initialize(const ModuleContext& ctx)
+{
     ctx_ = ctx;
     if (!ctx_.settings || !ctx_.region || !ctx_.cameraReader || !ctx_.switcher || !ctx_.capturer || !ctx_.tileStore) {
         LOG_WARN("Interaction: not active, a foundation object is missing");
@@ -135,7 +158,8 @@ bool NeighborPicker::Initialize(const ModuleContext& ctx) {
     return true;
 }
 
-void NeighborPicker::Shutdown() {
+void NeighborPicker::Shutdown()
+{
     if (cityActive_) {
         OnCityShutdown();
     }
@@ -159,7 +183,8 @@ void NeighborPicker::Shutdown() {
     }
 }
 
-void NeighborPicker::OnCityInit() {
+void NeighborPicker::OnCityInit()
+{
     cityActive_ = true;
     SampleEdges_();
     Rebuild_();
@@ -167,12 +192,14 @@ void NeighborPicker::OnCityInit() {
     if (view && control_ && view->AddPersistentViewInputControl(control_)) {
         controlAdded_ = true;
         LOG_INFO("Interaction: click control added to the city view");
-    } else {
+    }
+    else {
         LOG_WARN("Interaction: could not add the click control to the city view. Clicks on neighbors are off.");
     }
 }
 
-void NeighborPicker::OnCityShutdown() {
+void NeighborPicker::OnCityShutdown()
+{
     if (controlAdded_) {
         if (cISC4View3DWin* view = GameAccess::View3D()) {
             view->RemovePersistentViewInputControl(control_);
@@ -189,12 +216,14 @@ void NeighborPicker::OnCityShutdown() {
     cursorInView_ = false;
 }
 
-bool NeighborPicker::Active_() const {
+bool NeighborPicker::Active_() const
+{
     return initialized_ && cityActive_ && ctx_.settings->showNeighbors && !ctx_.switcher->IsBusy() &&
            !ctx_.capturer->IsRunning() && !(ctx_.batch && ctx_.batch->IsRunning());
 }
 
-const char* NeighborPicker::ClickBlocker_() const {
+const char* NeighborPicker::ClickBlocker_() const
+{
     if (!Active_() || !controlAdded_ || !ctx_.settings->clickToSwitch || ImGuiWantsMouse(ctx_)) {
         return "";
     }
@@ -214,7 +243,8 @@ const char* NeighborPicker::ClickBlocker_() const {
     return nullptr;
 }
 
-void NeighborPicker::SampleEdges_() {
+void NeighborPicker::SampleEdges_()
+{
     cISC4City* city = GameAccess::City();
     const float sizeX = city ? city->SizeX() : 0.0f;
     const float sizeZ = city ? city->SizeZ() : 0.0f;
@@ -259,7 +289,8 @@ void NeighborPicker::SampleEdges_() {
     LOG_DEBUG("Interaction: edge heights sampled, mean {:.1f} m", profile_.mean);
 }
 
-void NeighborPicker::Rebuild_() {
+void NeighborPicker::Rebuild_()
+{
     neighbors_.clear();
     regionGeneration_ = ctx_.region->Generation();
     storeGeneration_ = ctx_.tileStore->Generation();
@@ -315,13 +346,15 @@ void NeighborPicker::Rebuild_() {
     LOG_DEBUG("Interaction: {} neighbor cities, {} with a render", neighbors_.size(), rects.size());
 }
 
-void NeighborPicker::PassCallback_(const DrawServicePass pass, const bool begin, void* userData) {
+void NeighborPicker::PassCallback_(const DrawServicePass pass, const bool begin, void* userData)
+{
     if (pass == DrawServicePass::PreDynamic && begin) {
-        static_cast<NeighborPicker*>(userData)->Tick_();
+        Guarded("Interaction: the draw callback", [&] { static_cast<NeighborPicker*>(userData)->Tick_(); });
     }
 }
 
-void NeighborPicker::Tick_() {
+void NeighborPicker::Tick_()
+{
     if (!initialized_ || !cityActive_) {
         return;
     }
@@ -368,7 +401,8 @@ void NeighborPicker::Tick_() {
                 static_cast<float>(f.zoomIndex), static_cast<float>(f.rotation)};
             if (std::equal(std::begin(key), std::end(key), std::begin(pickKey_))) {
                 hover = hovered_;
-            } else {
+            }
+            else {
                 std::copy(std::begin(key), std::end(key), std::begin(pickKey_));
                 hover = Pick_(cursorX_, cursorZ_);
             }
@@ -381,7 +415,8 @@ void NeighborPicker::Tick_() {
     UpdateLayer_();
 }
 
-int NeighborPicker::Pick_(const int x, const int z) {
+int NeighborPicker::Pick_(const int x, const int z)
+{
     const CityInfo* current = ctx_.region->Current();
     if (!current || !ctx_.cameraReader->Valid()) {
         return -1;
@@ -425,7 +460,8 @@ int NeighborPicker::Pick_(const int x, const int z) {
     return -1;
 }
 
-void NeighborPicker::SetHover_(const int neighbor) {
+void NeighborPicker::SetHover_(const int neighbor)
+{
     if (neighbor == hovered_) {
         return;
     }
@@ -437,7 +473,8 @@ void NeighborPicker::SetHover_(const int neighbor) {
     }
 }
 
-void NeighborPicker::UpdateLayer_() {
+void NeighborPicker::UpdateLayer_()
+{
     if (!ctx_.worldDraw || layer_ == 0) {
         return;
     }
@@ -475,7 +512,8 @@ void NeighborPicker::UpdateLayer_() {
     }
 }
 
-bool NeighborPicker::OnMouseDownL(const int x, const int z) {
+bool NeighborPicker::OnMouseDownL(const int x, const int z)
+{
     press_ = {};
     if (ClickBlocker_() != nullptr || !ctx_.cameraReader->Update() ||
         ctx_.cameraReader->Frame().magnification != 1.0f) {
@@ -489,13 +527,15 @@ bool NeighborPicker::OnMouseDownL(const int x, const int z) {
     return true;
 }
 
-void NeighborPicker::OnMouseMove(const int x, const int z) {
+void NeighborPicker::OnMouseMove(const int x, const int z)
+{
     if (press_.active && InteractionMath::IsDrag(press_.x, press_.z, x, z)) {
         press_.dragged = true;
     }
 }
 
-bool NeighborPicker::OnMouseUpL(const int x, const int z) {
+bool NeighborPicker::OnMouseUpL(const int x, const int z)
+{
     if (!press_.active) {
         return false;
     }
@@ -515,7 +555,8 @@ bool NeighborPicker::OnMouseUpL(const int x, const int z) {
 
 void NeighborPicker::OnMouseExit() { press_ = {}; }
 
-void NeighborPicker::Activate_(const int neighbor) {
+void NeighborPicker::Activate_(const int neighbor)
+{
     const Neighbor& n = neighbors_[neighbor];
     LOG_INFO("Interaction: click on '{}' at cell ({}, {})", n.name, n.cellX, n.cellZ);
     if (!ctx_.switcher->CanSaveCurrentCity()) {
@@ -524,7 +565,8 @@ void NeighborPicker::Activate_(const int neighbor) {
             confirmOpenRequested_ = true;
             lastClick_ = std::format("Asked to leave without saving for {}.", n.name);
             LOG_INFO("Interaction: this city cannot be saved, asking first");
-        } else {
+        }
+        else {
             lastClick_ = "This city cannot be saved and there is no window to confirm. Nothing done.";
             LOG_WARN("Interaction: this city cannot be saved and there is no ImGui to confirm, no switch");
         }
@@ -533,20 +575,23 @@ void NeighborPicker::Activate_(const int neighbor) {
     if (ctx_.switcher->RequestSwitch(n.cellX, n.cellZ)) {
         lastClick_ = std::format("Switching to {}.", n.name);
         LOG_INFO("Interaction: switch to '{}' requested", n.name);
-    } else {
+    }
+    else {
         lastClick_ = std::format("Could not switch to {}: {}", n.name, ctx_.switcher->LastError());
         LOG_WARN("Interaction: switch to '{}' refused: {}", n.name, ctx_.switcher->LastError());
     }
 }
 
-void NeighborPicker::OverlayRender_(void* data) {
+void NeighborPicker::OverlayRender_(void* data)
+{
     auto* self = static_cast<NeighborPicker*>(data);
     if (self->initialized_) {
-        self->DrawOverlay_();
+        Guarded("Interaction: the tooltip", [&] { self->DrawOverlay_(); });
     }
 }
 
-void NeighborPicker::DrawOverlay_() {
+void NeighborPicker::DrawOverlay_()
+{
     if (confirmOpenRequested_) {
         ImGui::OpenPopup(kConfirmPopup);
         confirmOpenRequested_ = false;
@@ -555,7 +600,8 @@ void NeighborPicker::DrawOverlay_() {
         if (confirmNeighbor_ < 0 || confirmNeighbor_ >= static_cast<int>(neighbors_.size()) || !Active_()) {
             confirmNeighbor_ = -1;
             ImGui::CloseCurrentPopup();
-        } else {
+        }
+        else {
             const Neighbor& n = neighbors_[confirmNeighbor_];
             ImGui::TextUnformatted("This city cannot be saved. Leave it without saving?");
             ImGui::Text("You go to %s.", n.name.empty() ? "an unnamed city" : n.name.c_str());
@@ -564,7 +610,8 @@ void NeighborPicker::DrawOverlay_() {
                 if (ctx_.switcher->RequestSwitch(n.cellX, n.cellZ, true)) {
                     lastClick_ = std::format("Switching to {} without saving.", n.name);
                     LOG_INFO("Interaction: switch to '{}' without saving requested", n.name);
-                } else {
+                }
+                else {
                     lastClick_ = std::format("Could not switch to {}: {}", n.name, ctx_.switcher->LastError());
                     LOG_WARN("Interaction: switch to '{}' refused: {}", n.name, ctx_.switcher->LastError());
                 }
@@ -589,7 +636,8 @@ void NeighborPicker::DrawOverlay_() {
     }
 }
 
-void NeighborPicker::DrawTooltip_(const Neighbor& n) {
+void NeighborPicker::DrawTooltip_(const Neighbor& n)
+{
     ImGui::BeginTooltip();
     ImGui::TextUnformatted(n.name.empty() ? "Unnamed city" : n.name.c_str());
     ImGui::TextDisabled("%s", n.sizeLabel);
@@ -599,7 +647,8 @@ void NeighborPicker::DrawTooltip_(const Neighbor& n) {
         if (!blocker) {
             ImGui::TextUnformatted("Click: opens the region view to found this city");
         }
-    } else {
+    }
+    else {
         if (n.hasRender) {
             char age[64];
             const int64_t seconds = (TileStore::NowFileTime() - n.renderTime) / 10'000'000;
@@ -608,7 +657,8 @@ void NeighborPicker::DrawTooltip_(const Neighbor& n) {
             if (n.stale) {
                 ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "Out of date. The city changed after the render.");
             }
-        } else {
+        }
+        else {
             ImGui::TextUnformatted("No render yet");
         }
         if (!blocker) {
@@ -621,7 +671,8 @@ void NeighborPicker::DrawTooltip_(const Neighbor& n) {
     ImGui::EndTooltip();
 }
 
-void NeighborPicker::DrawPanelSection() {
+void NeighborPicker::DrawPanelSection()
+{
     Settings* settings = ctx_.settings;
     bool changed = ImGui::Checkbox("Tint the neighbor under the pointer", &settings->hoverTint);
     changed |= ImGui::Checkbox("Click a neighbor to play it", &settings->clickToSwitch);
@@ -633,11 +684,14 @@ void NeighborPicker::DrawPanelSection() {
     }
     if (!settings->showNeighbors) {
         ImGui::TextDisabled("Turn on the neighbor cities to use this.");
-    } else if (ctx_.capturer->IsRunning()) {
-        ImGui::TextDisabled("Off while a city render runs.");
-    } else if (ctx_.batch && ctx_.batch->IsRunning()) {
+    }
+    else if (ctx_.capturer->IsRunning()) {
+        ImGui::TextDisabled("Off while a render runs.");
+    }
+    else if (ctx_.batch && ctx_.batch->IsRunning()) {
         ImGui::TextDisabled("Off while the region render runs.");
-    } else if (ctx_.switcher->IsBusy()) {
+    }
+    else if (ctx_.switcher->IsBusy()) {
         ImGui::TextDisabled("Off while the city changes.");
     }
     ImGui::Text("Last neighbor under the pointer: %s", lastHovered_.empty() ? "none" : lastHovered_.c_str());

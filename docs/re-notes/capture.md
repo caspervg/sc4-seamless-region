@@ -177,6 +177,36 @@ to. After the move the capture reads the camera (`CameraReader`) and uses the pl
 really gave. It stops when the tile is not inside the viewport and warns once when the view is
 more than 0.05 px off the grid. It waits up to 60 ticks for a screen shake to end.
 
+**Older tiles and meta.json.** The tile grid of a level starts at the projected city bounds,
+which move with the lowest and highest terrain. And a tile that held a building can be empty in
+the next render. Empty tiles are not written, so without care a tile file of an older render
+would stay and be drawn in the wrong place. The capture therefore, at the start of each level:
+waits for the store queue, writes meta.json without that level (`CityMeta::MergeLevels`: the
+levels finished in this run, plus the earlier levels this run has not started), then queues
+`TileStore::DeleteLevel` for the level folder. The store runs its queue in order, so the tiles
+of the new render come after the delete. At the end the capture writes meta.json with every
+level and the new times. meta.json always names only levels that are complete on disk. A render
+that is cancelled or fails keeps its finished levels and the untouched earlier ones, with the
+earlier times (0 for a first render, which counts as out of date).
+
+**What stays out of the tiles.** Neighbor tiles (`NeighborRenderer::SetEnabled(false)`), the
+edge walls (`CameraExtender::SetEdgeWallsHidden(all)`), the hover tint and the map overlay (both
+check `CityCapturer::IsRunning()` themselves, the capture changes no setting for them).
+
+**A save during a render.** The game makes the region picture of the city inside the save,
+with the same renderer. The pre-save and post-save messages are sent, so they bracket the save.
+At pre-save the capture puts the game's clear color and background picture back, at post-save
+it sets its own again (and the render property, which the thumbnail writer turns off). The
+thumbnail writer saves and restores the camera itself, so the render goes on where it was.
+The model maker clears its synchronous flag at post-save: the capture then waits for the
+loader (`ModelsReady_`). Untested in game.
+
+**Restore when the city closes.** OnCityShutdown runs inside PreCityShutdown, a sent message.
+Other listeners (the city view, the model maker) may have reacted already. So the capture then
+only puts back what outlives the city view: the camera module's state (walls, free roam, clear
+color), the neighbor drawing, the render property, the model loading flag and the pause. It
+does not move the camera or change the view level of a city that shuts down.
+
 **Buffers.** Two tile buffers and one read buffer are allocated at Start and freed at the end.
 `TileStore::QueueWrite` keeps the buffer it gets, so each written tile costs one allocation and
 one copy of 1 MB. The store does not hand buffers back, so there is no pool. Empty tiles cost

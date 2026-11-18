@@ -6,8 +6,10 @@
 
 #include <cstdio>
 
+#include "camera/CameraExtender.hpp"
 #include "imgui.h"
 #include "region/RegionIndex.hpp"
+#include "render/NeighborRenderer.hpp"
 #include "store/TileStore.hpp"
 #include "utils/Logger.h"
 
@@ -44,21 +46,8 @@ void TileStore::OnCityInit()
 
 void TileStore::DrawPanelSection()
 {
-    const std::filesystem::path renders = RendersDirectory();
-    if (renders.empty()) {
-        ImGui::TextWrapped("Open a city to see the saved renders of the region.");
-        return;
-    }
-
-    const std::u8string folder = renders.u8string();
-    ImGui::TextWrapped("Renders folder: %s", reinterpret_cast<const char*>(folder.c_str()));
-    if (ImGui::Button("Open folder")) {
-        std::error_code ec;
-        std::filesystem::create_directories(renders, ec);
-        ShellExecuteW(nullptr, L"open", renders.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-    }
-
-    // Rebuild the rows only after a change or when the time is up, never on every frame.
+    // Rebuild the folder text and the rows only after a change or when the time is up, never on
+    // every frame.
     const uint64_t now = GetTickCount64();
     const uint32_t regionGeneration = ctx_.region ? ctx_.region->Generation() : 0;
     const uint32_t storeGeneration = Generation();
@@ -68,6 +57,7 @@ void TileStore::DrawPanelSection()
         rowsRegionGeneration_ = regionGeneration;
         rowsStoreGeneration_ = storeGeneration;
         rowsTick_ = now;
+        rendersText_ = Logger::PathText(RendersDirectory());
         rows_.clear();
         if (ctx_.region) {
             for (const CityInfo& city : ctx_.region->Cities()) {
@@ -88,6 +78,18 @@ void TileStore::DrawPanelSection()
             }
         }
         totalBytes_ = TotalBytes();
+    }
+
+    if (rendersText_.empty()) {
+        ImGui::TextWrapped("Open a city to see the saved renders of the region.");
+        return;
+    }
+    ImGui::TextWrapped("Renders folder: %s", rendersText_.c_str());
+    if (ImGui::Button("Open folder")) {
+        const std::filesystem::path renders = RendersDirectory();
+        std::error_code ec;
+        std::filesystem::create_directories(renders, ec);
+        ShellExecuteW(nullptr, L"open", renders.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     }
 
     char sizeText[32];
@@ -161,7 +163,16 @@ void TileStore::DrawPanelSection()
         ImGui::Text("Delete the renders of \"%s\"?", pendingDelete_.c_str());
         ImGui::TextUnformatted("You can render the city again at any time.");
         if (ImGui::Button("Delete")) {
-            DeleteCity(pendingDelete_);
+            // Wait for the worker, then let the view forget the neighbor and get its wall back.
+            if (DeleteCity(pendingDelete_)) {
+                Flush();
+                if (ctx_.neighborRenderer) {
+                    ctx_.neighborRenderer->InvalidateAll();
+                }
+                if (ctx_.cameraExtender) {
+                    ctx_.cameraExtender->RefreshNeighborWalls();
+                }
+            }
             rowsTick_ = 0;
             pendingDelete_.clear();
             ImGui::CloseCurrentPopup();

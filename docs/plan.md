@@ -73,7 +73,8 @@ never by raw slot.
 
 Messages: PreCityShutdown `0x26D31EC2`, PostCityShutdown `0x26D31EC3`, save
 `0x26C63343`, `0x26C63344`, `0x26C63346`, load `0x26C63340` to `0x26C63342`,
-PostCityInit `0x26D31EC1`.
+PostCityInit `0x26D31EC1`. PreCityShutdown is sent inside CloseCity. PostCityInit is posted
+and arrives after LoadCity returned (`docs/re-notes/switching.md`).
 
 ### Camera
 

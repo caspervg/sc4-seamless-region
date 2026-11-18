@@ -24,7 +24,7 @@ public:
     // Logging
     spdlog::level::level_enum logLevel = spdlog::level::info;
     bool logToFile = true;
-    // Panel
+    // Panel. Ctrl+Shift+F9 shows and hides it at any time (SeamlessPanel::OnRender).
     bool startWindowVisible = true;
 
     // Master switch. When false the plugin creates no modules (takes effect at next start).
@@ -33,7 +33,7 @@ public:
     bool showNeighbors = true;
     // Draw neighbors that are in front of the city (they can hide parts of it).
     bool showFrontNeighbors = true;
-    // Tint the neighbor under the mouse.
+    // Tint the neighbor under the pointer.
     bool hoverTint = true;
     // Click a neighbor to save this city and play the neighbor.
     bool clickToSwitch = true;

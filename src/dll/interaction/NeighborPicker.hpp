@@ -28,8 +28,9 @@
 
 class NeighborPickerControl;
 
-class NeighborPicker final : public Module {
-  public:
+class NeighborPicker final : public Module
+{
+public:
     NeighborPicker();
     ~NeighborPicker() override;
 
@@ -46,8 +47,9 @@ class NeighborPicker final : public Module {
     bool OnMouseUpL(int x, int z);
     void OnMouseExit();
 
-  private:
-    struct Neighbor {
+private:
+    struct Neighbor
+    {
         int cellX = 0, cellZ = 0, sizeX = 1, sizeZ = 1;
         std::string name;
         const char* sizeLabel = "";
@@ -58,7 +60,8 @@ class NeighborPicker final : public Module {
         uint8_t frontMask = 0; // bit r: drawn in front of the current city at rotation r
     };
 
-    struct Press {
+    struct Press
+    {
         bool active = false;
         int x = 0, z = 0;
         int neighbor = -1;

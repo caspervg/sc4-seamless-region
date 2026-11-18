@@ -4,6 +4,7 @@
 #include <cstring>
 #include <utility>
 
+#include "core/Guard.hpp"
 #include "imgui.h"
 #include "public/cIGZS3DCameraService.h"
 #include "public/cIGZWorldDrawService.h"
@@ -56,33 +57,43 @@ SeamlessPanel::SeamlessPanel(Info info, ModuleContext* ctx, const std::vector<Pa
 
 void SeamlessPanel::OnRender()
 {
+    // The ImGui service has no list of panels, so this is the only way to get the window back
+    // after it was closed, or when StartWindowVisible is false. The service calls OnRender on
+    // every frame, also while the window is hidden.
+    if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_F9)) {
+        visible_ = !visible_;
+    }
     if (!visible_) {
         return;
     }
     bool open = visible_;
     ImGui::SetNextWindowSize(ImVec2(560.0f, 520.0f), ImGuiCond_FirstUseEver);
-    if (ImGui::Begin("Seamless Region", &open)) {
-        if (ImGui::BeginTabBar("SeamlessRegionTabs")) {
-            if (ImGui::BeginTabItem("Status")) {
-                DrawStatus_();
-                ImGui::EndTabItem();
+    // The ImGui service calls this from inside the game's frame: no exception may leave it.
+    // After one, ImGui closes the windows and tables that stayed open at the end of the frame.
+    Guarded("The Seamless Region panel", [&] {
+        if (ImGui::Begin("Seamless Region", &open)) {
+            if (ImGui::BeginTabBar("SeamlessRegionTabs")) {
+                if (ImGui::BeginTabItem("Status")) {
+                    DrawStatus_();
+                    ImGui::EndTabItem();
+                }
+                if (info_.enabled && ImGui::BeginTabItem("Tools")) {
+                    DrawTools_();
+                    ImGui::EndTabItem();
+                }
+                if (ImGui::BeginTabItem("Settings")) {
+                    DrawSettings_();
+                    ImGui::EndTabItem();
+                }
+                if (info_.supported && ImGui::BeginTabItem("Diagnostics")) {
+                    DrawDiagnostics_();
+                    ImGui::EndTabItem();
+                }
+                ImGui::EndTabBar();
             }
-            if (info_.enabled && ImGui::BeginTabItem("Tools")) {
-                DrawTools_();
-                ImGui::EndTabItem();
-            }
-            if (ImGui::BeginTabItem("Settings")) {
-                DrawSettings_();
-                ImGui::EndTabItem();
-            }
-            if (info_.supported && ImGui::BeginTabItem("Diagnostics")) {
-                DrawDiagnostics_();
-                ImGui::EndTabItem();
-            }
-            ImGui::EndTabBar();
         }
-    }
-    ImGui::End();
+        ImGui::End();
+    });
     visible_ = open;
 }
 
@@ -90,6 +101,7 @@ void SeamlessPanel::DrawStatus_()
 {
     ImGui::Text("Plugin version: %s", info_.versionLabel.c_str());
     ImGui::Text("Game version: %u", info_.gameVersion);
+    ImGui::TextDisabled("Ctrl+Shift+F9 shows and hides this window.");
     if (!info_.supported) {
         ImGui::TextColored(kBad, "This game version is not supported. The plugin does nothing.");
         ImGui::TextWrapped("Seamless Region works only with SimCity 4 version 1.1.641.");
@@ -122,34 +134,39 @@ void SeamlessPanel::DrawStatus_()
 
     constexpr ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
                                       ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_Resizable;
-    if (ImGui::BeginTable("Cities", 6, flags, ImVec2(0.0f, ImGui::GetTextLineHeightWithSpacing() * 12.0f))) {
+    // The render state of each city is in Tools, Store.
+    if (ImGui::BeginTable("Cities", 5, flags, ImVec2(0.0f, ImGui::GetTextLineHeightWithSpacing() * 12.0f))) {
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableSetupColumn("Name");
         ImGui::TableSetupColumn("Cell");
         ImGui::TableSetupColumn("Size");
         ImGui::TableSetupColumn("Founded");
-        ImGui::TableSetupColumn("Render");
         ImGui::TableSetupColumn("Key");
         ImGui::TableHeadersRow();
-        for (const CityInfo& city : region->Cities()) {
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn();
-            if (city.isCurrent) {
-                ImGui::TextColored(kGood, "%s (you play here)", city.name.c_str());
+        // Only the rows on screen: a region can have hundreds of cities.
+        const std::vector<CityInfo>& cities = region->Cities();
+        ImGuiListClipper clipper;
+        clipper.Begin(static_cast<int>(cities.size()));
+        while (clipper.Step()) {
+            for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
+                const CityInfo& city = cities[static_cast<size_t>(row)];
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                if (city.isCurrent) {
+                    ImGui::TextColored(kGood, "%s (you play here)", city.name.c_str());
+                }
+                else {
+                    ImGui::TextUnformatted(city.name.c_str());
+                }
+                ImGui::TableNextColumn();
+                ImGui::Text("%d, %d", city.cellX, city.cellZ);
+                ImGui::TableNextColumn();
+                ImGui::Text("%d x %d", city.sizeX, city.sizeZ);
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(city.founded ? "Yes" : "No");
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(city.key.c_str());
             }
-            else {
-                ImGui::TextUnformatted(city.name.c_str());
-            }
-            ImGui::TableNextColumn();
-            ImGui::Text("%d, %d", city.cellX, city.cellZ);
-            ImGui::TableNextColumn();
-            ImGui::Text("%d x %d", city.sizeX, city.sizeZ);
-            ImGui::TableNextColumn();
-            ImGui::TextUnformatted(city.founded ? "Yes" : "No");
-            ImGui::TableNextColumn();
-            ImGui::TextDisabled("Unknown");
-            ImGui::TableNextColumn();
-            ImGui::TextUnformatted(city.key.c_str());
         }
         ImGui::EndTable();
     }
@@ -197,7 +214,7 @@ void SeamlessPanel::DrawSettings_()
     HelpMarker("Draw the cities around the city you play.");
     changed |= ImGui::Checkbox("Show neighbors in front", &s->showFrontNeighbors);
     HelpMarker("Also draw the neighbors between the camera and your city. They can hide the edge of your city.");
-    changed |= ImGui::Checkbox("Tint the neighbor under the mouse", &s->hoverTint);
+    changed |= ImGui::Checkbox("Tint the neighbor under the pointer", &s->hoverTint);
     changed |= ImGui::Checkbox("Click a neighbor to play it", &s->clickToSwitch);
     HelpMarker("The game saves your city first, if saving is allowed.");
     changed |= ImGui::Checkbox("Render the city after each save", &s->renderOnSave);

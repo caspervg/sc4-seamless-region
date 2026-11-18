@@ -150,6 +150,16 @@ void RegionIndex::Clear()
     ++generation_;
 }
 
+void RegionIndex::ClearCurrent()
+{
+    if (currentIndex_ < 0) {
+        return;
+    }
+    cities_[static_cast<size_t>(currentIndex_)].isCurrent = false;
+    currentIndex_ = -1;
+    ++generation_;
+}
+
 const std::vector<CityInfo>& RegionIndex::Cities() const { return cities_; }
 
 const CityInfo* RegionIndex::Current() const

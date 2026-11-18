@@ -7,35 +7,39 @@
 
 using namespace InteractionMath;
 
-namespace {
+namespace
+{
 // A medium city (2048 m) with a north edge that rises 1 m per sample and flat other edges.
-EdgeProfile SlopedProfile() {
-    EdgeProfile p;
-    p.Reset(2048.0f, 2048.0f, 16.0f, 250.0f);
-    for (size_t i = 0; i < p.north.size(); ++i) {
-        p.north[i] = 250.0f + static_cast<float>(i);
-    }
-    p.west.assign(p.west.size(), 300.0f);
+    EdgeProfile SlopedProfile()
+    {
+        EdgeProfile p;
+        p.Reset(2048.0f, 2048.0f, 16.0f, 250.0f);
+        for (size_t i = 0; i < p.north.size(); ++i) {
+            p.north[i] = 250.0f + static_cast<float>(i);
+        }
+        p.west.assign(p.west.size(), 300.0f);
     // A corner is one terrain vertex, so both edges that meet there have its height.
-    p.west[0] = p.north[0];
-    p.east[0] = p.north.back();
-    p.UpdateMean();
-    return p;
+        p.west[0] = p.north[0];
+        p.east[0] = p.north.back();
+        p.UpdateMean();
+        return p;
+    }
+
+    CityInfo City(const int x, const int z, const int size, const bool current = false)
+    {
+        CityInfo c;
+        c.cellX = x;
+        c.cellZ = z;
+        c.sizeX = size;
+        c.sizeZ = size;
+        c.founded = true;
+        c.isCurrent = current;
+        return c;
+    }
 }
 
-CityInfo City(const int x, const int z, const int size, const bool current = false) {
-    CityInfo c;
-    c.cellX = x;
-    c.cellZ = z;
-    c.sizeX = size;
-    c.sizeZ = size;
-    c.founded = true;
-    c.isCurrent = current;
-    return c;
-}
-} // namespace
-
-TEST_CASE(EdgeHeightIsTheNearestEdgeSample) {
+TEST_CASE(EdgeHeightIsTheNearestEdgeSample)
+{
     const EdgeProfile p = SlopedProfile();
     // North of the city: the north edge at the same x, between samples it is linear.
     CHECK_NEAR(p.Height(32.0f, -500.0f), 252.0f, 1e-4);
@@ -53,7 +57,8 @@ TEST_CASE(EdgeHeightIsTheNearestEdgeSample) {
     CHECK_NEAR(p.Height(1000.0f, 5.0f), p.Height(1000.0f, -5.0f), 1e-4);
 }
 
-TEST_CASE(PickGroundFindsThePointOnTheEdgeSurface) {
+TEST_CASE(PickGroundFindsThePointOnTheEdgeSurface)
+{
     const EdgeProfile p = SlopedProfile();
     for (int rotation = 0; rotation < 4; ++rotation) {
         for (int zoom = 0; zoom < 5; ++zoom) {
@@ -73,7 +78,8 @@ TEST_CASE(PickGroundFindsThePointOnTheEdgeSurface) {
     }
 }
 
-TEST_CASE(HoverOnlyCountsNeighborsOutsideTheCity) {
+TEST_CASE(HoverOnlyCountsNeighborsOutsideTheCity)
+{
     // Current medium city at cells (2, 2) to (4, 4). A large city north, a small one east.
     std::vector<CityInfo> cities = {City(0, -2, 4) /*z -2..2*/, City(2, 2, 2, true), City(4, 2, 1)};
     RegionLayout::AssignKeys(cities);
@@ -92,14 +98,16 @@ TEST_CASE(HoverOnlyCountsNeighborsOutsideTheCity) {
     CHECK(NeighborAt(cities, *current, 500.0f, 2100.0f) == nullptr);
 }
 
-TEST_CASE(DragThresholdMatchesTheGame) {
+TEST_CASE(DragThresholdMatchesTheGame)
+{
     CHECK(!IsDrag(100, 100, 100, 100));
     CHECK(!IsDrag(100, 100, 103, 97));
     CHECK(IsDrag(100, 100, 104, 100));
     CHECK(IsDrag(100, 100, 100, 96));
 }
 
-TEST_CASE(FootprintFollowsTheEdgeAndSkipsTheCity) {
+TEST_CASE(FootprintFollowsTheEdgeAndSkipsTheCity)
+{
     const EdgeProfile p = SlopedProfile();
     // A large neighbor north-west that covers the north-west corner area and half of the
     // north band: x -2048..2048, z -4096..0.
@@ -124,7 +132,8 @@ TEST_CASE(FootprintFollowsTheEdgeAndSkipsTheCity) {
     CHECK(vertices.empty());
 }
 
-TEST_CASE(RenderAgeTextIsFriendly) {
+TEST_CASE(RenderAgeTextIsFriendly)
+{
     char text[64];
     RenderAgeText(10, text, sizeof(text));
     CHECK(std::strcmp(text, "Rendered just now") == 0);

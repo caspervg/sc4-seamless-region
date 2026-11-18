@@ -563,3 +563,66 @@ TEST_CASE(StoreHasTileAndReadTileAreSafeWhileWriting)
     }
     CHECK(f.store.FailedWrites() == 0);
 }
+
+TEST_CASE(StoreDeleteLevelRemovesOnlyThatLevelInQueueOrder)
+{
+    Fixture f(L"level");
+    const TileKey old0 = Key("City", 1, 2, 0, 0);
+    const TileKey old1 = Key("City", 1, 2, 7, 3);
+    const TileKey otherZoom = Key("City", 1, 3, 0, 0);
+    const TileKey otherRotation = Key("City", 2, 2, 0, 0);
+    const TileKey otherCity = Key("Town", 1, 2, 0, 0);
+    for (const TileKey& key : {old0, old1, otherZoom, otherRotation, otherCity}) {
+        CHECK(f.store.QueueWrite(key, GradientTile(16, 16), 16, 16));
+    }
+    f.store.Flush();
+    const uint64_t before = f.store.CityBytes("City").value_or(0);
+
+    // A new render of the level: its older tiles go, the tile queued after the delete stays.
+    const TileKey fresh = Key("City", 1, 2, 4, 4);
+    CHECK(f.store.DeleteLevel("City", 1, 2));
+    CHECK(f.store.QueueWrite(fresh, GradientTile(16, 16), 16, 16));
+    f.store.Flush();
+    CHECK(!f.store.HasTile(old0) && !fs::exists(f.store.TilePath(old0)));
+    CHECK(!f.store.HasTile(old1) && !fs::exists(f.store.TilePath(old1)));
+    CHECK(f.store.HasTile(fresh) && fs::exists(f.store.TilePath(fresh)));
+    CHECK(f.store.HasTile(otherZoom) && f.store.HasTile(otherRotation) && f.store.HasTile(otherCity));
+    // Tiles of the same size: the city had four and has three now, plus one of the other city.
+    CHECK(before > 0 && before % 4 == 0);
+    CHECK(f.store.CityBytes("City").value_or(0) == before / 4 * 3);
+    CHECK(f.store.TotalBytes() == before);
+
+    // A level with no folder, and bad arguments.
+    CHECK(f.store.DeleteLevel("City", 3, 0));
+    f.store.Flush();
+    CHECK(!f.store.DeleteLevel("City", 4, 0));
+    CHECK(!f.store.DeleteLevel("a/b", 0, 0));
+}
+
+TEST_CASE(MetaMergeLevelsKeepsOnlyWhatIsOnDisk)
+{
+    using Level = CityRenderMeta::Level;
+    const std::vector<Level> earlier = {{0, 0, 1.0f, 1.0f, 2, 2}, {0, 1, 2.0f, 2.0f, 3, 3}, {1, 0, 3.0f, 3.0f, 4, 4}};
+    // This run finished r0z0 again with a new grid and is in the middle of r0z1. r1z0 is not
+    // started yet, r2z0 is new.
+    const std::vector<Level> rendered = {{0, 0, -5.0f, -5.0f, 6, 6}, {2, 0, 9.0f, 9.0f, 1, 1}};
+    const std::vector<Level> dropped = {{0, 1, 0.0f, 0.0f, 0, 0}};
+    const std::vector<Level> merged = CityMeta::MergeLevels(earlier, rendered, dropped);
+    CHECK(merged.size() == 3);
+    const auto find = [&](const int rotation, const int zoom) -> const Level* {
+        for (const Level& level : merged) {
+            if (level.rotation == rotation && level.zoom == zoom) {
+                return &level;
+            }
+        }
+        return nullptr;
+    };
+    CHECK(find(0, 0) && find(0, 0)->originX == -5.0f && find(0, 0)->tilesX == 6);  // the new one
+    CHECK(!find(0, 1));                                                              // being replaced
+    CHECK(find(1, 0) && find(1, 0)->tilesX == 4);                                    // untouched
+    CHECK(find(2, 0) != nullptr);
+    CHECK(CityMeta::MergeLevels({}, {}, dropped).empty());
+    // A meta.json without levels is valid: the first render of a city that was cancelled.
+    CityRenderMeta empty;
+    CHECK(CityMeta::Parse(CityMeta::ToJson(empty)).has_value());
+}

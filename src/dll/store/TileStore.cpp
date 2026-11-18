@@ -287,6 +287,24 @@ namespace CityMeta
         }
         return saveFileTime != 0 && saveFileTime != meta->saveFileTime;
     }
+
+    std::vector<CityRenderMeta::Level> MergeLevels(const std::vector<CityRenderMeta::Level>& earlier,
+                                                   const std::vector<CityRenderMeta::Level>& rendered,
+                                                   const std::vector<CityRenderMeta::Level>& dropped)
+    {
+        const auto has = [](const std::vector<CityRenderMeta::Level>& levels, const CityRenderMeta::Level& level) {
+            return std::ranges::any_of(levels, [&level](const CityRenderMeta::Level& l) {
+                return l.rotation == level.rotation && l.zoom == level.zoom;
+            });
+        };
+        std::vector<CityRenderMeta::Level> merged = rendered;
+        for (const CityRenderMeta::Level& old : earlier) {
+            if (!has(rendered, old) && !has(dropped, old)) {
+                merged.push_back(old);
+            }
+        }
+        return merged;
+    }
 }
 
 // ---- helpers ---------------------------------------------------------------------------------
@@ -687,6 +705,18 @@ bool TileStore::DeleteCity(const std::string& cityKey)
     return Enqueue(std::move(job), false);
 }
 
+bool TileStore::DeleteLevel(const std::string& cityKey, const int rotation, const int zoom)
+{
+    Job job;
+    job.type = Job::Type::DeleteLevel;
+    job.key.cityKey = cityKey;
+    job.key.rotation = rotation;
+    job.key.zoom = zoom;
+    bool valid = false;
+    PackKey(job.key, valid);
+    return valid && SafeName(cityKey) && Enqueue(std::move(job), false);
+}
+
 void TileStore::Flush()
 {
     {
@@ -730,6 +760,9 @@ void TileStore::WorkerMain()
                 break;
             case Job::Type::DeleteCity:
                 ProcessDelete(job.cityKey);
+                break;
+            case Job::Type::DeleteLevel:
+                ProcessDeleteLevel(job.key);
                 break;
             case Job::Type::Scan:
                 ProcessScan();
@@ -839,6 +872,38 @@ void TileStore::ProcessDelete(const std::string& cityKey)
     }
     else {
         LOG_INFO("Store: deleted the renders of '{}', {} files", cityKey, removed);
+    }
+}
+
+void TileStore::ProcessDeleteLevel(const TileKey& level)
+{
+    const fs::path renders = RendersDirectory();
+    if (renders.empty()) {
+        return;
+    }
+    EnsureIndexed(level.cityKey);
+    std::error_code ec;
+    fs::remove_all(TilePathIn(renders, level).parent_path(), ec);
+    {
+        std::unique_lock lock(mutex_);
+        const auto it = index_.find(level.cityKey);
+        if (renders == rendersDir_ && it != index_.end()) {
+            // Rotation and zoom are the low five bits of a packed tile key.
+            constexpr uint64_t kLevelBits = 0x1f;
+            const uint64_t wanted = Pack(level.rotation, level.zoom, 0, 0);
+            CityIndex& city = it->second;
+            std::erase_if(city.tiles, [&](const auto& tile) {
+                if ((tile.first & kLevelBits) != wanted) {
+                    return false;
+                }
+                city.bytes -= tile.second;
+                return true;
+            });
+            ++generation_;
+        }
+    }
+    if (ec) {
+        LOG_WARN("Store: deleting r{}z{} of '{}' failed: {}", level.rotation, level.zoom, level.cityKey, ec.message());
     }
 }
 

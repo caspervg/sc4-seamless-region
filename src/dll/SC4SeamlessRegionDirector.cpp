@@ -8,6 +8,7 @@
 #include "cIGZFrameWork.h"
 #include "cIGZMessage2.h"
 #include "cIGZMessageServer2.h"
+#include "core/Guard.hpp"
 #include "core/Hooking.hpp"
 #include "core/IdleScheduler.hpp"
 #include "public/ImGuiPanelAdapter.h"
@@ -49,8 +50,9 @@ namespace
     constexpr uint32_t kPanelId = 0x57F1F26Bu;
     constexpr auto kSettingsFileName = "SC4SeamlessRegion.ini";
 
+    // Runs one lifecycle step of a module. Returns what the step returns, false when it threw.
     template <typename Fn>
-    bool Guarded(const char* moduleName, const char* step, Fn&& fn)
+    bool ModuleCall(const char* moduleName, const char* step, Fn&& fn)
     {
         try {
             return fn();
@@ -161,6 +163,11 @@ bool SC4SeamlessRegionDirector::PostAppShutdown()
 
     UnregisterMessages_();
     if (cityOpen_) {
+        // The game closes the city (and sends kPreCityShutdown) before this point. If it did
+        // not, the city view may be gone already: hide it from the modules first, so they
+        // only drop their own state.
+        LOG_WARN("The game shut down with a city still open");
+        GameAccess::OnCityShutdown();
         OnPreCityShutdown_();
     }
     ShutdownModules_();
@@ -197,22 +204,32 @@ bool SC4SeamlessRegionDirector::DoMessage(cIGZMessage2* pMsg)
     if (!pMsg) {
         return true;
     }
+    // The game calls this from its message servers: no exception may leave it.
     const uint32_t id = pMsg->GetType();
+    const auto dispatch = [&] { Guarded("A message handler", [&] { messages_.Dispatch(id, pMsg); }); };
     if (id == Messages::kPostCityInit) {
         OnPostCityInit_();
     }
     else if (id == Messages::kPreCityShutdown) {
         // Subscribers first, while the modules still have their city state.
-        messages_.Dispatch(id, pMsg);
+        dispatch();
         OnPreCityShutdown_();
         return true;
     }
-    messages_.Dispatch(id, pMsg);
+    dispatch();
     return true;
 }
 
 void SC4SeamlessRegionDirector::OnPostCityInit_()
 {
+    // kPostCityInit is posted, not sent: it arrives on a later message pump, after LoadCity
+    // (and a switch task) returned. PartialCloseCity pumps the queues before it sends
+    // kPreCityShutdown, so the message normally comes while its city is still open. If the
+    // city is gone anyway, the modules must not start on it.
+    if (!GameAccess::City()) {
+        LOG_WARN("PostCityInit came without a city. The modules stay off until the next city load.");
+        return;
+    }
     cityOpen_ = true;
     GameAccess::OnCityInit();
     if (region_) {
@@ -220,7 +237,7 @@ void SC4SeamlessRegionDirector::OnPostCityInit_()
     }
     for (const PanelModule& m : panelModules_) {
         if (m.active) {
-            Guarded(m.module->Name(), "OnCityInit", [&] {
+            ModuleCall(m.module->Name(), "OnCityInit", [&] {
                 m.module->OnCityInit();
                 return true;
             });
@@ -232,13 +249,17 @@ void SC4SeamlessRegionDirector::OnPreCityShutdown_()
 {
     for (const PanelModule& m : std::views::reverse(panelModules_)) {
         if (m.active) {
-            Guarded(m.module->Name(), "OnCityShutdown", [&] {
+            ModuleCall(m.module->Name(), "OnCityShutdown", [&] {
                 m.module->OnCityShutdown();
                 return true;
             });
         }
     }
     GameAccess::OnCityShutdown();
+    // RegionIndex::Current() must not name the closed city until the next kPostCityInit.
+    if (region_) {
+        region_->ClearCurrent();
+    }
     cityOpen_ = false;
 }
 
@@ -288,7 +309,7 @@ void SC4SeamlessRegionDirector::CreateModules_()
 
     int active = 0;
     for (PanelModule& m : panelModules_) {
-        m.active = Guarded(m.module->Name(), "Initialize", [&] { return m.module->Initialize(ctx_); });
+        m.active = ModuleCall(m.module->Name(), "Initialize", [&] { return m.module->Initialize(ctx_); });
         if (m.active) {
             ++active;
             LOG_INFO("{}: initialized", m.module->Name());
@@ -304,7 +325,7 @@ void SC4SeamlessRegionDirector::ShutdownModules_()
 {
     // Every module gets Shutdown, also when Initialize failed, newest first.
     for (const PanelModule& m : std::views::reverse(panelModules_)) {
-        Guarded(m.module->Name(), "Shutdown", [&] {
+        ModuleCall(m.module->Name(), "Shutdown", [&] {
             m.module->Shutdown();
             return true;
         });
@@ -329,8 +350,9 @@ void SC4SeamlessRegionDirector::RegisterPanel_()
     panel_ = std::make_unique<SeamlessPanel>(std::move(info), &ctx_, &panelModules_);
     panel_->SetVisible(settings_.startWindowVisible);
 
-    const ImGuiPanelDesc desc =
-        ImGuiPanelAdapter<SeamlessPanel>::MakeDesc(panel_.get(), kPanelId, 100, settings_.startWindowVisible);
+    // Always visible for the service, so the panel gets its render call on every frame and can
+    // watch its own show and hide key. The panel draws nothing while it is hidden.
+    const ImGuiPanelDesc desc = ImGuiPanelAdapter<SeamlessPanel>::MakeDesc(panel_.get(), kPanelId, 100, true);
     panelRegistered_ = ctx_.imgui->RegisterPanel(desc);
     if (panelRegistered_) {
         LOG_INFO("Registered the Seamless Region panel");
@@ -381,10 +403,10 @@ void SC4SeamlessRegionDirector::InitializeLogger_()
     const auto pluginsPath = GetUserPluginsPath_();
     const auto settingsPath = pluginsPath / kSettingsFileName;
     // A console-only logger first, so Load can report problems.
-    Logger::Initialize("SC4SeamlessRegion", pluginsPath.parent_path().string(), false);
+    Logger::Initialize("SC4SeamlessRegion", pluginsPath.parent_path(), false);
     settings_.Load(settingsPath);
     Logger::Shutdown();
-    Logger::Initialize("SC4SeamlessRegion", pluginsPath.parent_path().string(), settings_.logToFile);
+    Logger::Initialize("SC4SeamlessRegion", pluginsPath.parent_path(), settings_.logToFile);
     Logger::SetLevel(settings_.logLevel);
-    LOG_INFO("Using settings file: {}", settingsPath.string());
+    LOG_INFO("Using settings file: {}", Logger::PathText(settingsPath));
 }

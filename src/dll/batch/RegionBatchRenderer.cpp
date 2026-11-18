@@ -12,6 +12,7 @@
 #include "GZServPtrs.h"
 #include "capture/SnapshotReader.hpp"
 #include "cISC4Simulator.h"
+#include "core/Guard.hpp"
 #include "core/IdleScheduler.hpp"
 #include "core/Messages.hpp"
 #include "imgui.h"
@@ -35,8 +36,8 @@ namespace
 
     // A switch blocks while the city loads. A large city takes a minute or two.
     constexpr auto kSwitchTimeout = std::chrono::minutes(5);
-    // Ticks and time in a city before its render starts. More than the 10 ticks of the
-    // capture's render on save, so that render starts (and is taken over) before ours.
+    // Ticks and time in a city before its render starts, so the game finishes the work it
+    // posts at a city load. Render on save never runs during a batch (CityCapturer).
     constexpr int kSettleTicks = 30;
     constexpr auto kSettleTime = std::chrono::seconds(3);
     // The render of a city shows no progress for this long: it is cancelled.
@@ -52,7 +53,10 @@ namespace
             : owner_(owner)
         {
         }
-        void OnRender() override { owner_->DrawWindow(); }
+        void OnRender() override
+        {
+            Guarded("Batch: the progress window", [this] { owner_->DrawWindow(); });
+        }
 
     private:
         RegionBatchRenderer* owner_;
@@ -144,18 +148,21 @@ void RegionBatchRenderer::Shutdown()
     initialized_ = false;
 }
 
+// PostCityInit is posted: this runs on a message pump after the switch task has ended.
 void RegionBatchRenderer::OnCityInit()
 {
     if (running_) {
-        // Paused from the start: the simulation must not change the city before its render.
+        // Paused as soon as the modules see the city: the simulation must not change it
+        // before its render.
         pause_.emplace(false, true, true, true);
     }
 }
 
 void RegionBatchRenderer::OnCityShutdown()
 {
-    // Inside the switch: the switch saved the city already (it saves before CloseCity), with
-    // the game still paused. The pause ends here while the city and its clock still exist.
+    // PreCityShutdown is sent, so this runs inside CloseCity, inside the switch task. The
+    // switch saved the city already (it saves before CloseCity), with the game still paused.
+    // The pause ends here while the city and its clock still exist.
     pause_.reset();
     cityReady_ = false;
     if (running_ && phase_ != Phase::Switching && phase_ != Phase::Return) {
@@ -488,21 +495,13 @@ void RegionBatchRenderer::StepSettle_()
     lastDone_ = -1;
     lastProgress_ = Clock::now();
     lastProgressRead_ = Clock::time_point{};
-    if (ctx_.capturer->IsRunning()) {
-        // A render of this city started on its own (render on save). It is the same full
-        // render: wait for it instead of starting another.
-        Log_(std::format("A render of '{}' runs already, the batch waits for it", current_.name));
-        phase_ = Phase::Capture;
-        return;
-    }
-    if (++settleTicks_ < kSettleTicks || Clock::now() - phaseStart_ < kSettleTime) {
+    // Nothing else starts a render while the batch runs. If one runs anyway, wait for its
+    // end: the batch only counts a render it started itself.
+    if (ctx_.capturer->IsRunning() || ++settleTicks_ < kSettleTicks || Clock::now() - phaseStart_ < kSettleTime) {
         return;
     }
     phase_ = Phase::Capture;
     if (!ctx_.capturer->Start(CaptureRequest())) {
-        if (ctx_.capturer->IsRunning()) {
-            return;  // someone else's render, as above
-        }
         const std::string error = ctx_.capturer->Progress().error;
         BatchQueue::Fail(run_, current_, "The render did not start: " + (error.empty() ? "no reason given." : error));
         Log_(std::format("Failed '{}': {}", current_.name, run_.failed.back().reason));

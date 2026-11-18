@@ -245,7 +245,10 @@ namespace GameAddresses
     // -------------------------------------------------------------------------------------
     namespace GDriver
     {
-        constexpr uintptr_t kDX7CopyColorBuffer = 0x008eb340;
+        // Not a function in the Ghidra database, read from the bytes (docs/re-notes/capture.md).
+        constexpr uintptr_t kDX7CopyColorBuffer = 0x00883950;
+        // The software driver. docs/plan.md calls this one the DX7 driver.
+        constexpr uintptr_t kSoftwareCopyColorBuffer = 0x008eb340;
         constexpr uintptr_t kOpenGLCopyColorBuffer = 0x0087d880;
         constexpr uint32_t kCopyColorBufferSlot = 0x0c;
     }

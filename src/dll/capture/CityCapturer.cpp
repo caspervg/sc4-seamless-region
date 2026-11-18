@@ -19,6 +19,7 @@
 #include "capture/CameraAdapter.hpp"
 #include "capture/CaptureAddresses.hpp"
 #include "capture/ModelLoadMonitor.hpp"
+#include "batch/RegionBatchRenderer.hpp"
 #include "capture/SnapshotReader.hpp"
 #include "core/GameAddresses.hpp"
 #include "core/IdleScheduler.hpp"
@@ -144,6 +145,7 @@ bool CityCapturer::Initialize(const ModuleContext& ctx)
         return false;
     }
     if (ctx_.messages) {
+        preSaveToken_ = ctx_.messages->Subscribe(Messages::kPreSave, [this](cIGZMessage2*) { OnSaveBegin_(); });
         saveToken_ = ctx_.messages->Subscribe(Messages::kPostSave, [this](cIGZMessage2*) { OnSaved_(); });
     }
     return true;
@@ -151,13 +153,16 @@ bool CityCapturer::Initialize(const ModuleContext& ctx)
 
 void CityCapturer::Shutdown()
 {
+    CancelRenderOnSave_();
     if (phase_ != Phase::Idle) {
         End_(false, "Stopped", "The game closed during the render.", true);
     }
-    if (saveToken_ && ctx_.messages) {
+    if (ctx_.messages) {
         ctx_.messages->Unsubscribe(saveToken_);
+        ctx_.messages->Unsubscribe(preSaveToken_);
     }
     saveToken_ = 0;
+    preSaveToken_ = 0;
     onFinished_ = nullptr;
 }
 
@@ -165,6 +170,9 @@ void CityCapturer::OnCityInit() {}
 
 void CityCapturer::OnCityShutdown()
 {
+    // A save that waits for its render belongs to this city. A city switch saves and then
+    // closes the city in one task: without this the render would start in the next city.
+    CancelRenderOnSave_();
     if (phase_ != Phase::Idle) {
         End_(false, "Stopped", "The city closed during the render.", true);
     }
@@ -235,8 +243,8 @@ bool CityCapturer::Begin_(const bool testTile, const CaptureRequest& request)
         if (!current || current->key.empty()) {
             return refuse("This city is not in the region list.");
         }
-        if (!ctx_.tileStore) {
-            return refuse("The tile store is not available.");
+        if (!ctx_.tileStore || ctx_.tileStore->RendersDirectory().empty()) {
+            return refuse("The folder for the renders of this region is not known.");
         }
     }
     cityKey_ = current ? current->key : std::string();
@@ -314,6 +322,7 @@ bool CityCapturer::Begin_(const bool testTile, const CaptureRequest& request)
 
     saved_ = SavedState();
     cancelRequested_ = false;
+    saveInsideRender_ = false;
     calibrationRetried_ = false;
     waiting_ = false;
     tileWaitTimedOut_ = false;
@@ -412,6 +421,7 @@ bool CityCapturer::Step_()
             End_(false, "Cancelled", "The render was cancelled.", false);
             return false;
         }
+        ResumeAfterSave_();
         bool more = false;
         switch (phase_) {
         case Phase::Prepare: more = StepPrepare_(); break;
@@ -455,12 +465,6 @@ bool CityCapturer::StepPrepare_()
         saved_.neighborsBefore = CameraAdapter::NeighborsEnabled(ctx_.neighborRenderer);
         ctx_.neighborRenderer->SetEnabled(false);
         saved_.neighborsOff = true;
-    }
-    if (ctx_.settings) {
-        saved_.hoverTint = ctx_.settings->hoverTint;
-        saved_.hoverTintSaved = true;
-        ctx_.settings->hoverTint = false;
-        ctx_.settings->MarkChanged();
     }
 
     // Free roam: the view target of an edge tile lies outside the city.
@@ -641,9 +645,19 @@ bool CityCapturer::StepLevelWait_()
     }
     phase_ = Phase::Tile;
     if (tx_ < 0) {
-        LOG_INFO("Capture: rotation {} zoom {}: {} tiles in a grid of {} x {}", levels_[levelIndex_].rotation,
-                 levels_[levelIndex_].zoom + 1, levels_[levelIndex_].tiles, levels_[levelIndex_].grid.tilesX,
-                 levels_[levelIndex_].grid.tilesY);
+        Level& level = levels_[levelIndex_];
+        LOG_INFO("Capture: rotation {} zoom {}: {} tiles in a grid of {} x {}", level.rotation, level.zoom + 1,
+                 level.tiles, level.grid.tilesX, level.grid.tilesY);
+        if (!testTile_) {
+            // The tile grid moves with the terrain heights, and a tile that was full can be
+            // empty now. So the older tiles of this level go first, and meta.json stops
+            // naming the level until its new tiles are complete.
+            level.started = true;
+            if (!WriteMeta_(false)) {
+                return Fail_("The render information (meta.json) could not be written.");
+            }
+            ctx_.tileStore->DeleteLevel(cityKey_, level.rotation, level.zoom);
+        }
         if (!NextTile_()) {
             NextLevel_();
         }
@@ -834,51 +848,61 @@ bool CityCapturer::StepFinish_()
         End_(true, "Done", std::string(), false);
         return false;
     }
+    if (std::ranges::none_of(levels_, [](const Level& level) { return level.captured; })) {
+        return Fail_("No zoom or rotation could be rendered.");
+    }
+    if (!WriteMeta_(true)) {
+        return Fail_("The render information (meta.json) could not be written.");
+    }
+    CameraAdapter::RefreshNeighborWalls(ctx_.cameraExtender);
+    End_(true, "Done", std::string(), false);
+    return false;
+}
+
+// meta.json always tells what is on disk: the levels this run has finished, and the levels of
+// an earlier render that this run has not started yet. A level that is being rendered is left
+// out. So a render that is cancelled or fails keeps every complete level and never leaves
+// tiles of two renders under one level.
+bool CityCapturer::WriteMeta_(const bool final)
+{
+    // Tiles first, then meta.json: a meta.json on disk means the tiles it names are there.
+    ctx_.tileStore->Flush();
+
     CityRenderMeta meta;
     meta.cellX = cellX_;
     meta.cellZ = cellZ_;
     meta.sizeX = sizeX_;
     meta.sizeZ = sizeZ_;
     meta.tileSize = tileSize_;
-    if (!CameraAdapter::StoreTimes(savePath_, meta.saveFileTime, meta.renderTime)) {
-        meta.saveFileTime = SaveFileTime(savePath_);
-        meta.renderTime = NowFileTime();
-    }
+    const std::optional<CityRenderMeta> earlier = ctx_.tileStore->LoadMeta(cityKey_);
+    const bool usable = earlier && earlier->tileSize == meta.tileSize && earlier->formatVersion == meta.formatVersion;
+
+    std::vector<CityRenderMeta::Level> rendered, dropped;
     for (const Level& level : levels_) {
-        if (level.captured) {
-            CityRenderMeta::Level out;
-            out.rotation = level.rotation;
-            out.zoom = level.zoom;
-            out.originX = level.grid.originCanvas.fX;
-            out.originY = level.grid.originCanvas.fY;
-            out.tilesX = level.grid.tilesX;
-            out.tilesY = level.grid.tilesY;
-            meta.levels.push_back(out);
+        if (level.captured || level.started) {
+            (level.captured ? rendered : dropped)
+                .push_back({level.rotation, level.zoom, level.grid.originCanvas.fX, level.grid.originCanvas.fY,
+                            level.grid.tilesX, level.grid.tilesY});
         }
     }
-    if (meta.levels.empty()) {
-        return Fail_("No zoom or rotation could be rendered.");
-    }
-    // A render of some levels keeps the other levels of an earlier render.
-    if (const std::optional<CityRenderMeta> earlier = ctx_.tileStore->LoadMeta(cityKey_);
-        earlier && earlier->tileSize == meta.tileSize && earlier->formatVersion == meta.formatVersion) {
-        for (const CityRenderMeta::Level& old : earlier->levels) {
-            const bool replaced = std::ranges::any_of(meta.levels, [&old](const CityRenderMeta::Level& l) {
-                return l.rotation == old.rotation && l.zoom == old.zoom;
-            });
-            if (!replaced) {
-                meta.levels.push_back(old);
-            }
+    meta.levels = CityMeta::MergeLevels(usable ? earlier->levels : std::vector<CityRenderMeta::Level>(), rendered,
+                                        dropped);
+    if (final) {
+        if (!CameraAdapter::StoreTimes(savePath_, meta.saveFileTime, meta.renderTime)) {
+            meta.saveFileTime = SaveFileTime(savePath_);
+            meta.renderTime = NowFileTime();
         }
     }
-    // Tiles first, then meta.json: a meta.json on disk means the tiles it names are there.
-    ctx_.tileStore->Flush();
-    if (!ctx_.tileStore->WriteMeta(cityKey_, meta)) {
-        return Fail_("The render information (meta.json) could not be written.");
+    else if (usable) {
+        // Not complete: the times of the earlier render stay.
+        meta.saveFileTime = earlier->saveFileTime;
+        meta.renderTime = earlier->renderTime;
     }
-    CameraAdapter::RefreshNeighborWalls(ctx_.cameraExtender);
-    End_(true, "Done", std::string(), false);
-    return false;
+    else if (!earlier && meta.levels.empty()) {
+        return true;  // the first render of this city, nothing on disk to describe yet
+    }
+    // Else the times stay 0: a first render that is not complete counts as out of date.
+    return ctx_.tileStore->WriteMeta(cityKey_, meta);
 }
 
 // ---- tiles -------------------------------------------------------------------------------------
@@ -957,10 +981,10 @@ bool CityCapturer::WriteTestTile_()
     }
     WebPFree(encoded);
     if (!ok) {
-        LOG_ERROR("Capture: could not write the test tile to {}", path.string());
+        LOG_ERROR("Capture: could not write the test tile to {}", Logger::PathText(path));
         return false;
     }
-    testTilePath_ = path.string();
+    testTilePath_ = Logger::PathText(path);
 
     // Where the tile was on the screen before the capture moved the view, so it can be laid
     // over a screenshot. Only exact when the live magnification was 1.
@@ -980,6 +1004,7 @@ bool CityCapturer::WriteTestTile_()
 
 void CityCapturer::SetClearColor_(const uint32_t rgba)
 {
+    clearColorNow_ = rgba;
     if (!saved_.clearColorDirect && CameraAdapter::SetOutsideClearColor(ctx_.cameraExtender, rgba)) {
         saved_.clearColorSet = true;
         return;
@@ -1078,6 +1103,12 @@ void CityCapturer::Restore_(const bool cityClosing)
     if (saved_.backgroundSaved && game.renderer) {
         game.renderer->EnableBackgroundPicture(saved_.backgroundPicture);
     }
+    // A city that closes takes its view, camera and data views with it, and other listeners
+    // of PreCityShutdown may have let go of their parts already. So no view change then: it
+    // would send view messages and load models into a city that shuts down.
+    if (cityClosing) {
+        game.view = nullptr;
+    }
     if (saved_.viewLevelSaved && game.view) {
         game.view->SetCurrentViewLevel(saved_.viewLevel);
     }
@@ -1108,14 +1139,10 @@ void CityCapturer::Restore_(const bool cityClosing)
             *clamp = 1;
         }
     }
-    if (saved_.hoverTintSaved && ctx_.settings) {
-        ctx_.settings->hoverTint = saved_.hoverTint;
-        ctx_.settings->MarkChanged();
-    }
     if (saved_.neighborsOff && ctx_.neighborRenderer) {
+        // The render was of this city, which its own view never shows as a neighbor: the
+        // neighbor tiles in the cache are still good. SetEnabled redraws the view.
         ctx_.neighborRenderer->SetEnabled(saved_.neighborsBefore);
-        // The renderer does not watch the store: tell it about the new tiles and meta.json.
-        ctx_.neighborRenderer->InvalidateAll();
     }
 
     const bool synchronous = saved_.synchronousModels;
@@ -1151,6 +1178,7 @@ void CityCapturer::End_(const bool ok, std::string phase, std::string error, con
     // Idle first: Restore_ pumps messages, and one of them can close the city and come back here.
     phase_ = Phase::Idle;
     cancelRequested_ = false;
+    saveInsideRender_ = false;
     if (stepId_ != 0) {
         ctx_.idle->Cancel(stepId_);
         stepId_ = 0;
@@ -1227,28 +1255,85 @@ double CityCapturer::EtaSeconds_() const
 
 // ---- render on save ----------------------------------------------------------------------------
 
-void CityCapturer::OnSaved_()
+// A city switch or the region render works with the cities: no render on save then. The
+// region render saves every city it leaves and renders each city itself.
+bool CityCapturer::OtherWorkRuns_() const
 {
-    // Inside the save message: only note it. The capture starts some idle ticks later, when
-    // the save is over and a city switch or a quit that came with the save has begun.
-    if (!ctx_.settings || !ctx_.settings->renderOnSave || renderOnSavePending_ || phase_ != Phase::Idle) {
+    return (ctx_.switcher && ctx_.switcher->IsBusy()) || (ctx_.batch && ctx_.batch->IsRunning());
+}
+
+// The game makes the region picture of the city inside a save, with the renderer of the city
+// view. When the player saves during a render, that picture must not get the key color and
+// the missing background of the render. Both save messages are sent (docs/re-notes/
+// switching.md), so they bracket the save. Only renderer fields are written here: no view
+// change inside the save. The edge walls come back on their own for that picture (camera
+// module), and the thumbnail writer puts the camera back where the render had it.
+void CityCapturer::OnSaveBegin_()
+{
+    cISC43DRender* renderer = GameAccess::Renderer();
+    if (phase_ == Phase::Idle || !saved_.backgroundSaved || !renderer) {
         return;
     }
-    renderOnSavePending_ = true;
+    const bool direct = saved_.clearColorDirect;
+    RestoreClearColor_();
+    saved_.clearColorDirect = direct;  // keeps the way the color is set for the rest of the render
+    renderer->EnableBackgroundPicture(saved_.backgroundPicture);
+    saveInsideRender_ = true;
+    LOG_INFO("Capture: the city is saved during the render, the render goes on after the save");
+}
+
+// Also called from the next step, in case a save ended without its post-save message.
+void CityCapturer::ResumeAfterSave_()
+{
+    if (!saveInsideRender_) {
+        return;
+    }
+    saveInsideRender_ = false;
+    Game game;
+    if (phase_ == Phase::Idle || !game.Fetch()) {
+        return;
+    }
+    game.renderer->EnableBackgroundPicture(false);
+    SetClearColor_(clearColorNow_);
+    if (saved_.snapshotPropertySet) {
+        // The thumbnail writer turns the property off at its end.
+        if (cISC4RenderProperties* properties = game.app->GetRenderProperties()) {
+            properties->SetBoolValue(CaptureAddresses::Renderer::kRenderSnapshotProperty, true);
+        }
+    }
+}
+
+void CityCapturer::OnSaved_()
+{
+    ResumeAfterSave_();
+    // Inside the save message: only note it. The render starts some idle ticks later, when
+    // the save is over. A save that is part of leaving the city (a switch, the region view, a
+    // quit) is followed by OnCityShutdown, which drops the note. So only the city that was
+    // saved is ever rendered, never the city that is open some ticks later.
+    if (!ctx_.settings || !ctx_.settings->renderOnSave || renderOnSaveId_ != 0 || phase_ != Phase::Idle ||
+        OtherWorkRuns_() || !GameAccess::View3D()) {
+        return;
+    }
     renderOnSaveTicks_ = kRenderOnSaveDelayTicks;
-    ctx_.idle->AddRecurring([this] {
+    renderOnSaveId_ = ctx_.idle->AddRecurring([this] {
         if (--renderOnSaveTicks_ > 0) {
             return true;
         }
-        renderOnSavePending_ = false;
-        const bool switching = ctx_.switcher && ctx_.switcher->IsBusy();
-        if (ctx_.settings && ctx_.settings->renderOnSave && phase_ == Phase::Idle && !switching && GameAccess::City() &&
-            GameAccess::View3D()) {
+        renderOnSaveId_ = 0;
+        if (ctx_.settings->renderOnSave && phase_ == Phase::Idle && !OtherWorkRuns_()) {
             LOG_INFO("Capture: the city was saved, rendering it");
             Start(CaptureRequest());
         }
         return false;
     });
+}
+
+void CityCapturer::CancelRenderOnSave_()
+{
+    if (renderOnSaveId_ != 0) {
+        ctx_.idle->Cancel(renderOnSaveId_);
+        renderOnSaveId_ = 0;
+    }
 }
 
 // ---- panel -------------------------------------------------------------------------------------
@@ -1277,11 +1362,13 @@ void CityCapturer::DrawPanelSection()
             Cancel();
         }
         ImGui::TextWrapped("The view moves over the city while the render runs. The game is paused. "
-                           "Do not zoom or rotate until it is done.");
+                           "Do not zoom, rotate or save until it is done.");
         return;
     }
 
-    ImGui::BeginDisabled(!cityOpen || !readback);
+    // The region render starts the render of each city itself.
+    const bool batchRuns = ctx_.batch && ctx_.batch->IsRunning();
+    ImGui::BeginDisabled(!cityOpen || !readback || batchRuns);
     if (ImGui::Button("Render this city")) {
         Start(CaptureRequest());
     }
@@ -1290,7 +1377,7 @@ void CityCapturer::DrawPanelSection()
                           "It renders 4 rotations and zooms 1 to 4. A large city takes some minutes.");
     }
     ImGui::SameLine();
-    if (ImGui::Button("Capture one test tile")) {
+    if (ImGui::Button("Render one test tile")) {
         StartTestTile();
     }
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
@@ -1301,6 +1388,9 @@ void CityCapturer::DrawPanelSection()
 
     if (!cityOpen) {
         ImGui::TextDisabled("Open a city to render it.");
+    }
+    else if (batchRuns) {
+        ImGui::TextDisabled("Off while the region render runs.");
     }
     else if (!readback) {
         ImGui::TextWrapped("The graphics driver cannot read the screen back, so a render is not possible.");
