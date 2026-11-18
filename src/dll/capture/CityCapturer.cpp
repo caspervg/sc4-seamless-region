@@ -1,53 +1,1324 @@
 #include "capture/CityCapturer.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <exception>
+#include <fstream>
+
+#include <webp/encode.h>
+
+#include "cISC43DRender.h"
+#include "cISC4App.h"
+#include "cISC4City.h"
+#include "cISC4RenderProperties.h"
+#include "cISC4View3DWin.h"
+#include "cISC4ViewManager.h"
+#include "cISTETerrain.h"
+#include "capture/CameraAdapter.hpp"
+#include "capture/CaptureAddresses.hpp"
+#include "capture/ModelLoadMonitor.hpp"
+#include "capture/SnapshotReader.hpp"
+#include "core/GameAddresses.hpp"
+#include "core/IdleScheduler.hpp"
+#include "core/Messages.hpp"
 #include "imgui.h"
+#include "region/RegionIndex.hpp"
+#include "render/NeighborRenderer.hpp"
+#include "switching/CitySwitcher.hpp"
 #include "utils/Logger.h"
+#include "utils/Settings.h"
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <Windows.h>
 
 namespace
 {
-    bool sLogged = false;
+    namespace CC = GameAddresses::CameraControl;
 
-    void NotImplemented(const char* what)
+    // The two clear colors, as rgba for CameraExtender::SetOutsideClearColor. The capture
+    // never trusts these numbers: it reads both colors back from the screen (calibration).
+    constexpr uint32_t kKeyColorA = 0xFF00FFFFu;  // magenta
+    constexpr uint32_t kKeyColorB = 0x00FF00FFu;  // green
+    constexpr uint32_t kAllEdges = 0xF;
+
+    // Room above the highest terrain for buildings. The tallest lots of the game and of
+    // custom content stay below this. A larger value only adds tiles that are found empty
+    // after one read.
+    constexpr float kBuildingHeadroomMetres = 600.0f;
+
+    // Calibration reads a small block this far outside the projected city bounds.
+    constexpr int kCalibrationSize = 16;
+    constexpr float kCalibrationMargin = 64.0f;
+
+    constexpr uint32_t kLevelLoadTimeoutMs = 60000;    // models after a zoom or rotation change
+    constexpr uint32_t kTileLoadTimeoutMs = 5000;      // models after a view move
+    constexpr uint32_t kTileLoadTimeoutShortMs = 250;  // after the first tile timeout
+    constexpr uint32_t kUnknownLoaderLevelWaitMs = 2000;
+    constexpr uint32_t kUnknownLoaderTileWaitMs = 100;
+    constexpr uint32_t kStoreTimeoutMs = 60000;
+    constexpr uint32_t kStoreRetryMs = 50;
+    constexpr int kMaxLevelRetries = 5;
+    constexpr int kMaxShakeTicks = 60;
+    constexpr int kRenderOnSaveDelayTicks = 10;
+
+    // RunMessageServer2Pump arguments of the thumbnail writer (0x005ddec0).
+    constexpr uint32_t kPumpMinMessages = 20;
+    constexpr uint32_t kPumpMaxMessages = 100;
+    constexpr uint32_t kPumpNoTimeLimit = 0xFFFFFFFFu;
+
+    struct Game
     {
-        if (!sLogged) {
-            sLogged = true;
-            LOG_WARN("Capture: {} is not implemented yet", what);
+        cISC4App* app = nullptr;
+        cISC4View3DWin* view = nullptr;
+        cISC43DRender* renderer = nullptr;
+        void* camera = nullptr;
+
+        // Fetched again after everything that can close the city. Never kept across ticks.
+        bool Fetch()
+        {
+            app = GameAccess::App();
+            view = GameAccess::View3D();
+            renderer = GameAccess::Renderer();
+            camera = GameAccess::CameraControl();
+            return app && view && renderer && camera && GameAccess::City();
         }
+    };
+
+    // Same ticks as TileStore::FileTime (store module): FILETIME, 100 ns since 1601. The
+    // store compares CityRenderMeta::saveFileTime with its own reading of the save file.
+    int64_t FileTimeTicks(const FILETIME& ft)
+    {
+        return static_cast<int64_t>((static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime);
+    }
+
+    int64_t SaveFileTime(const std::filesystem::path& file)
+    {
+        WIN32_FILE_ATTRIBUTE_DATA data{};
+        if (file.empty() || !GetFileAttributesExW(file.c_str(), GetFileExInfoStandard, &data)) {
+            return 0;
+        }
+        return FileTimeTicks(data.ftLastWriteTime);
+    }
+
+    int64_t NowFileTime()
+    {
+        FILETIME ft{};
+        GetSystemTimeAsFileTime(&ft);
+        return FileTimeTicks(ft);
+    }
+
+    void SetMagnification(void* camera, const float magnification)
+    {
+        // void cSC4CameraControl::SetCustomMagnification(float), __thiscall.
+        using Fn = void(__fastcall*)(void* self, void* edx, float magnification);
+        reinterpret_cast<Fn>(CC::kSetCustomMagnification)(camera, nullptr, magnification);
+    }
+
+    std::array<float, 4> RgbaToFloats(const uint32_t rgba)
+    {
+        return {static_cast<float>((rgba >> 24) & 0xff) / 255.0f, static_cast<float>((rgba >> 16) & 0xff) / 255.0f,
+                static_cast<float>((rgba >> 8) & 0xff) / 255.0f, static_cast<float>(rgba & 0xff) / 255.0f};
+    }
+
+    uint32_t ElapsedMs(const std::chrono::steady_clock::time_point since)
+    {
+        return static_cast<uint32_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - since).count());
     }
 }
+
+// ---- lifecycle ---------------------------------------------------------------------------------
 
 bool CityCapturer::Initialize(const ModuleContext& ctx)
 {
     ctx_ = ctx;
-    NotImplemented("Initialize");
-    return false;
+    if (!ctx_.idle || !ctx_.cameraReader || !ctx_.snapshotReader) {
+        LOG_ERROR("Capture: the idle scheduler, the camera reader or the snapshot reader is missing");
+        return false;
+    }
+    if (ctx_.messages) {
+        saveToken_ = ctx_.messages->Subscribe(Messages::kPostSave, [this](cIGZMessage2*) { OnSaved_(); });
+    }
+    return true;
 }
 
-void CityCapturer::Shutdown() {}
+void CityCapturer::Shutdown()
+{
+    if (phase_ != Phase::Idle) {
+        End_(false, "Stopped", "The game closed during the render.", true);
+    }
+    if (saveToken_ && ctx_.messages) {
+        ctx_.messages->Unsubscribe(saveToken_);
+    }
+    saveToken_ = 0;
+    onFinished_ = nullptr;
+}
+
 void CityCapturer::OnCityInit() {}
-void CityCapturer::OnCityShutdown() {}
 
-void CityCapturer::DrawPanelSection()
+void CityCapturer::OnCityShutdown()
 {
-    ImGui::TextDisabled("Not available yet.");
+    if (phase_ != Phase::Idle) {
+        End_(false, "Stopped", "The city closed during the render.", true);
+    }
 }
 
-bool CityCapturer::Start(const CaptureRequest&)
+bool CityCapturer::Start(const CaptureRequest& request) { return Begin_(false, request); }
+
+bool CityCapturer::StartTestTile() { return Begin_(true, CaptureRequest()); }
+
+void CityCapturer::Cancel()
 {
-    NotImplemented("Start");
-    return false;
+    if (phase_ != Phase::Idle) {
+        // The step restores the game on the next idle tick: Cancel can come from the panel,
+        // in the middle of a frame.
+        cancelRequested_ = true;
+    }
 }
 
-void CityCapturer::Cancel() {}
-
-bool CityCapturer::IsRunning() const { return false; }
+bool CityCapturer::IsRunning() const { return phase_ != Phase::Idle; }
 
 CaptureProgress CityCapturer::Progress() const
 {
-    CaptureProgress progress;
-    progress.failed = true;
-    progress.error = "City capture is not available yet.";
+    CaptureProgress progress = progress_;
+    if (phase_ != Phase::Idle) {
+        char text[96];
+        PhaseText_(text, sizeof(text));
+        progress.phase = text;
+        progress.etaSeconds = EtaSeconds_();
+    }
     return progress;
 }
 
-void CityCapturer::SetOnFinished(std::function<void(bool ok)>) { NotImplemented("SetOnFinished"); }
+void CityCapturer::SetOnFinished(std::function<void(bool ok)> callback) { onFinished_ = std::move(callback); }
+
+// ---- start -------------------------------------------------------------------------------------
+
+bool CityCapturer::Begin_(const bool testTile, const CaptureRequest& request)
+{
+    if (phase_ != Phase::Idle) {
+        LOG_WARN("Capture: a render runs already");
+        return false;
+    }
+    const auto refuse = [this](const char* why) {
+        progress_ = CaptureProgress();
+        progress_.phase = "Not started";
+        progress_.finished = true;
+        progress_.failed = true;
+        progress_.error = why;
+        lastResult_ = why;
+        LOG_WARN("Capture: not started. {}", why);
+        return false;
+    };
+
+    Game game;
+    if (!game.Fetch()) {
+        return refuse("Open a city first.");
+    }
+    if (!ctx_.snapshotReader->Available()) {
+        return refuse("The graphics driver cannot read the screen back.");
+    }
+    if (!ctx_.cameraReader->Update()) {
+        return refuse("The camera of the city view cannot be read.");
+    }
+    const CameraFrame& frame = ctx_.cameraReader->Frame();
+
+    const CityInfo* current = ctx_.region ? ctx_.region->Current() : nullptr;
+    if (!testTile) {
+        if (!current || current->key.empty()) {
+            return refuse("This city is not in the region list.");
+        }
+        if (!ctx_.tileStore) {
+            return refuse("The tile store is not available.");
+        }
+    }
+    cityKey_ = current ? current->key : std::string();
+    savePath_ = current ? current->savePath : std::filesystem::path();
+    cellX_ = current ? current->cellX : 0;
+    cellZ_ = current ? current->cellZ : 0;
+    sizeX_ = current ? current->sizeX : 1;
+    sizeZ_ = current ? current->sizeZ : 1;
+    citySizeX_ = frame.citySizeX;
+    citySizeZ_ = frame.citySizeZ;
+    if (!(citySizeX_ > 0.0f) || !(citySizeZ_ > 0.0f)) {
+        return refuse("The size of the city is not known.");
+    }
+
+    // Height range of everything the city can draw: the terrain (and the sea surface) plus
+    // room for buildings.
+    float low = 0.0f;
+    float high = 1000.0f;
+    if (cISTETerrain* terrain = GameAccess::City()->GetTerrain()) {
+        const float terrainLow = terrain->MinHeight();
+        const float terrainHigh = std::max(terrain->MaxHeight(), terrain->GetSeaLevel());
+        // Sanity limits: a wrong value would only add empty tiles, but very many of them.
+        if (std::isfinite(terrainLow) && std::isfinite(terrainHigh) && terrainHigh >= terrainLow &&
+            terrainLow > -1000.0f && terrainHigh < 20000.0f) {
+            low = terrainLow;
+            high = terrainHigh;
+        }
+    }
+    minHeight_ = low;
+    maxHeight_ = high + kBuildingHeadroomMetres;
+    tileSize_ = CityRenderMeta().tileSize;
+
+    testTile_ = testTile;
+    levels_.clear();
+    if (testTile) {
+        Level level;
+        level.rotation = frame.rotation;
+        level.zoom = frame.zoomIndex;
+        level.projection = ViewMath::OrthoProjection::For(level.zoom, level.rotation);
+        level.grid = ViewMath::TileGrid::ForCity(level.projection, citySizeX_, citySizeZ_, minHeight_, maxHeight_, tileSize_);
+        level.outline = CaptureMath::CityOutline::For(level.projection, citySizeX_, citySizeZ_, minHeight_, maxHeight_);
+        level.tiles = 1;
+        if (level.grid.tilesX < 1 || level.grid.tilesY < 1) {
+            return refuse("The city has no size on the screen.");
+        }
+        // The tile under the middle of the screen. The live magnification can differ from 1,
+        // so go through the ground point.
+        cS3DVector3 ground;
+        ctx_.cameraReader->ScreenToGround(
+            {static_cast<float>(frame.viewportWidth) * 0.5f, static_cast<float>(frame.viewportHeight) * 0.5f}, 0.0f,
+            ground);
+        const cS3DVector2 canvas = level.projection.WorldToCanvas(ground);
+        testTx_ = std::clamp(static_cast<int>(std::floor((canvas.fX - level.grid.originCanvas.fX) / tileSize_)), 0,
+                             level.grid.tilesX - 1);
+        testTy_ = std::clamp(static_cast<int>(std::floor((canvas.fY - level.grid.originCanvas.fY) / tileSize_)), 0,
+                             level.grid.tilesY - 1);
+        levels_.push_back(level);
+    }
+    else {
+        BuildLevels_(request);
+    }
+    int total = 0;
+    for (const Level& level : levels_) {
+        total += level.tiles;
+    }
+    if (levels_.empty() || total == 0) {
+        return refuse("There is no zoom or rotation to render.");
+    }
+
+    const size_t tileBytes = static_cast<size_t>(tileSize_) * tileSize_ * 4;
+    tileA_.assign(tileBytes, 0);
+    tileB_.assign(tileBytes, 0);
+    readBuffer_.reserve(tileBytes);
+    outgoing_.clear();
+
+    saved_ = SavedState();
+    cancelRequested_ = false;
+    calibrationRetried_ = false;
+    waiting_ = false;
+    tileWaitTimedOut_ = false;
+    misalignedLogged_ = false;
+    levelIndex_ = 0;
+    levelRetries_ = 0;
+    tx_ = -1;
+    ty_ = 0;
+    levelTilesDone_ = 0;
+    tilesWritten_ = 0;
+    tilesEmpty_ = 0;
+    tilesTwoPass_ = 0;
+    progress_ = CaptureProgress();
+    progress_.total = total;
+    startTime_ = Clock::now();
+    tilesStartTime_ = startTime_;
+
+    phase_ = Phase::Prepare;
+    stepId_ = ctx_.idle->AddRecurring([this] { return Step_(); });
+    if (stepId_ == 0) {
+        phase_ = Phase::Idle;
+        return refuse("The idle scheduler of the plugin does not run.");
+    }
+    if (testTile) {
+        LOG_INFO("Capture: test tile started, rotation {} zoom {} tile ({}, {})", levels_[0].rotation,
+                 levels_[0].zoom + 1, testTx_, testTy_);
+    }
+    else {
+        LOG_INFO("Capture: started for city '{}', {} levels, {} tiles of {} px, heights {:.0f} to {:.0f} m", cityKey_,
+                 levels_.size(), total, tileSize_, minHeight_, maxHeight_);
+    }
+    return true;
+}
+
+void CityCapturer::BuildLevels_(const CaptureRequest& request)
+{
+    // Zoom 5 (index 4) is never captured: the renderer shows zoom 4 at twice the size.
+    constexpr int kCaptureZooms = ViewMath::kZoomCount - 1;
+    std::array<bool, ViewMath::kRotationCount> rotations{};
+    std::array<bool, kCaptureZooms> zooms{};
+    if (request.rotations.empty()) {
+        rotations.fill(true);
+    }
+    for (const int r : request.rotations) {
+        if (ViewMath::IsValidRotation(r)) {
+            rotations[r] = true;
+        }
+    }
+    if (request.allZooms) {
+        zooms.fill(true);
+    }
+    else {
+        for (const int z : request.zooms) {
+            if (z >= 0 && z < kCaptureZooms) {
+                zooms[z] = true;
+            }
+        }
+    }
+    for (int r = 0; r < ViewMath::kRotationCount; ++r) {
+        for (int z = 0; z < kCaptureZooms; ++z) {
+            if (!rotations[r] || !zooms[z]) {
+                continue;
+            }
+            Level level;
+            level.rotation = r;
+            level.zoom = z;
+            level.projection = ViewMath::OrthoProjection::For(z, r);
+            level.grid = ViewMath::TileGrid::ForCity(level.projection, citySizeX_, citySizeZ_, minHeight_, maxHeight_, tileSize_);
+            level.outline = CaptureMath::CityOutline::For(level.projection, citySizeX_, citySizeZ_, minHeight_, maxHeight_);
+            for (int ty = 0; ty < level.grid.tilesY; ++ty) {
+                for (int tx = 0; tx < level.grid.tilesX; ++tx) {
+                    level.tiles += TileTouchesCity_(level, tx, ty) ? 1 : 0;
+                }
+            }
+            levels_.push_back(level);
+        }
+    }
+}
+
+bool CityCapturer::TileTouchesCity_(const Level& level, const int tx, const int ty) const
+{
+    const cS3DVector2 origin = level.grid.TileOrigin(tx, ty);
+    return level.outline.Intersects(origin.fX, origin.fY, origin.fX + static_cast<float>(tileSize_),
+                                    origin.fY + static_cast<float>(tileSize_));
+}
+
+// ---- the state machine -------------------------------------------------------------------------
+
+bool CityCapturer::Step_()
+{
+    if (phase_ == Phase::Idle) {
+        return false;
+    }
+    try {
+        if (cancelRequested_) {
+            End_(false, "Cancelled", "The render was cancelled.", false);
+            return false;
+        }
+        bool more = false;
+        switch (phase_) {
+        case Phase::Prepare: more = StepPrepare_(); break;
+        case Phase::CalibrateFirst: more = StepCalibrate_(false); break;
+        case Phase::CalibrateSecond: more = StepCalibrate_(true); break;
+        case Phase::LevelBegin: more = StepLevelBegin_(); break;
+        case Phase::LevelWait: more = StepLevelWait_(); break;
+        case Phase::Tile: more = StepTile_(); break;
+        case Phase::WaitStore: more = StepWaitStore_(); break;
+        case Phase::Finish: more = StepFinish_(); break;
+        case Phase::Idle: break;
+        }
+        return more && phase_ != Phase::Idle;
+    }
+    catch (const std::exception& e) {
+        return Fail_(std::string("The render stopped on an error: ") + e.what());
+    }
+    catch (...) {
+        return Fail_("The render stopped on an unknown error.");
+    }
+}
+
+bool CityCapturer::StepPrepare_()
+{
+    Game game;
+    if (!game.Fetch() || !ctx_.cameraReader->Update()) {
+        return Fail_("The city view is gone.");
+    }
+    const CameraFrame& frame = ctx_.cameraReader->Frame();
+
+    saved_.zoom = frame.zoomIndex;
+    saved_.rotation = frame.rotation;
+    saved_.magnification = frame.magnification;
+    saved_.target = frame.target;
+    saved_.cameraSaved = true;
+
+    // Like the thumbnail writer, but drawing stays on so the window repaints between ticks.
+    pause_.emplace(false, true, true, true);
+
+    if (ctx_.neighborRenderer) {
+        saved_.neighborsBefore = CameraAdapter::NeighborsEnabled(ctx_.neighborRenderer);
+        ctx_.neighborRenderer->SetEnabled(false);
+        saved_.neighborsOff = true;
+    }
+    if (ctx_.settings) {
+        saved_.hoverTint = ctx_.settings->hoverTint;
+        saved_.hoverTintSaved = true;
+        ctx_.settings->hoverTint = false;
+        ctx_.settings->MarkChanged();
+    }
+
+    // Free roam: the view target of an edge tile lies outside the city.
+    saved_.freeRoamBefore = !frame.scrollClampEnabled;
+    saved_.freeRoamByCamera = CameraAdapter::SetFreeRoam(ctx_.cameraExtender, true);
+    if (uint8_t* clamp = GameAccess::FieldPtr<uint8_t>(game.camera, CC::kScrollClampEnabled); clamp && *clamp) {
+        // The camera module has no free roam or did not turn the clamp off. Do it here.
+        *clamp = 0;
+        saved_.clampForced = true;
+    }
+    if (ctx_.cameraExtender) {
+        saved_.wallMaskBefore = CameraAdapter::SetEdgeWallsHidden(ctx_.cameraExtender, kAllEdges);
+        saved_.wallsHidden = true;
+    }
+
+    for (size_t i = 0; i < saved_.clearColorBefore.size(); ++i) {
+        saved_.clearColorBefore[i] = GameAccess::ReadField<float>(
+            game.renderer, CaptureAddresses::Renderer::kViewportClearColor + static_cast<uint32_t>(i) * 4);
+    }
+    SetClearColor_(kKeyColorA);
+
+    saved_.backgroundPicture =
+        GameAccess::ReadField<uint8_t>(game.renderer, CaptureAddresses::Renderer::kBackgroundPictureEnabled) != 0;
+    saved_.backgroundSaved = true;
+    game.renderer->EnableBackgroundPicture(false);
+
+    // The surface, not an underground view, and no data view on top.
+    const uint32_t viewLevel = static_cast<uint32_t>(game.view->GetCurrentViewLevel());
+    if (viewLevel != CaptureAddresses::kSurfaceViewLevel) {
+        saved_.viewLevel = viewLevel;
+        saved_.viewLevelSaved = true;
+        game.view->SetCurrentViewLevel(CaptureAddresses::kSurfaceViewLevel);
+    }
+    if (cISC4ViewManager* viewManager = game.view->GetViewManager()) {
+        viewManager->PushView(CaptureAddresses::kPlainDataView);
+        saved_.dataViewPushed = true;
+    }
+    if (cISC4RenderProperties* properties = game.app->GetRenderProperties()) {
+        // The thumbnail writer turns kRenderSnapshot on and puts it back to off.
+        properties->SetBoolValue(CaptureAddresses::Renderer::kRenderSnapshotProperty, true);
+        saved_.snapshotPropertySet = true;
+    }
+    game.renderer->StopScreenShake(0);
+    if (frame.magnification != 1.0f) {
+        SetMagnification(game.camera, 1.0f);
+    }
+    if (ctx_.modelLoadMonitor && ctx_.modelLoadMonitor->SetSynchronous(true)) {
+        saved_.synchronousModels = true;
+    }
+    else {
+        LOG_WARN("Capture: the model loader is not known. The render waits a fixed time for models.");
+    }
+
+    if (!Pump_()) {
+        return false;
+    }
+    phase_ = Phase::CalibrateFirst;
+    return true;
+}
+
+// Reads both key colors back from the screen. The view shows a block outside the projected
+// city bounds, where only the clear color can be.
+bool CityCapturer::StepCalibrate_(const bool second)
+{
+    Game game;
+    if (!game.Fetch() || !ctx_.cameraReader->Update()) {
+        return Fail_("The city view is gone.");
+    }
+    const CameraFrame& frame = ctx_.cameraReader->Frame();
+    if (frame.viewportWidth < kCalibrationSize || frame.viewportHeight < kCalibrationSize) {
+        return Fail_("The game window is too small.");
+    }
+
+    if (!second) {
+        SetClearColor_(kKeyColorA);
+        const ViewMath::TileGrid bounds = ViewMath::TileGrid::ForCity(frame.projection, citySizeX_, citySizeZ_,
+                                                                      minHeight_, maxHeight_, tileSize_);
+        const cS3DVector2 outside{bounds.originCanvas.fX - kCalibrationMargin,
+                                  bounds.originCanvas.fY - kCalibrationMargin};
+        SetTarget_(CaptureMath::TargetForCanvasAt(frame.projection, outside, 0, 0, frame.viewportWidth,
+                                                  frame.viewportHeight));
+        if (!Pump_()) {
+            return false;
+        }
+        if (!game.Fetch()) {
+            return Fail_("The city view is gone.");
+        }
+    }
+    else {
+        SetClearColor_(kKeyColorB);
+    }
+
+    game.renderer->ForceFullRedraw();
+    game.renderer->Draw();
+    if (!ctx_.snapshotReader->Read(0, 0, kCalibrationSize, kCalibrationSize, readBuffer_)) {
+        return Fail_("The screen could not be read back: " + ctx_.snapshotReader->LastError());
+    }
+    const CaptureMath::Rgb color{readBuffer_[0], readBuffer_[1], readBuffer_[2]};
+    const size_t pixels = static_cast<size_t>(kCalibrationSize) * kCalibrationSize;
+    if (CaptureMath::CountKeyPixels(readBuffer_.data(), pixels, color) != pixels) {
+        return Fail_("Something is drawn outside the city, so the render cannot find the empty area.");
+    }
+
+    if (!second) {
+        keyA_ = color;
+        phase_ = Phase::CalibrateSecond;
+        return true;
+    }
+    keyB_ = color;
+    SetClearColor_(kKeyColorA);
+
+    int channel = 0;
+    int contrast = 0;
+    CaptureMath::KeyContrast(keyA_, keyB_, channel, contrast);
+    if (std::abs(contrast) < CaptureMath::kMinKeyContrast) {
+        if (!calibrationRetried_ && !saved_.clearColorDirect) {
+            // The camera module did not change the color. Set it on the renderer instead.
+            calibrationRetried_ = true;
+            LOG_WARN("Capture: the camera module did not change the color outside the city. Trying the renderer.");
+            RestoreClearColor_();
+            saved_.clearColorDirect = true;
+            phase_ = Phase::CalibrateFirst;
+            return true;
+        }
+        return Fail_("The color outside the city cannot be changed, so the render cannot tell the city from "
+                     "the empty area.");
+    }
+    LOG_INFO("Capture: key colors on screen ({}, {}, {}) and ({}, {}, {}){}", keyA_.r, keyA_.g, keyA_.b, keyB_.r,
+             keyB_.g, keyB_.b, saved_.clearColorDirect ? ", set on the renderer" : "");
+    tilesStartTime_ = Clock::now();
+    phase_ = Phase::LevelBegin;
+    return true;
+}
+
+bool CityCapturer::StepLevelBegin_()
+{
+    if (levelIndex_ >= levels_.size()) {
+        phase_ = Phase::Finish;
+        return true;
+    }
+    Game game;
+    if (!game.Fetch()) {
+        return Fail_("The city view is gone.");
+    }
+    const Level& level = levels_[levelIndex_];
+    game.view->SetZoomAndRotation(level.zoom, level.rotation);
+    if (!Pump_() || !game.Fetch() || !ctx_.cameraReader->Update()) {
+        return phase_ == Phase::Idle ? false : Fail_("The city view is gone.");
+    }
+    if (ctx_.cameraReader->Frame().magnification != 1.0f) {
+        SetMagnification(game.camera, 1.0f);
+        ctx_.cameraReader->Update();
+    }
+    const CameraFrame& frame = ctx_.cameraReader->Frame();
+    if (frame.zoomIndex != level.zoom || frame.rotation != level.rotation || frame.magnification != 1.0f) {
+        if (++levelRetries_ <= kMaxLevelRetries) {
+            return true;  // try again on the next tick
+        }
+        if (levelTilesDone_ > 0) {
+            return Fail_("The zoom or rotation changed during the render and cannot be put back.");
+        }
+        // The game refuses this zoom (zoom limits of the view). Leave the level out.
+        LOG_WARN("Capture: the game does not go to rotation {} zoom {}. This level is left out.", level.rotation,
+                 level.zoom + 1);
+        progress_.total -= level.tiles;
+        NextLevel_();
+        return true;
+    }
+    waiting_ = false;
+    phase_ = Phase::LevelWait;
+    return true;
+}
+
+bool CityCapturer::StepLevelWait_()
+{
+    if (!ModelsReady_(false)) {
+        return true;
+    }
+    phase_ = Phase::Tile;
+    if (tx_ < 0) {
+        LOG_INFO("Capture: rotation {} zoom {}: {} tiles in a grid of {} x {}", levels_[levelIndex_].rotation,
+                 levels_[levelIndex_].zoom + 1, levels_[levelIndex_].tiles, levels_[levelIndex_].grid.tilesX,
+                 levels_[levelIndex_].grid.tilesY);
+        if (!NextTile_()) {
+            NextLevel_();
+        }
+    }
+    else {
+        // The level was put back in the middle of a tile. Start that tile again.
+        BeginTile_();
+    }
+    return true;
+}
+
+bool CityCapturer::StepTile_()
+{
+    Game game;
+    if (!game.Fetch() || !ctx_.cameraReader->Update()) {
+        return Fail_("The city view is gone.");
+    }
+    const Level& level = levels_[levelIndex_];
+    {
+        const CameraFrame& frame = ctx_.cameraReader->Frame();
+        // The player can still zoom and rotate with the keyboard. Put the level back.
+        if (frame.zoomIndex != level.zoom || frame.rotation != level.rotation || frame.magnification != 1.0f) {
+            if (pass_ == 1) {
+                SetClearColor_(kKeyColorA);
+            }
+            phase_ = Phase::LevelBegin;
+            return true;
+        }
+        // A new window size needs a new split of the tile.
+        if (frame.viewportWidth != viewportW_ || frame.viewportHeight != viewportH_) {
+            if (pass_ == 1) {
+                SetClearColor_(kKeyColorA);
+            }
+            BeginTile_();
+        }
+    }
+    if (reads_.empty()) {
+        return Fail_("The game window has no size.");
+    }
+
+    // 1. Aim the view so this part of the tile lies on whole screen pixels.
+    const CaptureMath::TileRead& read = reads_[readIndex_];
+    const cS3DVector2 tileOrigin = level.grid.TileOrigin(tx_, ty_);
+    const cS3DVector2 partOrigin{tileOrigin.fX + static_cast<float>(read.x), tileOrigin.fY + static_cast<float>(read.y)};
+    const int wantX = (viewportW_ - read.w) / 2;
+    const int wantY = (viewportH_ - read.h) / 2;
+    const cS3DVector3 target =
+        CaptureMath::TargetForCanvasAt(level.projection, partOrigin, wantX, wantY, viewportW_, viewportH_);
+    {
+        const cS3DVector3& live = ctx_.cameraReader->Frame().target;
+        if (live.fX != target.fX || live.fY != target.fY || live.fZ != target.fZ) {
+            SetTarget_(target);
+            // The thumbnail writer pumps after the move, before it draws.
+            if (!Pump_()) {
+                return false;
+            }
+            if (!game.Fetch() || !ctx_.cameraReader->Update()) {
+                return Fail_("The city view is gone.");
+            }
+        }
+    }
+    const CameraFrame& frame = ctx_.cameraReader->Frame();
+
+    // 2. Check where the game really puts it. A screen shake moves the view by parts of a pixel.
+    if ((frame.positionTweak.fX != 0.0f || frame.positionTweak.fY != 0.0f) && shakeTicks_ < kMaxShakeTicks) {
+        ++shakeTicks_;
+        return true;
+    }
+    const float actualX = partOrigin.fX + frame.canvasToScreen.fX;
+    const float actualY = partOrigin.fY + frame.canvasToScreen.fY;
+    const int screenX = static_cast<int>(std::lround(actualX));
+    const int screenY = static_cast<int>(std::lround(actualY));
+    if (screenX < 0 || screenY < 0 || screenX + read.w > frame.viewportWidth ||
+        screenY + read.h > frame.viewportHeight) {
+        LOG_ERROR("Capture: tile ({}, {}) part {} landed at ({:.2f}, {:.2f}), wanted ({}, {})", tx_, ty_, readIndex_,
+                  actualX, actualY, wantX, wantY);
+        return Fail_("The camera did not reach a tile. The scroll limits of the game may still be on.");
+    }
+    const float offGrid = std::max(std::fabs(actualX - static_cast<float>(screenX)), std::fabs(actualY - static_cast<float>(screenY)));
+    if (offGrid > 0.05f && !misalignedLogged_) {
+        misalignedLogged_ = true;
+        LOG_WARN("Capture: the view is {:.3f} px off the pixel grid at tile ({}, {}). Tiles can be soft.", offGrid, tx_,
+                 ty_);
+    }
+
+    // 3. Models for this view.
+    if (!ModelsReady_(true)) {
+        return true;
+    }
+
+    // 4. Draw and read. This is the one read of this tick.
+    game.renderer->ForceFullRedraw();
+    game.renderer->Draw();
+    if (!ctx_.snapshotReader->Read(screenX, screenY, read.w, read.h, readBuffer_)) {
+        return Fail_("The screen could not be read back: " + ctx_.snapshotReader->LastError());
+    }
+    CaptureMath::BlitRgba(readBuffer_.data(), read.w, read.h, pass_ == 0 ? tileA_.data() : tileB_.data(), tileSize_,
+                          read.x, read.y);
+    shakeTicks_ = 0;
+    if (++readIndex_ < reads_.size()) {
+        return true;
+    }
+    return TileComplete_();
+}
+
+bool CityCapturer::TileComplete_()
+{
+    const size_t pixels = static_cast<size_t>(tileSize_) * tileSize_;
+    if (pass_ == 0) {
+        const size_t keyPixels = CaptureMath::CountKeyPixels(tileA_.data(), pixels, keyA_);
+        if (keyPixels == pixels) {
+            ++tilesEmpty_;
+            TileDone_();
+            return true;
+        }
+        if (keyPixels != 0) {
+            // Part of the tile shows the area outside the city. Draw it again over the second
+            // color to tell that area from city pixels that happen to have the key color.
+            pass_ = 1;
+            readIndex_ = 0;
+            ++tilesTwoPass_;
+            SetClearColor_(kKeyColorB);
+            return true;
+        }
+    }
+    else {
+        SetClearColor_(kKeyColorA);
+        if (CaptureMath::ComposeTwoPasses(tileA_.data(), tileB_.data(), pixels, keyA_, keyB_) == 0) {
+            ++tilesEmpty_;
+            TileDone_();
+            return true;
+        }
+    }
+
+    if (testTile_) {
+        if (!WriteTestTile_()) {
+            return Fail_("The test tile could not be written.");
+        }
+        ++tilesWritten_;
+        TileDone_();
+        return true;
+    }
+    const Level& level = levels_[levelIndex_];
+    outgoingKey_.cityKey = cityKey_;
+    outgoingKey_.rotation = level.rotation;
+    outgoingKey_.zoom = level.zoom;
+    outgoingKey_.tx = tx_;
+    outgoingKey_.ty = ty_;
+    outgoing_.clear();
+    waiting_ = false;
+    phase_ = Phase::WaitStore;
+    return StepWaitStore_();
+}
+
+// Hands the finished tile to the store. The store keeps the buffer, so each written tile
+// costs one allocation and one copy of the tile. A full queue is tried again on later ticks.
+bool CityCapturer::StepWaitStore_()
+{
+    if (waiting_ && ElapsedMs(lastStoreTry_) < kStoreRetryMs) {
+        return true;
+    }
+    lastStoreTry_ = Clock::now();
+    if (outgoing_.size() != tileA_.size()) {
+        // Also after a refused write: the store may have taken the buffer anyway.
+        outgoing_.assign(tileA_.begin(), tileA_.end());
+    }
+    if (ctx_.tileStore->QueueWrite(outgoingKey_, std::move(outgoing_), tileSize_, tileSize_)) {
+        outgoing_.clear();
+        waiting_ = false;
+        ++tilesWritten_;
+        phase_ = Phase::Tile;
+        TileDone_();
+        return true;
+    }
+    if (!waiting_) {
+        waiting_ = true;
+        waitStart_ = Clock::now();
+    }
+    else if (ElapsedMs(waitStart_) > kStoreTimeoutMs) {
+        return Fail_("The tile store does not take tiles. The log file tells why.");
+    }
+    return true;
+}
+
+bool CityCapturer::StepFinish_()
+{
+    if (testTile_) {
+        End_(true, "Done", std::string(), false);
+        return false;
+    }
+    CityRenderMeta meta;
+    meta.cellX = cellX_;
+    meta.cellZ = cellZ_;
+    meta.sizeX = sizeX_;
+    meta.sizeZ = sizeZ_;
+    meta.tileSize = tileSize_;
+    if (!CameraAdapter::StoreTimes(savePath_, meta.saveFileTime, meta.renderTime)) {
+        meta.saveFileTime = SaveFileTime(savePath_);
+        meta.renderTime = NowFileTime();
+    }
+    for (const Level& level : levels_) {
+        if (level.captured) {
+            CityRenderMeta::Level out;
+            out.rotation = level.rotation;
+            out.zoom = level.zoom;
+            out.originX = level.grid.originCanvas.fX;
+            out.originY = level.grid.originCanvas.fY;
+            out.tilesX = level.grid.tilesX;
+            out.tilesY = level.grid.tilesY;
+            meta.levels.push_back(out);
+        }
+    }
+    if (meta.levels.empty()) {
+        return Fail_("No zoom or rotation could be rendered.");
+    }
+    // A render of some levels keeps the other levels of an earlier render.
+    if (const std::optional<CityRenderMeta> earlier = ctx_.tileStore->LoadMeta(cityKey_);
+        earlier && earlier->tileSize == meta.tileSize && earlier->formatVersion == meta.formatVersion) {
+        for (const CityRenderMeta::Level& old : earlier->levels) {
+            const bool replaced = std::ranges::any_of(meta.levels, [&old](const CityRenderMeta::Level& l) {
+                return l.rotation == old.rotation && l.zoom == old.zoom;
+            });
+            if (!replaced) {
+                meta.levels.push_back(old);
+            }
+        }
+    }
+    // Tiles first, then meta.json: a meta.json on disk means the tiles it names are there.
+    ctx_.tileStore->Flush();
+    if (!ctx_.tileStore->WriteMeta(cityKey_, meta)) {
+        return Fail_("The render information (meta.json) could not be written.");
+    }
+    CameraAdapter::RefreshNeighborWalls(ctx_.cameraExtender);
+    End_(true, "Done", std::string(), false);
+    return false;
+}
+
+// ---- tiles -------------------------------------------------------------------------------------
+
+bool CityCapturer::NextTile_()
+{
+    const Level& level = levels_[levelIndex_];
+    if (testTile_) {
+        if (tx_ >= 0) {
+            return false;
+        }
+        tx_ = testTx_;
+        ty_ = testTy_;
+        BeginTile_();
+        return true;
+    }
+    for (;;) {
+        if (++tx_ >= level.grid.tilesX) {
+            tx_ = 0;
+            ++ty_;
+        }
+        if (ty_ >= level.grid.tilesY) {
+            return false;
+        }
+        if (TileTouchesCity_(level, tx_, ty_)) {
+            BeginTile_();
+            return true;
+        }
+    }
+}
+
+void CityCapturer::BeginTile_()
+{
+    readIndex_ = 0;
+    pass_ = 0;
+    shakeTicks_ = 0;
+    waiting_ = false;
+    ctx_.cameraReader->Update();
+    viewportW_ = ctx_.cameraReader->Frame().viewportWidth;
+    viewportH_ = ctx_.cameraReader->Frame().viewportHeight;
+    CaptureMath::PlanTileReads(tileSize_, viewportW_, viewportH_, reads_);
+}
+
+void CityCapturer::TileDone_()
+{
+    ++progress_.done;
+    ++levelTilesDone_;
+    if (!NextTile_()) {
+        NextLevel_();
+    }
+}
+
+void CityCapturer::NextLevel_()
+{
+    if (levelIndex_ < levels_.size()) {
+        levels_[levelIndex_].captured = levelTilesDone_ > 0 || levels_[levelIndex_].tiles == 0;
+    }
+    ++levelIndex_;
+    levelRetries_ = 0;
+    levelTilesDone_ = 0;
+    tx_ = -1;
+    ty_ = 0;
+    phase_ = levelIndex_ < levels_.size() ? Phase::LevelBegin : Phase::Finish;
+}
+
+bool CityCapturer::WriteTestTile_()
+{
+    const std::filesystem::path path = ctx_.pluginDirectory.parent_path() / "test_tile.webp";
+    uint8_t* encoded = nullptr;
+    const size_t size = WebPEncodeLosslessRGBA(tileA_.data(), tileSize_, tileSize_, tileSize_ * 4, &encoded);
+    bool ok = false;
+    if (size != 0 && encoded) {
+        std::ofstream file(path, std::ios::binary | std::ios::trunc);
+        file.write(reinterpret_cast<const char*>(encoded), static_cast<std::streamsize>(size));
+        ok = file.good();
+    }
+    WebPFree(encoded);
+    if (!ok) {
+        LOG_ERROR("Capture: could not write the test tile to {}", path.string());
+        return false;
+    }
+    testTilePath_ = path.string();
+
+    // Where the tile was on the screen before the capture moved the view, so it can be laid
+    // over a screenshot. Only exact when the live magnification was 1.
+    const Level& level = levels_[levelIndex_];
+    const cS3DVector2 origin = level.grid.TileOrigin(tx_, ty_);
+    const cS3DVector2 before = ViewMath::GameCanvasToScreen(
+        level.projection, saved_.target, ViewMath::BaseCorner(level.rotation, citySizeX_, citySizeZ_),
+        static_cast<float>(viewportW_), static_cast<float>(viewportH_));
+    LOG_INFO("Capture: test tile written to {}. Rotation {} zoom {} tile ({}, {}), canvas origin ({:.0f}, {:.0f}), "
+             "top left on the screen before the capture ({:.0f}, {:.0f}), {}",
+             testTilePath_, level.rotation, level.zoom + 1, tx_, ty_, origin.fX, origin.fY, origin.fX + before.fX,
+             origin.fY + before.fY, pass_ == 1 ? "two passes" : "one pass");
+    return true;
+}
+
+// ---- helpers -----------------------------------------------------------------------------------
+
+void CityCapturer::SetClearColor_(const uint32_t rgba)
+{
+    if (!saved_.clearColorDirect && CameraAdapter::SetOutsideClearColor(ctx_.cameraExtender, rgba)) {
+        saved_.clearColorSet = true;
+        return;
+    }
+    // Fallback: cISC43DRender::SetViewportClearColor. The renderer clears with it when a part
+    // of the view is outside the city, and always after ForceFullRedraw.
+    if (cISC43DRender* renderer = GameAccess::Renderer()) {
+        const std::array<float, 4> color = RgbaToFloats(rgba);
+        renderer->SetViewportClearColor(color.data());
+        saved_.clearColorDirect = true;
+    }
+}
+
+void CityCapturer::RestoreClearColor_()
+{
+    if (saved_.clearColorSet) {
+        CameraAdapter::RestoreOutsideClearColor(ctx_.cameraExtender);
+        saved_.clearColorSet = false;
+    }
+    if (saved_.clearColorDirect) {
+        if (cISC43DRender* renderer = GameAccess::Renderer()) {
+            renderer->SetViewportClearColor(saved_.clearColorBefore.data());
+        }
+        saved_.clearColorDirect = false;
+    }
+}
+
+void CityCapturer::SetTarget_(const cS3DVector3& target)
+{
+    if (void* camera = GameAccess::CameraControl()) {
+        // bool cSC4CameraControl::SetViewTargetPosition(const float* xyz), __thiscall. Sends the
+        // view change messages at once, so the model maker has loaded when it returns.
+        using Fn = bool(__fastcall*)(void* self, void* edx, const float* position);
+        reinterpret_cast<Fn>(CC::kSetViewTargetPosition)(camera, nullptr, &target.fX);
+    }
+}
+
+bool CityCapturer::Pump_()
+{
+    if (cISC4App* app = GameAccess::App()) {
+        app->RunMessageServer2Pump(kPumpMinMessages, kPumpMaxMessages, kPumpNoTimeLimit);
+    }
+    // A pumped message can close the city, which ends the capture (OnCityShutdown).
+    return phase_ != Phase::Idle;
+}
+
+bool CityCapturer::ModelsReady_(const bool tile)
+{
+    if (!waiting_) {
+        waiting_ = true;
+        waitStart_ = Clock::now();
+    }
+    const uint32_t waited = ElapsedMs(waitStart_);
+    bool ready = false;
+    if (ctx_.modelLoadMonitor && ctx_.modelLoadMonitor->Known()) {
+        ready = ctx_.modelLoadMonitor->IsIdle();
+        const uint32_t timeout =
+            !tile ? kLevelLoadTimeoutMs : (tileWaitTimedOut_ ? kTileLoadTimeoutShortMs : kTileLoadTimeoutMs);
+        if (!ready && waited >= timeout) {
+            ready = true;
+            if (!tile || !tileWaitTimedOut_) {
+                LOG_WARN("Capture: models did not finish loading in {} ms at rotation {} zoom {}. Rendering "
+                         "without waiting longer.",
+                         waited, levels_[levelIndex_].rotation, levels_[levelIndex_].zoom + 1);
+            }
+            tileWaitTimedOut_ = tileWaitTimedOut_ || tile;
+        }
+    }
+    else {
+        ready = waited >= (tile ? kUnknownLoaderTileWaitMs : kUnknownLoaderLevelWaitMs);
+    }
+    if (ready) {
+        waiting_ = false;
+    }
+    return ready;
+}
+
+// Puts back everything Prepare changed.
+void CityCapturer::Restore_(const bool cityClosing)
+{
+    Game game;
+    game.Fetch();
+    ModelLoadMonitor* monitor = ctx_.modelLoadMonitor;
+    if (cityClosing && saved_.synchronousModels && monitor) {
+        // Do not load the models of the old view at once for a city that closes.
+        monitor->SetSynchronous(false);
+        saved_.synchronousModels = false;
+    }
+
+    RestoreClearColor_();
+    if (saved_.snapshotPropertySet && game.app) {
+        if (cISC4RenderProperties* properties = game.app->GetRenderProperties()) {
+            properties->SetBoolValue(CaptureAddresses::Renderer::kRenderSnapshotProperty, false);
+        }
+    }
+    if (saved_.backgroundSaved && game.renderer) {
+        game.renderer->EnableBackgroundPicture(saved_.backgroundPicture);
+    }
+    if (saved_.viewLevelSaved && game.view) {
+        game.view->SetCurrentViewLevel(saved_.viewLevel);
+    }
+    if (saved_.cameraSaved && game.view && game.camera) {
+        // Zoom and rotation first, so the models that load for the old view target are the
+        // ones of the old zoom and rotation.
+        game.view->SetZoomAndRotation(saved_.zoom, saved_.rotation);
+        SetTarget_(saved_.target);
+        if (GameAccess::ReadField<float>(game.camera, CC::kMagnification) != saved_.magnification) {
+            SetMagnification(game.camera, saved_.magnification);
+        }
+    }
+    if (saved_.dataViewPushed && game.view) {
+        if (cISC4ViewManager* viewManager = game.view->GetViewManager()) {
+            viewManager->PopView(CaptureAddresses::kPlainDataView);
+        }
+    }
+
+    if (saved_.wallsHidden) {
+        CameraAdapter::SetEdgeWallsHidden(ctx_.cameraExtender, saved_.wallMaskBefore);
+    }
+    if (saved_.freeRoamByCamera) {
+        // Counted in the camera module: one false for the one true of Prepare.
+        CameraAdapter::SetFreeRoam(ctx_.cameraExtender, false);
+    }
+    if (saved_.clampForced && !saved_.freeRoamBefore) {
+        if (uint8_t* clamp = GameAccess::FieldPtr<uint8_t>(game.camera, CC::kScrollClampEnabled)) {
+            *clamp = 1;
+        }
+    }
+    if (saved_.hoverTintSaved && ctx_.settings) {
+        ctx_.settings->hoverTint = saved_.hoverTint;
+        ctx_.settings->MarkChanged();
+    }
+    if (saved_.neighborsOff && ctx_.neighborRenderer) {
+        ctx_.neighborRenderer->SetEnabled(saved_.neighborsBefore);
+        // The renderer does not watch the store: tell it about the new tiles and meta.json.
+        ctx_.neighborRenderer->InvalidateAll();
+    }
+
+    const bool synchronous = saved_.synchronousModels;
+    saved_ = SavedState();
+    if (!cityClosing) {
+        // The models of the old view loaded at once above. Now back to background loading.
+        if (synchronous && monitor) {
+            monitor->SetSynchronous(false);
+        }
+        if (game.app) {
+            game.app->RunMessageServer2Pump(kPumpMinMessages, kPumpMaxMessages, kPumpNoTimeLimit);
+        }
+        // The pump can close the city: ask for the renderer again.
+        if (cISC43DRender* renderer = GameAccess::Renderer()) {
+            renderer->ForceFullRedraw();
+        }
+    }
+    pause_.reset();
+}
+
+bool CityCapturer::Fail_(std::string error)
+{
+    LOG_ERROR("Capture: {}", error);
+    End_(false, "Failed", std::move(error), false);
+    return false;
+}
+
+void CityCapturer::End_(const bool ok, std::string phase, std::string error, const bool cityClosing)
+{
+    if (phase_ == Phase::Idle) {
+        return;
+    }
+    // Idle first: Restore_ pumps messages, and one of them can close the city and come back here.
+    phase_ = Phase::Idle;
+    cancelRequested_ = false;
+    if (stepId_ != 0) {
+        ctx_.idle->Cancel(stepId_);
+        stepId_ = 0;
+    }
+    Restore_(cityClosing);
+
+    // Three megabytes that an idle plugin does not need in a 32 bit process.
+    std::vector<uint8_t>().swap(tileA_);
+    std::vector<uint8_t>().swap(tileB_);
+    std::vector<uint8_t>().swap(readBuffer_);
+    std::vector<uint8_t>().swap(outgoing_);
+
+    const uint32_t seconds = ElapsedMs(startTime_) / 1000;
+    progress_.finished = true;
+    progress_.failed = !ok;
+    progress_.phase = std::move(phase);
+    progress_.error = std::move(error);
+    progress_.etaSeconds = 0.0;
+
+    char text[256];
+    if (ok && testTile_) {
+        std::snprintf(text, sizeof(text), "The test tile is ready.");
+    }
+    else if (ok) {
+        std::snprintf(text, sizeof(text), "Done in %u min %u s. %d tiles written, %d empty tiles left out.",
+                      seconds / 60, seconds % 60, tilesWritten_, tilesEmpty_);
+    }
+    else {
+        std::snprintf(text, sizeof(text), "%s after %d of %d tiles. %s", progress_.phase.c_str(), progress_.done,
+                      progress_.total, progress_.error.c_str());
+    }
+    lastResult_ = text;
+    LOG_INFO("Capture: {} ({} of {} tiles, {} written, {} empty, {} drawn twice, {} s)", ok ? "finished" : "stopped",
+             progress_.done, progress_.total, tilesWritten_, tilesEmpty_, tilesTwoPass_, seconds);
+
+    if (onFinished_) {
+        // A copy: the callback may set another callback or start the next capture.
+        const std::function<void(bool)> callback = onFinished_;
+        callback(ok);
+    }
+}
+
+void CityCapturer::PhaseText_(char* text, const size_t size) const
+{
+    const Level* level = levelIndex_ < levels_.size() ? &levels_[levelIndex_] : nullptr;
+    switch (phase_) {
+    case Phase::Prepare: std::snprintf(text, size, "Getting ready"); break;
+    case Phase::CalibrateFirst:
+    case Phase::CalibrateSecond: std::snprintf(text, size, "Checking the color outside the city"); break;
+    case Phase::LevelBegin:
+    case Phase::LevelWait:
+        std::snprintf(text, size, "Rotation %d, zoom %d: loading models", level ? level->rotation : 0,
+                      level ? level->zoom + 1 : 0);
+        break;
+    case Phase::Tile:
+    case Phase::WaitStore:
+        std::snprintf(text, size, "Rotation %d, zoom %d: tile %d of %d%s", level ? level->rotation : 0,
+                      level ? level->zoom + 1 : 0, levelTilesDone_ + 1, level ? level->tiles : 0,
+                      phase_ == Phase::WaitStore ? " (waiting for the tile writer)" : "");
+        break;
+    case Phase::Finish: std::snprintf(text, size, "Writing the last tiles"); break;
+    case Phase::Idle: std::snprintf(text, size, "%s", progress_.phase.c_str()); break;
+    }
+}
+
+double CityCapturer::EtaSeconds_() const
+{
+    if (progress_.done <= 0 || progress_.total <= progress_.done) {
+        return progress_.total <= progress_.done ? 0.0 : -1.0;
+    }
+    const double elapsed = ElapsedMs(tilesStartTime_) / 1000.0;
+    return elapsed / progress_.done * (progress_.total - progress_.done);
+}
+
+// ---- render on save ----------------------------------------------------------------------------
+
+void CityCapturer::OnSaved_()
+{
+    // Inside the save message: only note it. The capture starts some idle ticks later, when
+    // the save is over and a city switch or a quit that came with the save has begun.
+    if (!ctx_.settings || !ctx_.settings->renderOnSave || renderOnSavePending_ || phase_ != Phase::Idle) {
+        return;
+    }
+    renderOnSavePending_ = true;
+    renderOnSaveTicks_ = kRenderOnSaveDelayTicks;
+    ctx_.idle->AddRecurring([this] {
+        if (--renderOnSaveTicks_ > 0) {
+            return true;
+        }
+        renderOnSavePending_ = false;
+        const bool switching = ctx_.switcher && ctx_.switcher->IsBusy();
+        if (ctx_.settings && ctx_.settings->renderOnSave && phase_ == Phase::Idle && !switching && GameAccess::City() &&
+            GameAccess::View3D()) {
+            LOG_INFO("Capture: the city was saved, rendering it");
+            Start(CaptureRequest());
+        }
+        return false;
+    });
+}
+
+// ---- panel -------------------------------------------------------------------------------------
+
+void CityCapturer::DrawPanelSection()
+{
+    const bool cityOpen = GameAccess::City() && GameAccess::View3D();
+    const bool readback = ctx_.snapshotReader && ctx_.snapshotReader->Available();
+
+    if (phase_ != Phase::Idle) {
+        char text[96];
+        std::snprintf(text, sizeof(text), "%d of %d tiles", progress_.done, progress_.total);
+        ImGui::ProgressBar(progress_.total > 0 ? static_cast<float>(progress_.done) / static_cast<float>(progress_.total) : 0.0f,
+                           ImVec2(-1.0f, 0.0f), text);
+        PhaseText_(text, sizeof(text));
+        ImGui::TextUnformatted(text);
+        const double eta = EtaSeconds_();
+        if (eta >= 0.0) {
+            const int seconds = static_cast<int>(eta);
+            ImGui::Text("Time left: about %d min %d s", seconds / 60, seconds % 60);
+        }
+        else {
+            ImGui::TextDisabled("Time left: not known yet");
+        }
+        if (ImGui::Button(cancelRequested_ ? "Stopping..." : "Cancel")) {
+            Cancel();
+        }
+        ImGui::TextWrapped("The view moves over the city while the render runs. The game is paused. "
+                           "Do not zoom or rotate until it is done.");
+        return;
+    }
+
+    ImGui::BeginDisabled(!cityOpen || !readback);
+    if (ImGui::Button("Render this city")) {
+        Start(CaptureRequest());
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("Makes the pictures of this city that its neighbors show.\n"
+                          "It renders 4 rotations and zooms 1 to 4. A large city takes some minutes.");
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Capture one test tile")) {
+        StartTestTile();
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("Renders the tile in the middle of the screen at this zoom and rotation.\n"
+                          "It writes test_tile.webp next to the log file.");
+    }
+    ImGui::EndDisabled();
+
+    if (!cityOpen) {
+        ImGui::TextDisabled("Open a city to render it.");
+    }
+    else if (!readback) {
+        ImGui::TextWrapped("The graphics driver cannot read the screen back, so a render is not possible.");
+    }
+    ImGui::Text("Screen readback: %s", readback ? "available" : "not available");
+    if (ctx_.modelLoadMonitor && ctx_.modelLoadMonitor->Known()) {
+        ImGui::Text("Models: %s", ctx_.modelLoadMonitor->IsIdle() ? "all loaded for this view" : "loading");
+    }
+    else {
+        ImGui::TextDisabled("Models: loader not known");
+    }
+    if (ctx_.settings) {
+        ImGui::Text("Render after each save: %s", ctx_.settings->renderOnSave ? "on" : "off");
+    }
+    if (!lastResult_.empty()) {
+        ImGui::TextWrapped("Last result: %s", lastResult_.c_str());
+    }
+    if (!testTilePath_.empty()) {
+        ImGui::TextWrapped("Test tile: %s", testTilePath_.c_str());
+    }
+}
