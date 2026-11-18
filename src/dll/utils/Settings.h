@@ -24,7 +24,7 @@ public:
     // Logging
     spdlog::level::level_enum logLevel = spdlog::level::info;
     bool logToFile = true;
-    // Panel
+    // Panel. Ctrl+Shift+F9 shows and hides it at any time (SeamlessPanel::OnRender).
     bool startWindowVisible = true;
 
     // Master switch. When false the plugin creates no modules (takes effect at next start).

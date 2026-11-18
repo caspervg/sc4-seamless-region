@@ -57,6 +57,12 @@ SeamlessPanel::SeamlessPanel(Info info, ModuleContext* ctx, const std::vector<Pa
 
 void SeamlessPanel::OnRender()
 {
+    // The ImGui service has no list of panels, so this is the only way to get the window back
+    // after it was closed, or when StartWindowVisible is false. The service calls OnRender on
+    // every frame, also while the window is hidden.
+    if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_F9)) {
+        visible_ = !visible_;
+    }
     if (!visible_) {
         return;
     }
@@ -95,6 +101,7 @@ void SeamlessPanel::DrawStatus_()
 {
     ImGui::Text("Plugin version: %s", info_.versionLabel.c_str());
     ImGui::Text("Game version: %u", info_.gameVersion);
+    ImGui::TextDisabled("Ctrl+Shift+F9 shows and hides this window.");
     if (!info_.supported) {
         ImGui::TextColored(kBad, "This game version is not supported. The plugin does nothing.");
         ImGui::TextWrapped("Seamless Region works only with SimCity 4 version 1.1.641.");

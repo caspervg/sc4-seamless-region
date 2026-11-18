@@ -350,8 +350,9 @@ void SC4SeamlessRegionDirector::RegisterPanel_()
     panel_ = std::make_unique<SeamlessPanel>(std::move(info), &ctx_, &panelModules_);
     panel_->SetVisible(settings_.startWindowVisible);
 
-    const ImGuiPanelDesc desc =
-        ImGuiPanelAdapter<SeamlessPanel>::MakeDesc(panel_.get(), kPanelId, 100, settings_.startWindowVisible);
+    // Always visible for the service, so the panel gets its render call on every frame and can
+    // watch its own show and hide key. The panel draws nothing while it is hidden.
+    const ImGuiPanelDesc desc = ImGuiPanelAdapter<SeamlessPanel>::MakeDesc(panel_.get(), kPanelId, 100, true);
     panelRegistered_ = ctx_.imgui->RegisterPanel(desc);
     if (panelRegistered_) {
         LOG_INFO("Registered the Seamless Region panel");
