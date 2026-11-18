@@ -167,6 +167,11 @@ Per edge for both, with one mask (bit i = game edge i, from the public bits):
 Public bits (world terms of the current city): 1 = x 0 (west), 2 = x max (east), 4 = z 0
 (north), 8 = z max (south). Region z grows to the south.
 
+Both detours hide nothing while the camera magnification is not 1.0. The region thumbnail
+writer (`0x005ddec0`) is the only code that draws the city at another magnification (0.25). The
+picture and the border masks it saves into the city file keep their walls, as in the game
+without the plugin. A render (capture) draws at magnification 1.0 and hides all four.
+
 The cliffs only exist on the two edges that face the camera. The water walls exist on all
 four. A hidden back water wall shows what is behind the water there, which is the neighbor's
 own water when it has a render.
