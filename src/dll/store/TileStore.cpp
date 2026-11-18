@@ -1,61 +1,858 @@
+// The pure part of the store: paths, index, encode worker, meta.json. No ImGui and no game
+// calls, so the tests build it. The panel and the region hookup are in TileStoreModule.cpp.
+
 #include "store/TileStore.hpp"
 
-#include "imgui.h"
+#include <windows.h>
+
+#include <algorithm>
+#include <cstring>
+#include <fstream>
+#include <nlohmann/json.hpp>
+
+#include "store/WebpCodec.hpp"
 #include "utils/Logger.h"
+#include "utils/Settings.h"
+
+namespace fs = std::filesystem;
 
 namespace
 {
-    bool sLogged = false;
+    constexpr int kDefaultQuality = 82;
+    constexpr uint64_t kMaxFileBytes = 256ull * 1024 * 1024;
 
-    void NotImplemented(const char* what)
+    std::string ToUtf8(const fs::path& p)
     {
-        if (!sLogged) {
-            sLogged = true;
-            LOG_WARN("Store: {} is not implemented yet", what);
+        const std::u8string s = p.u8string();
+        return std::string(reinterpret_cast<const char*>(s.data()), s.size());
+    }
+
+    fs::path FromUtf8(const std::string_view s)
+    {
+        return fs::path(std::u8string(reinterpret_cast<const char8_t*>(s.data()), s.size()));
+    }
+
+    struct Handle
+    {
+        HANDLE h = INVALID_HANDLE_VALUE;
+        explicit Handle(const HANDLE handle) : h(handle) {}
+        Handle(const Handle&) = delete;
+        Handle& operator=(const Handle&) = delete;
+        ~Handle()
+        {
+            if (h != INVALID_HANDLE_VALUE) {
+                CloseHandle(h);
+            }
+        }
+        [[nodiscard]] bool ok() const { return h != INVALID_HANDLE_VALUE; }
+    };
+
+    // Shares delete, so a replace by the encode worker works while a decode worker reads.
+    bool ReadAll(const fs::path& path, std::vector<uint8_t>& out)
+    {
+        out.clear();
+        const Handle file(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                      nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+        if (!file.ok()) {
+            return false;
+        }
+        LARGE_INTEGER size{};
+        if (!GetFileSizeEx(file.h, &size) || size.QuadPart < 0 || static_cast<uint64_t>(size.QuadPart) > kMaxFileBytes) {
+            return false;
+        }
+        out.resize(static_cast<size_t>(size.QuadPart));
+        size_t done = 0;
+        while (done < out.size()) {
+            DWORD got = 0;
+            if (!ReadFile(file.h, out.data() + done, static_cast<DWORD>(out.size() - done), &got, nullptr) || got == 0) {
+                out.clear();
+                return false;
+            }
+            done += got;
+        }
+        return true;
+    }
+
+    // Writes next to the target, then renames over it. A reader sees the old or the new file.
+    bool AtomicWrite(const fs::path& target, const void* data, const size_t size)
+    {
+        fs::path temp = target;
+        temp += L".tmp";
+        {
+            std::ofstream out(temp, std::ios::binary | std::ios::trunc);
+            if (!out) {
+                return false;
+            }
+            out.write(static_cast<const char*>(data), static_cast<std::streamsize>(size));
+            out.flush();
+            if (!out) {
+                return false;
+            }
+        }
+        // A reader without FILE_SHARE_DELETE can block the rename for a moment.
+        for (int attempt = 0; attempt < 4; ++attempt) {
+            if (MoveFileExW(temp.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+                return true;
+            }
+            Sleep(15);
+        }
+        std::error_code ec;
+        fs::remove(temp, ec);
+        return false;
+    }
+
+    bool IsFullyTransparent(const std::vector<uint8_t>& rgba)
+    {
+        const uint8_t* p = rgba.data();
+        const size_t count = rgba.size() / 4;
+        for (size_t i = 0; i < count; ++i) {
+            if (p[i * 4 + 3] != 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // "<tx>_<ty>.webp"
+    bool ParseTileName(const std::wstring& name, int& tx, int& ty)
+    {
+        constexpr std::wstring_view suffix = L".webp";
+        if (name.size() <= suffix.size() || name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0) {
+            return false;
+        }
+        int* targets[2] = {&tx, &ty};
+        int field = 0;
+        int value = 0;
+        int digits = 0;
+        for (size_t i = 0; i < name.size() - suffix.size(); ++i) {
+            const wchar_t c = name[i];
+            if (c >= L'0' && c <= L'9' && digits < 5) {
+                value = value * 10 + (c - L'0');
+                ++digits;
+            }
+            else if (c == L'_' && field == 0 && digits > 0) {
+                *targets[0] = value;
+                field = 1;
+                value = 0;
+                digits = 0;
+            }
+            else {
+                return false;
+            }
+        }
+        if (field != 1 || digits == 0) {
+            return false;
+        }
+        *targets[1] = value;
+        return tx <= 0xffff && ty <= 0xffff;
+    }
+
+    // "r<rot>z<zoom>"
+    bool ParseLevelName(const std::wstring& name, int& rot, int& zoom)
+    {
+        if (name.size() != 4 || name[0] != L'r' || name[2] != L'z' || name[1] < L'0' || name[1] > L'3' ||
+            name[3] < L'0' || name[3] > L'7') {
+            return false;
+        }
+        rot = name[1] - L'0';
+        zoom = name[3] - L'0';
+        return true;
+    }
+
+    uint64_t Pack(const int rot, const int zoom, const int tx, const int ty)
+    {
+        return static_cast<uint64_t>(rot) | (static_cast<uint64_t>(zoom) << 2) | (static_cast<uint64_t>(tx) << 5) |
+               (static_cast<uint64_t>(ty) << 21);
+    }
+}
+
+// ---- meta.json -------------------------------------------------------------------------------
+
+namespace CityMeta
+{
+    using json = nlohmann::json;
+
+    std::string ToJson(const CityRenderMeta& meta)
+    {
+        json levels = json::array();
+        for (const auto& l : meta.levels) {
+            levels.push_back({{"rotation", l.rotation},
+                              {"zoom", l.zoom},
+                              {"originX", l.originX},
+                              {"originY", l.originY},
+                              {"tilesX", l.tilesX},
+                              {"tilesY", l.tilesY}});
+        }
+        const json j = {{"formatVersion", kFormatVersion},
+                        {"cellX", meta.cellX},
+                        {"cellZ", meta.cellZ},
+                        {"sizeX", meta.sizeX},
+                        {"sizeZ", meta.sizeZ},
+                        {"tileSize", meta.tileSize},
+                        {"saveFileTime", meta.saveFileTime},
+                        {"renderTime", meta.renderTime},
+                        {"levels", levels}};
+        return j.dump(2);
+    }
+
+    namespace
+    {
+        bool Int(const json& o, const char* name, int& out)
+        {
+            const auto it = o.find(name);
+            if (it == o.end() || !it->is_number_integer()) {
+                return false;
+            }
+            const int64_t v = it->get<int64_t>();
+            if (v < INT32_MIN || v > INT32_MAX) {
+                return false;
+            }
+            out = static_cast<int>(v);
+            return true;
+        }
+
+        bool Int64(const json& o, const char* name, int64_t& out)
+        {
+            const auto it = o.find(name);
+            if (it == o.end() || !it->is_number_integer()) {
+                return false;
+            }
+            out = it->get<int64_t>();
+            return true;
+        }
+
+        bool Float(const json& o, const char* name, float& out)
+        {
+            const auto it = o.find(name);
+            if (it == o.end() || !it->is_number()) {
+                return false;
+            }
+            out = it->get<float>();
+            return true;
         }
     }
+
+    std::optional<CityRenderMeta> Parse(const std::string_view text, std::string* error)
+    {
+        const auto fail = [&](const char* why) -> std::optional<CityRenderMeta> {
+            if (error) {
+                *error = why;
+            }
+            return std::nullopt;
+        };
+
+        const json j = json::parse(text.begin(), text.end(), nullptr, false);
+        if (j.is_discarded() || !j.is_object()) {
+            return fail("not a JSON object");
+        }
+
+        CityRenderMeta m;
+        if (!Int(j, "formatVersion", m.formatVersion)) {
+            return fail("missing formatVersion");
+        }
+        if (m.formatVersion != kFormatVersion) {
+            return fail("unsupported formatVersion");
+        }
+        if (!Int(j, "cellX", m.cellX) || !Int(j, "cellZ", m.cellZ) || !Int(j, "sizeX", m.sizeX) ||
+            !Int(j, "sizeZ", m.sizeZ) || !Int(j, "tileSize", m.tileSize) || !Int64(j, "saveFileTime", m.saveFileTime) ||
+            !Int64(j, "renderTime", m.renderTime)) {
+            return fail("a required field is missing or has the wrong type");
+        }
+        if (m.sizeX < 1 || m.sizeZ < 1 || m.tileSize < 1) {
+            return fail("a size is not positive");
+        }
+        const auto levels = j.find("levels");
+        if (levels == j.end() || !levels->is_array()) {
+            return fail("missing levels");
+        }
+        for (const json& entry : *levels) {
+            CityRenderMeta::Level l;
+            if (!entry.is_object() || !Int(entry, "rotation", l.rotation) || !Int(entry, "zoom", l.zoom) ||
+                !Float(entry, "originX", l.originX) || !Float(entry, "originY", l.originY) ||
+                !Int(entry, "tilesX", l.tilesX) || !Int(entry, "tilesY", l.tilesY)) {
+                return fail("a level is incomplete");
+            }
+            if (l.rotation < 0 || l.rotation > 3 || l.zoom < 0 || l.zoom > 4 || l.tilesX < 0 || l.tilesY < 0) {
+                return fail("a level is out of range");
+            }
+            m.levels.push_back(l);
+        }
+        return m;
+    }
+
+    bool IsStale(const std::optional<CityRenderMeta>& meta, const int64_t saveFileTime)
+    {
+        if (!meta) {
+            return true;
+        }
+        return saveFileTime != 0 && saveFileTime != meta->saveFileTime;
+    }
+}
+
+// ---- helpers ---------------------------------------------------------------------------------
+
+uint64_t TileStore::PackKey(const TileKey& key, bool& valid)
+{
+    valid = key.rotation >= 0 && key.rotation <= 3 && key.zoom >= 0 && key.zoom <= 7 && key.tx >= 0 &&
+            key.tx <= 0xffff && key.ty >= 0 && key.ty <= 0xffff;
+    return valid ? Pack(key.rotation, key.zoom, key.tx, key.ty) : 0;
+}
+
+bool TileStore::SafeName(const std::string_view name)
+{
+    if (name.empty() || name.size() > 128 || name == "." || name == ".." || name.back() == '.' || name.back() == ' ') {
+        return false;
+    }
+    return std::none_of(name.begin(), name.end(), [](const char c) {
+        return static_cast<unsigned char>(c) < 0x20 || std::strchr("/\\:*?\"<>|", c) != nullptr;
+    });
+}
+
+fs::path TileStore::CityDirectory(const fs::path& renders, const std::string& cityKey)
+{
+    return renders / FromUtf8(cityKey);
+}
+
+fs::path TileStore::TilePathIn(const fs::path& renders, const TileKey& key)
+{
+    const std::string level = "r" + std::to_string(key.rotation) + "z" + std::to_string(key.zoom);
+    const std::string file = std::to_string(key.tx) + "_" + std::to_string(key.ty) + ".webp";
+    return CityDirectory(renders, key.cityKey) / level / file;
+}
+
+TileStore::CityIndex TileStore::ScanCity(const fs::path& cityDir)
+{
+    CityIndex result;
+    std::error_code ec;
+    for (fs::directory_iterator levels(cityDir, ec), end; !ec && levels != end; levels.increment(ec)) {
+        int rot = 0;
+        int zoom = 0;
+        std::error_code entryEc;
+        if (!levels->is_directory(entryEc) || !ParseLevelName(levels->path().filename().native(), rot, zoom)) {
+            continue;
+        }
+        std::error_code fileEc;
+        for (fs::directory_iterator files(levels->path(), fileEc); !fileEc && files != end; files.increment(fileEc)) {
+            int tx = 0;
+            int ty = 0;
+            std::error_code sizeEc;
+            if (!ParseTileName(files->path().filename().native(), tx, ty) || !files->is_regular_file(sizeEc)) {
+                continue;
+            }
+            const uintmax_t size = files->file_size(sizeEc);
+            if (sizeEc) {
+                continue;
+            }
+            const uint32_t size32 = static_cast<uint32_t>(std::min<uintmax_t>(size, 0xffffffffu));
+            result.tiles[Pack(rot, zoom, tx, ty)] = size32;
+            result.bytes += size32;
+        }
+    }
+    return result;
+}
+
+int64_t TileStore::FileTime(const fs::path& file)
+{
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+    if (file.empty() || !GetFileAttributesExW(file.c_str(), GetFileExInfoStandard, &data)) {
+        return 0;
+    }
+    return static_cast<int64_t>((static_cast<uint64_t>(data.ftLastWriteTime.dwHighDateTime) << 32) |
+                                data.ftLastWriteTime.dwLowDateTime);
+}
+
+int64_t TileStore::NowFileTime()
+{
+    FILETIME ft{};
+    GetSystemTimeAsFileTime(&ft);
+    return static_cast<int64_t>((static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime);
+}
+
+// ---- lifecycle -------------------------------------------------------------------------------
+
+TileStore::~TileStore()
+{
+    StopWorker();
 }
 
 bool TileStore::Initialize(const ModuleContext& ctx)
 {
     ctx_ = ctx;
-    NotImplemented("Initialize");
-    return false;
+    {
+        std::lock_guard lock(queueMutex_);
+        if (running_) {
+            return true;
+        }
+        stop_ = false;
+        running_ = true;
+    }
+    worker_ = std::thread([this] { WorkerMain(); });
+    LOG_INFO("Store: encode worker started, queue of {} tiles", kQueueCapacity);
+    return true;
 }
 
-void TileStore::Shutdown() {}
-void TileStore::OnCityInit() {}
-void TileStore::OnCityShutdown() {}
-
-void TileStore::DrawPanelSection()
+void TileStore::Shutdown()
 {
-    ImGui::TextDisabled("Not available yet.");
+    StopWorker();
+    LOG_INFO("Store: stopped");
 }
 
-void TileStore::SetRegionDirectory(const std::filesystem::path&) { NotImplemented("SetRegionDirectory"); }
-
-std::optional<CityRenderMeta> TileStore::LoadMeta(const std::string&) const
+void TileStore::OnCityShutdown()
 {
-    NotImplemented("LoadMeta");
-    return std::nullopt;
+    Flush();
 }
 
-bool TileStore::IsStale(const CityInfo&) const { return true; }
-
-bool TileStore::HasTile(const TileKey&) const { return false; }
-
-bool TileStore::QueueWrite(const TileKey&, std::vector<uint8_t>&&, int, int)
+void TileStore::StopWorker()
 {
-    NotImplemented("QueueWrite");
-    return false;
+    {
+        std::lock_guard lock(queueMutex_);
+        if (!running_) {
+            return;
+        }
+        stop_ = true;  // the worker still writes what is queued
+    }
+    workCv_.notify_all();
+    if (worker_.joinable()) {
+        worker_.join();
+    }
+    {
+        std::lock_guard lock(queueMutex_);
+        running_ = false;
+        stop_ = false;
+        queue_.clear();
+        boundedCount_ = 0;
+    }
+    ReportCounters();
 }
 
-bool TileStore::WriteMeta(const std::string&, const CityRenderMeta&)
+void TileStore::SetRegionDirectory(const fs::path& dir)
 {
-    NotImplemented("WriteMeta");
-    return false;
+    const fs::path renders = dir.empty() ? fs::path() : dir / kFolderName;
+    {
+        std::shared_lock lock(mutex_);
+        if (renders == rendersDir_) {
+            return;
+        }
+    }
+    Flush();  // pending writes belong to the old region
+    {
+        std::unique_lock lock(mutex_);
+        rendersDir_ = renders;
+        index_.clear();
+        metaCache_.clear();
+        warnedMeta_.clear();
+        scanDone_ = false;
+        ++generation_;
+    }
+    if (renders.empty()) {
+        scanDone_ = true;
+        return;
+    }
+    LOG_INFO("Store: renders folder is '{}'", ToUtf8(renders));
+    Job scan;
+    scan.type = Job::Type::Scan;
+    if (!Enqueue(std::move(scan), false)) {
+        scanDone_ = true;
+    }
 }
 
-void TileStore::Flush() {}
+fs::path TileStore::RendersDirectory() const
+{
+    std::shared_lock lock(mutex_);
+    return rendersDir_;
+}
 
-std::filesystem::path TileStore::TilePath(const TileKey&) const { return {}; }
+fs::path TileStore::TilePath(const TileKey& key) const
+{
+    std::shared_lock lock(mutex_);
+    return rendersDir_.empty() ? fs::path() : TilePathIn(rendersDir_, key);
+}
+
+// ---- meta ------------------------------------------------------------------------------------
+
+std::optional<CityRenderMeta> TileStore::LoadMeta(const std::string& cityKey) const
+{
+    if (!SafeName(cityKey)) {
+        return std::nullopt;
+    }
+    fs::path dir;
+    {
+        std::shared_lock lock(mutex_);
+        const auto it = metaCache_.find(cityKey);
+        if (it != metaCache_.end()) {
+            return it->second;
+        }
+        dir = rendersDir_;
+    }
+    if (dir.empty()) {
+        return std::nullopt;
+    }
+
+    std::optional<CityRenderMeta> meta;
+    bool invalid = false;
+    std::string error;
+    std::vector<uint8_t> bytes;
+    if (ReadAll(CityDirectory(dir, cityKey) / L"meta.json", bytes)) {
+        meta = CityMeta::Parse(std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size()), &error);
+        invalid = !meta;
+    }
+
+    std::unique_lock lock(mutex_);
+    if (invalid && warnedMeta_.insert(cityKey).second) {
+        LOG_WARN("Store: meta.json of '{}' is not valid ({}), the city counts as not rendered", cityKey, error);
+    }
+    if (dir != rendersDir_) {
+        return meta;  // the region changed while reading
+    }
+    return metaCache_.insert_or_assign(cityKey, std::move(meta)).first->second;
+}
+
+bool TileStore::IsStale(const CityInfo& city) const
+{
+    return CityMeta::IsStale(LoadMeta(city.key), city.savePath.empty() ? 0 : FileTime(city.savePath));
+}
+
+bool TileStore::WriteMeta(const std::string& cityKey, const CityRenderMeta& meta)
+{
+    const fs::path renders = RendersDirectory();
+    if (renders.empty() || !SafeName(cityKey)) {
+        return false;
+    }
+    const fs::path dir = CityDirectory(renders, cityKey);
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    CityRenderMeta copy = meta;
+    copy.formatVersion = CityMeta::kFormatVersion;
+    const std::string text = CityMeta::ToJson(copy);
+    if (!AtomicWrite(dir / L"meta.json", text.data(), text.size())) {
+        LOG_WARN("Store: writing meta.json for '{}' failed", cityKey);
+        return false;
+    }
+    {
+        std::unique_lock lock(mutex_);
+        if (renders == rendersDir_) {
+            metaCache_.insert_or_assign(cityKey, std::move(copy));
+            ++generation_;
+        }
+    }
+    LOG_INFO("Store: wrote meta.json for '{}', {} levels", cityKey, meta.levels.size());
+    return true;
+}
+
+std::vector<std::string> TileStore::ListRenderedCities() const
+{
+    std::vector<std::string> result;
+    const fs::path renders = RendersDirectory();
+    std::error_code ec;
+    for (fs::directory_iterator it(renders, ec), end; !ec && it != end; it.increment(ec)) {
+        std::error_code entryEc;
+        if (it->is_directory(entryEc) && fs::is_regular_file(it->path() / L"meta.json", entryEc)) {
+            const std::string name = ToUtf8(it->path().filename());
+            if (SafeName(name)) {
+                result.push_back(name);
+            }
+        }
+    }
+    std::sort(result.begin(), result.end());
+    return result;
+}
+
+// ---- index -----------------------------------------------------------------------------------
+
+void TileStore::EnsureIndexed(const std::string& cityKey) const
+{
+    if (!SafeName(cityKey)) {
+        return;
+    }
+    fs::path dir;
+    {
+        std::shared_lock lock(mutex_);
+        if (rendersDir_.empty() || index_.contains(cityKey)) {
+            return;
+        }
+        dir = rendersDir_;
+    }
+    CityIndex scanned = ScanCity(CityDirectory(dir, cityKey));
+    std::unique_lock lock(mutex_);
+    if (dir == rendersDir_ && index_.try_emplace(cityKey, std::move(scanned)).second) {
+        ++generation_;
+    }
+}
+
+bool TileStore::HasTile(const TileKey& key) const
+{
+    bool valid = false;
+    const uint64_t packed = PackKey(key, valid);
+    if (!valid) {
+        return false;
+    }
+    {
+        std::shared_lock lock(mutex_);
+        if (rendersDir_.empty()) {
+            return false;
+        }
+        const auto it = index_.find(key.cityKey);
+        if (it != index_.end()) {
+            return it->second.tiles.contains(packed);
+        }
+    }
+    EnsureIndexed(key.cityKey);
+    std::shared_lock lock(mutex_);
+    const auto it = index_.find(key.cityKey);
+    return it != index_.end() && it->second.tiles.contains(packed);
+}
+
+bool TileStore::ReadTile(const TileKey& key, std::vector<uint8_t>& bytes) const
+{
+    bytes.clear();
+    if (!HasTile(key)) {
+        return false;
+    }
+    const fs::path path = TilePath(key);
+    return !path.empty() && ReadAll(path, bytes);
+}
+
+std::optional<uint64_t> TileStore::CityBytes(const std::string& cityKey) const
+{
+    std::shared_lock lock(mutex_);
+    const auto it = index_.find(cityKey);
+    return it == index_.end() ? std::nullopt : std::optional<uint64_t>(it->second.bytes);
+}
+
+uint64_t TileStore::TotalBytes() const
+{
+    std::shared_lock lock(mutex_);
+    uint64_t total = 0;
+    for (const auto& entry : index_) {
+        total += entry.second.bytes;
+    }
+    return total;
+}
+
+// ---- queue and worker ------------------------------------------------------------------------
+
+bool TileStore::Enqueue(Job&& job, const bool bounded)
+{
+    {
+        std::lock_guard lock(queueMutex_);
+        if (!running_ || stop_ || (bounded && boundedCount_ >= kQueueCapacity)) {
+            return false;
+        }
+        if (bounded) {
+            ++boundedCount_;
+        }
+        queue_.push_back(std::move(job));
+    }
+    workCv_.notify_one();
+    return true;
+}
+
+bool TileStore::QueueWrite(const TileKey& key, std::vector<uint8_t>&& rgba, const int w, const int h)
+{
+    bool valid = false;
+    PackKey(key, valid);
+    if (!valid || !SafeName(key.cityKey) || w <= 0 || h <= 0 ||
+        rgba.size() != static_cast<size_t>(w) * static_cast<size_t>(h) * 4) {
+        return false;
+    }
+    {
+        std::shared_lock lock(mutex_);
+        if (rendersDir_.empty()) {
+            return false;
+        }
+    }
+    Job job;
+    job.type = Job::Type::Write;
+    job.key = key;
+    job.rgba = std::move(rgba);
+    job.w = w;
+    job.h = h;
+    return Enqueue(std::move(job), true);
+}
+
+bool TileStore::DeleteCity(const std::string& cityKey)
+{
+    // "map" and "overlays" are folders of other modules in the same renders folder.
+    if (!SafeName(cityKey) || cityKey == "map" || cityKey == "overlays") {
+        return false;
+    }
+    Job job;
+    job.type = Job::Type::DeleteCity;
+    job.cityKey = cityKey;
+    return Enqueue(std::move(job), false);
+}
+
+void TileStore::Flush()
+{
+    {
+        std::unique_lock lock(queueMutex_);
+        idleCv_.wait(lock, [this] { return queue_.empty() && !processing_; });
+    }
+    ReportCounters();
+}
+
+void TileStore::ReportCounters()
+{
+    const uint32_t written = written_.exchange(0);
+    const uint32_t skipped = skipped_.exchange(0);
+    const uint32_t failed = failed_.exchange(0);
+    if (written || skipped || failed) {
+        LOG_INFO("Store: {} tiles written, {} transparent tiles skipped, {} failed", written, skipped, failed);
+    }
+}
+
+void TileStore::WorkerMain()
+{
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    std::vector<uint8_t> encoded;  // reused for every tile
+    fs::path lastDir;
+
+    std::unique_lock lock(queueMutex_);
+    for (;;) {
+        workCv_.wait(lock, [this] { return stop_ || !queue_.empty(); });
+        if (queue_.empty()) {
+            break;  // stop requested and nothing left
+        }
+        Job job = std::move(queue_.front());
+        queue_.pop_front();
+        processing_ = true;
+        lock.unlock();
+
+        try {
+            switch (job.type) {
+            case Job::Type::Write:
+                ProcessWrite(job, encoded, lastDir);
+                break;
+            case Job::Type::DeleteCity:
+                ProcessDelete(job.cityKey);
+                break;
+            case Job::Type::Scan:
+                ProcessScan();
+                break;
+            }
+        }
+        catch (const std::exception& e) {
+            ++failed_;
+            ++failedTotal_;
+            if (!failureLogged_.exchange(true)) {
+                LOG_WARN("Store: a worker job failed: {}", e.what());
+            }
+        }
+        job.rgba = {};
+
+        lock.lock();
+        if (job.type == Job::Type::Write) {
+            --boundedCount_;
+        }
+        processing_ = false;
+        if (queue_.empty()) {
+            idleCv_.notify_all();
+        }
+    }
+    processing_ = false;
+    idleCv_.notify_all();
+}
+
+void TileStore::ProcessWrite(Job& job, std::vector<uint8_t>& encoded, fs::path& lastDir)
+{
+    const fs::path renders = RendersDirectory();
+    if (renders.empty()) {
+        return;
+    }
+    EnsureIndexed(job.key.cityKey);
+    bool valid = false;
+    const uint64_t packed = PackKey(job.key, valid);
+    const fs::path file = TilePathIn(renders, job.key);
+
+    const auto updateIndex = [&](const std::optional<uint32_t> newSize) {
+        std::unique_lock lock(mutex_);
+        const auto it = index_.find(job.key.cityKey);
+        if (renders != rendersDir_ || it == index_.end()) {
+            return;
+        }
+        CityIndex& city = it->second;
+        const auto old = city.tiles.find(packed);
+        if (old != city.tiles.end()) {
+            city.bytes -= old->second;
+            city.tiles.erase(old);
+        }
+        if (newSize) {
+            city.tiles[packed] = *newSize;
+            city.bytes += *newSize;
+        }
+        ++generation_;
+    };
+
+    if (IsFullyTransparent(job.rgba)) {
+        std::error_code ec;
+        fs::remove(file, ec);  // an older render of this tile must not stay
+        updateIndex(std::nullopt);
+        ++skipped_;
+        return;
+    }
+
+    const int quality = ctx_.settings ? ctx_.settings->webpQuality : kDefaultQuality;
+    bool ok = WebpCodec::Encode(job.rgba.data(), job.w, job.h, quality, encoded);
+    if (ok) {
+        const fs::path dir = file.parent_path();
+        if (dir != lastDir) {
+            std::error_code ec;
+            fs::create_directories(dir, ec);
+            lastDir = dir;
+        }
+        ok = AtomicWrite(file, encoded.data(), encoded.size());
+    }
+    if (!ok) {
+        ++failed_;
+        ++failedTotal_;
+        lastDir.clear();
+        if (!failureLogged_.exchange(true)) {
+            LOG_WARN("Store: encoding or writing '{}' failed (more failures are only counted)", ToUtf8(file));
+        }
+        return;
+    }
+    updateIndex(static_cast<uint32_t>(encoded.size()));
+    ++written_;
+}
+
+void TileStore::ProcessDelete(const std::string& cityKey)
+{
+    const fs::path renders = RendersDirectory();
+    if (renders.empty()) {
+        return;
+    }
+    std::error_code ec;
+    const auto removed = fs::remove_all(CityDirectory(renders, cityKey), ec);
+    {
+        std::unique_lock lock(mutex_);
+        index_.erase(cityKey);
+        metaCache_.erase(cityKey);
+        ++generation_;
+    }
+    if (ec) {
+        LOG_WARN("Store: deleting the renders of '{}' failed: {}", cityKey, ec.message());
+    }
+    else {
+        LOG_INFO("Store: deleted the renders of '{}', {} files", cityKey, removed);
+    }
+}
+
+void TileStore::ProcessScan()
+{
+    const fs::path renders = RendersDirectory();
+    std::vector<std::string> names;
+    std::error_code ec;
+    for (fs::directory_iterator it(renders, ec), end; !ec && it != end; it.increment(ec)) {
+        std::error_code entryEc;
+        if (it->is_directory(entryEc)) {
+            names.push_back(ToUtf8(it->path().filename()));
+        }
+    }
+    for (const std::string& name : names) {
+        EnsureIndexed(name);
+    }
+    scanDone_ = true;
+    ++generation_;
+    LOG_INFO("Store: indexed {} city folders, {:.1f} MB on disk", names.size(),
+             static_cast<double>(TotalBytes()) / (1024.0 * 1024.0));
+}
