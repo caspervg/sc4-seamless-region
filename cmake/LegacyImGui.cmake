@@ -1,3 +1,8 @@
+# Fallback only, see src/dll/CMakeLists.txt: builds the old separate imgui.dll from
+# sc4-render-services/vendor/d3d7imgui (ImGui 1.92.1, service API 1 to 4) when the nested
+# submodules are missing. Current SC4RenderServices (API 5) does not ship this DLL, so the
+# plugin must never call it. Remove this file once the submodules are always initialized.
+
 set(SC4_RENDER_SERVICES_ROOT "${CMAKE_SOURCE_DIR}/vendor/sc4-render-services" CACHE PATH "Path to sc4-render-services")
 set(SC4_RENDER_SERVICES_PUBLIC_DIR "${SC4_RENDER_SERVICES_ROOT}/src")
 set(SC4_RENDER_SERVICES_IMGUI_DIR "${SC4_RENDER_SERVICES_ROOT}/vendor/d3d7imgui/ImGui")

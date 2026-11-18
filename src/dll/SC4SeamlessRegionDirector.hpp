@@ -3,13 +3,21 @@
 #include <cRZMessage2COMDirector.h>
 #include <filesystem>
 #include <memory>
+#include <vector>
 
-#include "public/cIGZImGuiService.h"
+#include "core/GameAccess.hpp"
+#include "core/Messages.hpp"
+#include "ui/SeamlessPanel.hpp"
+#include "utils/Settings.h"
 
-class HelloPanel;
 class cIGZMessage2;
 class cIGZCOM;
+class CameraReader;
+class IdleScheduler;
+class RegionIndex;
 
+// Wires the plugin together: version check, settings, SC4RenderServices services, hooks,
+// modules, city messages and the panel. Owns everything it creates.
 class SC4SeamlessRegionDirector final : public cRZMessage2COMDirector
 {
 public:
@@ -31,8 +39,27 @@ public:
 private:
     static std::filesystem::path GetUserPluginsPath_();
     void InitializeLogger_();
+    void AcquireServices_();
+    void ReleaseServices_();
+    void CreateModules_();
+    void ShutdownModules_();
+    void RegisterPanel_();
+    void RegisterMessage_(uint32_t messageId);
+    void UnregisterMessages_();
+    void OnPostCityInit_();
+    void OnPreCityShutdown_();
 
-    cIGZImGuiService* imguiService_ = nullptr;
-    std::unique_ptr<HelloPanel> panel_;
+    Settings settings_;
+    ModuleContext ctx_;
+    MessageBus messages_;
+    std::vector<std::unique_ptr<Module>> owned_;  // creation order
+    std::vector<PanelModule> panelModules_;       // same order, with the Initialize result
+    std::vector<uint32_t> registeredMessages_;
+    std::unique_ptr<IdleScheduler> idle_;
+    std::unique_ptr<RegionIndex> region_;
+    std::unique_ptr<CameraReader> cameraReader_;
+    std::unique_ptr<SeamlessPanel> panel_;
     bool panelRegistered_ = false;
+    bool hookingInitialized_ = false;
+    bool cityOpen_ = false;
 };

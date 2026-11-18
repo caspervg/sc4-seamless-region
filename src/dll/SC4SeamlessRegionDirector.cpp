@@ -1,14 +1,38 @@
 #include "SC4SeamlessRegionDirector.hpp"
 
-#include <cIGZFrameWork.h>
+#include <algorithm>
+#include <exception>
+#include <ranges>
 
-#include "imgui.h"
-#include "panels/HelloPanel.hpp"
+#include "GZServPtrs.h"
+#include "cIGZFrameWork.h"
+#include "cIGZMessage2.h"
+#include "cIGZMessageServer2.h"
+#include "core/Hooking.hpp"
+#include "core/IdleScheduler.hpp"
 #include "public/ImGuiPanelAdapter.h"
 #include "public/ImGuiServiceIds.h"
+#include "public/S3DCameraServiceIds.h"
+#include "public/cIGZDrawService.h"
+#include "public/cIGZImGuiService.h"
+#include "public/cIGZS3DCameraService.h"
+#include "public/cIGZWorldDrawService.h"
+#include "region/RegionIndex.hpp"
 #include "utils/Logger.h"
-#include "utils/Settings.h"
-#include "SC4VersionDetection.h"
+#include "view/CameraReader.hpp"
+
+#include "batch/RegionBatchRenderer.hpp"
+#include "camera/CameraExtender.hpp"
+#include "capture/CityCapturer.hpp"
+#include "capture/ModelLoadMonitor.hpp"
+#include "capture/SnapshotReader.hpp"
+#include "export/HtmlMapExporter.hpp"
+#include "interaction/NeighborPicker.hpp"
+#include "overlay/MapOverlay.hpp"
+#include "render/NeighborRenderer.hpp"
+#include "render/TileCache.hpp"
+#include "store/TileStore.hpp"
+#include "switching/CitySwitcher.hpp"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -19,12 +43,48 @@
 #include <Windows.h>
 #include <wil/win32_helpers.h>
 
-namespace {
+namespace
+{
     constexpr uint32_t kDirectorId = 0x9DA0F26Au;
     constexpr uint32_t kPanelId = 0x57F1F26Bu;
+    constexpr auto kSettingsFileName = "SC4SeamlessRegion.ini";
 
-    static_assert(kDirectorId != 0u, "Run tools/rename_project.py or assign a unique director ID");
-    static_assert(kPanelId != 0u, "Run tools/rename_project.py or assign a unique panel ID");
+    template <typename Fn>
+    bool Guarded(const char* moduleName, const char* step, Fn&& fn)
+    {
+        try {
+            return fn();
+        }
+        catch (const std::exception& e) {
+            LOG_ERROR("{}: {} threw: {}", moduleName, step, e.what());
+        }
+        catch (...) {
+            LOG_ERROR("{}: {} threw an unknown exception", moduleName, step);
+        }
+        return false;
+    }
+
+    template <typename T>
+    void GetService(cIGZFrameWork* framework, const uint32_t serviceId, const uint32_t iid, T*& out,
+                    const char* name)
+    {
+        out = nullptr;
+        if (!framework || !framework->GetSystemService(serviceId, iid, reinterpret_cast<void**>(&out)) || !out) {
+            out = nullptr;
+            LOG_WARN("SC4RenderServices {} service is not available", name);
+            return;
+        }
+        LOG_INFO("Acquired the {} service", name);
+    }
+
+    template <typename T>
+    void ReleaseService(T*& service)
+    {
+        if (service) {
+            service->Release();
+            service = nullptr;
+        }
+    }
 }
 
 SC4SeamlessRegionDirector::SC4SeamlessRegionDirector() = default;
@@ -35,7 +95,9 @@ uint32_t SC4SeamlessRegionDirector::GetDirectorID() const { return kDirectorId; 
 bool SC4SeamlessRegionDirector::OnStart(cIGZCOM* pCOM)
 {
     cRZMessage2COMDirector::OnStart(pCOM);
-    if (auto* framework = RZGetFrameWork()) framework->AddHook(this);
+    if (auto* framework = RZGetFrameWork()) {
+        framework->AddHook(this);
+    }
     return true;
 }
 
@@ -45,33 +107,46 @@ bool SC4SeamlessRegionDirector::PreAppInit() { return true; }
 bool SC4SeamlessRegionDirector::PostAppInit()
 {
     InitializeLogger_();
-    const auto gameVersion = SC4VersionDetection::GetGameVersion();
-    LOG_INFO("PostAppInit");
-    LOG_INFO("Detected game version: {}", gameVersion);
+    const uint16_t gameVersion = GameAccess::GameVersion();
+    const bool supported = GameAccess::IsSupportedGame();
+    LOG_INFO("Seamless Region {} starting, game version {}", SC4_TEMPLATE_DLL_VERSION_LABEL, gameVersion);
 
-    if (mpFrameWork && mpFrameWork->GetSystemService(
-        kImGuiServiceID, GZIID_cIGZImGuiService,
-        reinterpret_cast<void**>(&imguiService_))) {
-        panel_ = std::make_unique<HelloPanel>();
-        panel_->SetDetectedGameVersion(gameVersion);
-        panel_->SetVersionLabel(SC4_TEMPLATE_DLL_VERSION_LABEL);
+    ctx_.settings = &settings_;
+    ctx_.pluginDirectory = GetUserPluginsPath_();
+    ctx_.settingsPath = ctx_.pluginDirectory / kSettingsFileName;
 
-        Settings settings;
-        settings.Load(GetUserPluginsPath_() / "SC4SeamlessRegion.ini");
-        panel_->SetVisible(settings.GetStartWindowVisible());
-
-        const ImGuiPanelDesc desc = ImGuiPanelAdapter<HelloPanel>::MakeDesc(
-            panel_.get(), kPanelId, 100, settings.GetStartWindowVisible());
-
-        if (imguiService_->RegisterPanel(desc)) {
-            panelRegistered_ = true;
-            LOG_INFO("Registered demo ImGui panel");
-        } else {
-            LOG_WARN("Failed to register demo ImGui panel");
-        }
-    } else {
-        LOG_WARN("ImGui service not available");
+    if (!supported) {
+        LOG_WARN("Game version {} is not supported (only 641). Seamless Region installs nothing and stays off.",
+                 gameVersion);
+        return true;
     }
+
+    AcquireServices_();
+    GameAccess::Initialize();
+
+    idle_ = std::make_unique<IdleScheduler>();
+    idle_->Initialize(mpFrameWork);
+    region_ = std::make_unique<RegionIndex>();
+    cameraReader_ = std::make_unique<CameraReader>();
+    ctx_.idle = idle_.get();
+    ctx_.messages = &messages_;
+    ctx_.region = region_.get();
+    ctx_.cameraReader = cameraReader_.get();
+
+    messages_.SetRegisterFn([this](const uint32_t id) { RegisterMessage_(id); });
+    for (const uint32_t id : Messages::kDirectorMessages) {
+        RegisterMessage_(id);
+    }
+
+    if (settings_.enabled) {
+        hookingInitialized_ = Hooking::Initialize();
+        CreateModules_();
+    }
+    else {
+        LOG_INFO("Seamless Region is turned off in {}", kSettingsFileName);
+    }
+
+    RegisterPanel_();
     return true;
 }
 
@@ -79,16 +154,36 @@ bool SC4SeamlessRegionDirector::PreAppShutdown() { return true; }
 
 bool SC4SeamlessRegionDirector::PostAppShutdown()
 {
-    if (imguiService_ && panelRegistered_) {
-        imguiService_->UnregisterPanel(kPanelId);
-        panelRegistered_ = false;
+    if (panelRegistered_ && ctx_.imgui) {
+        ctx_.imgui->UnregisterPanel(kPanelId);
+    }
+    panelRegistered_ = false;
+
+    UnregisterMessages_();
+    if (cityOpen_) {
+        OnPreCityShutdown_();
+    }
+    ShutdownModules_();
+    messages_.Clear();
+    if (idle_) {
+        idle_->Terminate();
+    }
+    if (hookingInitialized_) {
+        Hooking::Shutdown();
+        hookingInitialized_ = false;
+    }
+    if (region_) {
+        region_->Clear();
     }
     panel_.reset();
-    if (imguiService_) {
-        imguiService_->Release();
-        imguiService_ = nullptr;
+    ReleaseServices_();
+    GameAccess::Shutdown();
+    ctx_ = ModuleContext();
+
+    if (auto* framework = RZGetFrameWork()) {
+        framework->RemoveHook(this);
     }
-    if (auto* framework = RZGetFrameWork()) framework->RemoveHook(this);
+    LOG_INFO("Seamless Region shut down");
     Logger::Shutdown();
     return true;
 }
@@ -96,14 +191,187 @@ bool SC4SeamlessRegionDirector::PostAppShutdown()
 bool SC4SeamlessRegionDirector::PostSystemServiceShutdown() { return true; }
 bool SC4SeamlessRegionDirector::AbortiveQuit() { return true; }
 bool SC4SeamlessRegionDirector::OnInstall() { return true; }
-bool SC4SeamlessRegionDirector::DoMessage(cIGZMessage2*) { return true; }
+
+bool SC4SeamlessRegionDirector::DoMessage(cIGZMessage2* pMsg)
+{
+    if (!pMsg) {
+        return true;
+    }
+    const uint32_t id = pMsg->GetType();
+    if (id == Messages::kPostCityInit) {
+        OnPostCityInit_();
+    }
+    else if (id == Messages::kPreCityShutdown) {
+        // Subscribers first, while the modules still have their city state.
+        messages_.Dispatch(id, pMsg);
+        OnPreCityShutdown_();
+        return true;
+    }
+    messages_.Dispatch(id, pMsg);
+    return true;
+}
+
+void SC4SeamlessRegionDirector::OnPostCityInit_()
+{
+    cityOpen_ = true;
+    GameAccess::OnCityInit();
+    if (region_) {
+        region_->Refresh();
+    }
+    for (const PanelModule& m : panelModules_) {
+        if (m.active) {
+            Guarded(m.module->Name(), "OnCityInit", [&] {
+                m.module->OnCityInit();
+                return true;
+            });
+        }
+    }
+}
+
+void SC4SeamlessRegionDirector::OnPreCityShutdown_()
+{
+    for (const PanelModule& m : std::views::reverse(panelModules_)) {
+        if (m.active) {
+            Guarded(m.module->Name(), "OnCityShutdown", [&] {
+                m.module->OnCityShutdown();
+                return true;
+            });
+        }
+    }
+    GameAccess::OnCityShutdown();
+    cityOpen_ = false;
+}
+
+void SC4SeamlessRegionDirector::AcquireServices_()
+{
+#ifdef SC4SR_IMGUI_PANEL_DISABLED
+    // Built without the ImGui of SC4RenderServices.dll (see src/dll/CMakeLists.txt): calling
+    // ImGui would call into a DLL that is not there. No ImGui service, no panel, no textures.
+    LOG_WARN("This build has no ImGui support. The panel and neighbor drawing are off. "
+             "Rebuild with the sc4-render-services submodules.");
+#else
+    GetService(mpFrameWork, kImGuiServiceID, GZIID_cIGZImGuiService, ctx_.imgui, "ImGui");
+#endif
+    GetService(mpFrameWork, kDrawServiceID, GZIID_cIGZDrawService, ctx_.draw, "draw");
+    GetService(mpFrameWork, kWorldDrawServiceID, GZIID_cIGZWorldDrawService, ctx_.worldDraw, "world draw");
+    GetService(mpFrameWork, kS3DCameraServiceID, GZIID_cIGZS3DCameraService, ctx_.camera, "camera");
+}
+
+void SC4SeamlessRegionDirector::ReleaseServices_()
+{
+    ReleaseService(ctx_.camera);
+    ReleaseService(ctx_.worldDraw);
+    ReleaseService(ctx_.draw);
+    ReleaseService(ctx_.imgui);
+}
+
+void SC4SeamlessRegionDirector::CreateModules_()
+{
+    // Dependency order: a module only uses modules created before it (and the foundation).
+    const auto add = [this]<typename T>(std::unique_ptr<T> module, const char* group, T*& slot) {
+        slot = module.get();
+        panelModules_.push_back({module.get(), group, false});
+        owned_.push_back(std::move(module));
+    };
+    add(std::make_unique<TileStore>(), "Store", ctx_.tileStore);
+    add(std::make_unique<CitySwitcher>(), "Switching", ctx_.switcher);
+    add(std::make_unique<CameraExtender>(), "Camera", ctx_.cameraExtender);
+    add(std::make_unique<SnapshotReader>(), "Capture", ctx_.snapshotReader);
+    add(std::make_unique<ModelLoadMonitor>(), "Capture", ctx_.modelLoadMonitor);
+    add(std::make_unique<CityCapturer>(), "Capture", ctx_.capturer);
+    add(std::make_unique<TileCache>(), "Neighbors", ctx_.tileCache);
+    add(std::make_unique<NeighborRenderer>(), "Neighbors", ctx_.neighborRenderer);
+    add(std::make_unique<NeighborPicker>(), "Interaction", ctx_.picker);
+    add(std::make_unique<RegionBatchRenderer>(), "Batch", ctx_.batch);
+    add(std::make_unique<HtmlMapExporter>(), "Export", ctx_.exporter);
+    add(std::make_unique<MapOverlay>(), "Overlay", ctx_.overlay);
+
+    int active = 0;
+    for (PanelModule& m : panelModules_) {
+        m.active = Guarded(m.module->Name(), "Initialize", [&] { return m.module->Initialize(ctx_); });
+        if (m.active) {
+            ++active;
+            LOG_INFO("{}: initialized", m.module->Name());
+        }
+        else {
+            LOG_WARN("{}: not active", m.module->Name());
+        }
+    }
+    LOG_INFO("{} of {} modules are active", active, panelModules_.size());
+}
+
+void SC4SeamlessRegionDirector::ShutdownModules_()
+{
+    // Every module gets Shutdown, also when Initialize failed, newest first.
+    for (const PanelModule& m : std::views::reverse(panelModules_)) {
+        Guarded(m.module->Name(), "Shutdown", [&] {
+            m.module->Shutdown();
+            return true;
+        });
+    }
+    panelModules_.clear();
+    while (!owned_.empty()) {
+        owned_.pop_back();
+    }
+}
+
+void SC4SeamlessRegionDirector::RegisterPanel_()
+{
+    if (!ctx_.imgui) {
+        LOG_WARN("No ImGui service, the Seamless Region panel is not available");
+        return;
+    }
+    SeamlessPanel::Info info;
+    info.versionLabel = SC4_TEMPLATE_DLL_VERSION_LABEL;
+    info.gameVersion = GameAccess::GameVersion();
+    info.supported = GameAccess::IsSupportedGame();
+    info.enabled = !panelModules_.empty();
+    panel_ = std::make_unique<SeamlessPanel>(std::move(info), &ctx_, &panelModules_);
+    panel_->SetVisible(settings_.startWindowVisible);
+
+    const ImGuiPanelDesc desc =
+        ImGuiPanelAdapter<SeamlessPanel>::MakeDesc(panel_.get(), kPanelId, 100, settings_.startWindowVisible);
+    panelRegistered_ = ctx_.imgui->RegisterPanel(desc);
+    if (panelRegistered_) {
+        LOG_INFO("Registered the Seamless Region panel");
+    }
+    else {
+        LOG_WARN("Could not register the Seamless Region panel");
+    }
+}
+
+void SC4SeamlessRegionDirector::RegisterMessage_(const uint32_t messageId)
+{
+    if (std::ranges::find(registeredMessages_, messageId) != registeredMessages_.end()) {
+        return;
+    }
+    cIGZMessageServer2Ptr server;
+    if (server && server->AddNotification(this, messageId)) {
+        registeredMessages_.push_back(messageId);
+    }
+    else {
+        LOG_ERROR("Could not listen to message 0x{:08X}", messageId);
+    }
+}
+
+void SC4SeamlessRegionDirector::UnregisterMessages_()
+{
+    cIGZMessageServer2Ptr server;
+    if (server) {
+        for (const uint32_t id : registeredMessages_) {
+            server->RemoveNotification(this, id);
+        }
+    }
+    registeredMessages_.clear();
+}
 
 std::filesystem::path SC4SeamlessRegionDirector::GetUserPluginsPath_()
 {
     try {
         const auto modulePath = wil::GetModuleFileNameW(wil::GetModuleInstanceHandle());
         return std::filesystem::path(modulePath.get()).parent_path();
-    } catch (const wil::ResultException&) {
+    }
+    catch (const wil::ResultException&) {
         return {};
     }
 }
@@ -111,12 +379,12 @@ std::filesystem::path SC4SeamlessRegionDirector::GetUserPluginsPath_()
 void SC4SeamlessRegionDirector::InitializeLogger_()
 {
     const auto pluginsPath = GetUserPluginsPath_();
-    const auto settingsPath = pluginsPath / "SC4SeamlessRegion.ini";
+    const auto settingsPath = pluginsPath / kSettingsFileName;
+    // A console-only logger first, so Load can report problems.
     Logger::Initialize("SC4SeamlessRegion", pluginsPath.parent_path().string(), false);
-    Settings settings;
-    settings.Load(settingsPath);
+    settings_.Load(settingsPath);
     Logger::Shutdown();
-    Logger::Initialize("SC4SeamlessRegion", pluginsPath.parent_path().string(), settings.GetLogToFile());
-    Logger::SetLevel(settings.GetLogLevel());
+    Logger::Initialize("SC4SeamlessRegion", pluginsPath.parent_path().string(), settings_.logToFile);
+    Logger::SetLevel(settings_.logLevel);
     LOG_INFO("Using settings file: {}", settingsPath.string());
 }
