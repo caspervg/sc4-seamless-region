@@ -145,6 +145,7 @@ bool CityCapturer::Initialize(const ModuleContext& ctx)
         return false;
     }
     if (ctx_.messages) {
+        preSaveToken_ = ctx_.messages->Subscribe(Messages::kPreSave, [this](cIGZMessage2*) { OnSaveBegin_(); });
         saveToken_ = ctx_.messages->Subscribe(Messages::kPostSave, [this](cIGZMessage2*) { OnSaved_(); });
     }
     return true;
@@ -156,10 +157,12 @@ void CityCapturer::Shutdown()
     if (phase_ != Phase::Idle) {
         End_(false, "Stopped", "The game closed during the render.", true);
     }
-    if (saveToken_ && ctx_.messages) {
+    if (ctx_.messages) {
         ctx_.messages->Unsubscribe(saveToken_);
+        ctx_.messages->Unsubscribe(preSaveToken_);
     }
     saveToken_ = 0;
+    preSaveToken_ = 0;
     onFinished_ = nullptr;
 }
 
@@ -319,6 +322,7 @@ bool CityCapturer::Begin_(const bool testTile, const CaptureRequest& request)
 
     saved_ = SavedState();
     cancelRequested_ = false;
+    saveInsideRender_ = false;
     calibrationRetried_ = false;
     waiting_ = false;
     tileWaitTimedOut_ = false;
@@ -417,6 +421,7 @@ bool CityCapturer::Step_()
             End_(false, "Cancelled", "The render was cancelled.", false);
             return false;
         }
+        ResumeAfterSave_();
         bool more = false;
         switch (phase_) {
         case Phase::Prepare: more = StepPrepare_(); break;
@@ -999,6 +1004,7 @@ bool CityCapturer::WriteTestTile_()
 
 void CityCapturer::SetClearColor_(const uint32_t rgba)
 {
+    clearColorNow_ = rgba;
     if (!saved_.clearColorDirect && CameraAdapter::SetOutsideClearColor(ctx_.cameraExtender, rgba)) {
         saved_.clearColorSet = true;
         return;
@@ -1172,6 +1178,7 @@ void CityCapturer::End_(const bool ok, std::string phase, std::string error, con
     // Idle first: Restore_ pumps messages, and one of them can close the city and come back here.
     phase_ = Phase::Idle;
     cancelRequested_ = false;
+    saveInsideRender_ = false;
     if (stepId_ != 0) {
         ctx_.idle->Cancel(stepId_);
         stepId_ = 0;
@@ -1255,8 +1262,50 @@ bool CityCapturer::OtherWorkRuns_() const
     return (ctx_.switcher && ctx_.switcher->IsBusy()) || (ctx_.batch && ctx_.batch->IsRunning());
 }
 
+// The game makes the region picture of the city inside a save, with the renderer of the city
+// view. When the player saves during a render, that picture must not get the key color and
+// the missing background of the render. Both save messages are sent (docs/re-notes/
+// switching.md), so they bracket the save. Only renderer fields are written here: no view
+// change inside the save. The edge walls come back on their own for that picture (camera
+// module), and the thumbnail writer puts the camera back where the render had it.
+void CityCapturer::OnSaveBegin_()
+{
+    cISC43DRender* renderer = GameAccess::Renderer();
+    if (phase_ == Phase::Idle || !saved_.backgroundSaved || !renderer) {
+        return;
+    }
+    const bool direct = saved_.clearColorDirect;
+    RestoreClearColor_();
+    saved_.clearColorDirect = direct;  // keeps the way the color is set for the rest of the render
+    renderer->EnableBackgroundPicture(saved_.backgroundPicture);
+    saveInsideRender_ = true;
+    LOG_INFO("Capture: the city is saved during the render, the render goes on after the save");
+}
+
+// Also called from the next step, in case a save ended without its post-save message.
+void CityCapturer::ResumeAfterSave_()
+{
+    if (!saveInsideRender_) {
+        return;
+    }
+    saveInsideRender_ = false;
+    Game game;
+    if (phase_ == Phase::Idle || !game.Fetch()) {
+        return;
+    }
+    game.renderer->EnableBackgroundPicture(false);
+    SetClearColor_(clearColorNow_);
+    if (saved_.snapshotPropertySet) {
+        // The thumbnail writer turns the property off at its end.
+        if (cISC4RenderProperties* properties = game.app->GetRenderProperties()) {
+            properties->SetBoolValue(CaptureAddresses::Renderer::kRenderSnapshotProperty, true);
+        }
+    }
+}
+
 void CityCapturer::OnSaved_()
 {
+    ResumeAfterSave_();
     // Inside the save message: only note it. The render starts some idle ticks later, when
     // the save is over. A save that is part of leaving the city (a switch, the region view, a
     // quit) is followed by OnCityShutdown, which drops the note. So only the city that was
@@ -1313,7 +1362,7 @@ void CityCapturer::DrawPanelSection()
             Cancel();
         }
         ImGui::TextWrapped("The view moves over the city while the render runs. The game is paused. "
-                           "Do not zoom or rotate until it is done.");
+                           "Do not zoom, rotate or save until it is done.");
         return;
     }
 

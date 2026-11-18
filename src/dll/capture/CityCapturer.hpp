@@ -170,6 +170,8 @@ private:
     void End_(bool ok, std::string phase, std::string error, bool cityClosing);
     void PhaseText_(char* text, size_t size) const;
     [[nodiscard]] double EtaSeconds_() const;
+    void OnSaveBegin_();
+    void ResumeAfterSave_();
     void OnSaved_();
     void CancelRenderOnSave_();
     [[nodiscard]] bool OtherWorkRuns_() const;
@@ -180,6 +182,11 @@ private:
     Phase phase_ = Phase::Idle;
     uint32_t stepId_ = 0;
     uint32_t saveToken_ = 0;
+    uint32_t preSaveToken_ = 0;
+    // A save runs inside a render: the game's own clear color and background are back for
+    // the region picture that the save makes.
+    bool saveInsideRender_ = false;
+    uint32_t clearColorNow_ = 0;  // the key color the render draws over at the moment
     // Render on save: the countdown step, 0 when no save waits for its render. It only lives
     // inside the city that was saved (OnCityShutdown cancels it).
     uint32_t renderOnSaveId_ = 0;

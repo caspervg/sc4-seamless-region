@@ -193,6 +193,14 @@ earlier times (0 for a first render, which counts as out of date).
 edge walls (`CameraExtender::SetEdgeWallsHidden(all)`), the hover tint and the map overlay (both
 check `CityCapturer::IsRunning()` themselves, the capture changes no setting for them).
 
+**A save during a render.** The game makes the region picture of the city inside the save,
+with the same renderer. The pre-save and post-save messages are sent, so they bracket the save.
+At pre-save the capture puts the game's clear color and background picture back, at post-save
+it sets its own again (and the render property, which the thumbnail writer turns off). The
+thumbnail writer saves and restores the camera itself, so the render goes on where it was.
+The model maker clears its synchronous flag at post-save: the capture then waits for the
+loader (`ModelsReady_`). Untested in game.
+
 **Restore when the city closes.** OnCityShutdown runs inside PreCityShutdown, a sent message.
 Other listeners (the city view, the model maker) may have reacted already. So the capture then
 only puts back what outlives the city view: the camera module's state (walls, free roam, clear
