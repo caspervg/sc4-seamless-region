@@ -667,7 +667,12 @@ bool TileStore::QueueWrite(const TileKey& key, std::vector<uint8_t>&& rgba, cons
     job.rgba = std::move(rgba);
     job.w = w;
     job.h = h;
-    return Enqueue(std::move(job), true);
+    if (!Enqueue(std::move(job), true)) {
+        // Enqueue leaves the job untouched on refusal: give the pixels back to the caller.
+        rgba = std::move(job.rgba);
+        return false;
+    }
+    return true;
 }
 
 bool TileStore::DeleteCity(const std::string& cityKey)

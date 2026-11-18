@@ -807,7 +807,7 @@ bool CityCapturer::StepWaitStore_()
     }
     lastStoreTry_ = Clock::now();
     if (outgoing_.size() != tileA_.size()) {
-        // Also after a refused write: the store may have taken the buffer anyway.
+        // A refused write leaves outgoing_ intact, so this copy runs once per tile.
         outgoing_.assign(tileA_.begin(), tileA_.end());
     }
     if (ctx_.tileStore->QueueWrite(outgoingKey_, std::move(outgoing_), tileSize_, tileSize_)) {

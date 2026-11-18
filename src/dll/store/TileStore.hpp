@@ -75,7 +75,8 @@ namespace CityMeta
 class TileStore final : public Module
 {
 public:
-    // Encode queue capacity in tiles. QueueWrite returns false when it is full.
+    // Encode queue capacity in tiles. QueueWrite returns false when it is full, and then
+    // leaves the caller's rgba buffer intact so the caller can retry with it.
     static constexpr size_t kQueueCapacity = 16;
     static constexpr const char* kFolderName = "RegionRenders";
 

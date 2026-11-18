@@ -405,11 +405,13 @@ TEST_CASE(StoreQueueReturnsFalseWhenFullAndNeverBlocks)
     const auto start = std::chrono::steady_clock::now();
     // Noise tiles of 512x512 take the worker tens of milliseconds each, so the queue fills.
     for (int i = 0; i < 400 && !sawFull; ++i) {
-        if (f.store.QueueWrite(Key("Big", 0, 0, i, 0), NoiseTile(512, 512, static_cast<uint32_t>(i)), 512, 512)) {
+        auto tile = NoiseTile(512, 512, static_cast<uint32_t>(i));
+        if (f.store.QueueWrite(Key("Big", 0, 0, i, 0), std::move(tile), 512, 512)) {
             ++accepted;
         }
         else {
             sawFull = true;
+            CHECK(tile.size() == 512u * 512u * 4u);  // a refused write keeps the caller's pixels
         }
     }
     const auto spent = std::chrono::steady_clock::now() - start;
