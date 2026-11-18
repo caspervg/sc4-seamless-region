@@ -78,7 +78,8 @@ SetViewportOffset(offset)                          cS3DCamera +0x19c/+0x1a0
 
 The floor is the game's `(x - 0.5) + 12582912.0` float rounding trick with an exact-integer
 fix, which equals floor(x). Note for the camera module: when the target moves more than about
-`|eyeOffset|` (8192 / cos pitch, 9.5 to 11.6 km) along the horizontal view direction from the
+D / cos^2(pitch) (10.9 km at zoom 1, 16.4 km at zoom 4 and 5, corrected by the camera
+module, see camera.md) along the horizontal view direction from the
 base corner, k turns negative and the eye passes the target. The ortho image does not
 change, but the near and far planes then clip the scene.
 

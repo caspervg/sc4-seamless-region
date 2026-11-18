@@ -92,7 +92,9 @@ PostCityInit `0x26D31EC1`.
 - `cSTETerrainView3D::DrawSideCliffs` `0x00753e00` (RET 4), called at `0x0075bf9e`
   draws the brown walls at the city edge.
 - `cSC43DRender::ClearViewport` `0x007c3f80` (vtable +0xbc) clears to a solid color when
-  any part of the view is outside the city.
+  any part of the view is outside the city. The color is renderer +0x1a8, set with
+  `SetViewportClearColor` (cISC43DRender slot +0xb8). It only shows with the background
+  picture off. SC4ViewUtilities +0x22c..0x238 is a rectangle, not the color.
 - `Background3D<zoom>` pictures tile one image on the ground outside the city. Not
   useful for neighbors.
 
