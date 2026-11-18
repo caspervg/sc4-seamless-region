@@ -832,7 +832,9 @@ void MapOverlay::DrawPanelSection()
         ImGui::TextWrapped("No image on this city.");
         return;
     }
-    ImGui::TextWrapped("%s", ToUtf8(FromUtf8(state_.imagePath).filename()).c_str());
+    // The file name is the end of the path: no path object every frame.
+    const size_t nameStart = state_.imagePath.find_last_of("/\\");
+    ImGui::TextWrapped("%s", state_.imagePath.c_str() + (nameStart == std::string::npos ? 0 : nameStart + 1));
     if (loading_ || (!texturesReady_ && uploadNext_ < pieces_.size())) {
         ImGui::TextUnformatted("Loading the image...");
     }
