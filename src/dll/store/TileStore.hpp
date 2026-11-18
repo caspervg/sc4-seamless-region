@@ -217,6 +217,7 @@ private:
         std::optional<uint64_t> bytes;
     };
     std::vector<PanelRow> rows_;
+    std::string rendersText_;  // the renders folder as UTF-8, empty without a region
     uint32_t rowsStoreGeneration_ = 0xffffffffu;
     uint32_t rowsRegionGeneration_ = 0xffffffffu;
     uint64_t rowsTick_ = 0;
