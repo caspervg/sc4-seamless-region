@@ -12,6 +12,7 @@
 #include "GZServPtrs.h"
 #include "capture/SnapshotReader.hpp"
 #include "cISC4Simulator.h"
+#include "core/Guard.hpp"
 #include "core/IdleScheduler.hpp"
 #include "core/Messages.hpp"
 #include "imgui.h"
@@ -52,7 +53,10 @@ namespace
             : owner_(owner)
         {
         }
-        void OnRender() override { owner_->DrawWindow(); }
+        void OnRender() override
+        {
+            Guarded("Batch: the progress window", [this] { owner_->DrawWindow(); });
+        }
 
     private:
         RegionBatchRenderer* owner_;

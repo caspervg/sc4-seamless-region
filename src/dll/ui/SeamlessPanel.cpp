@@ -4,6 +4,7 @@
 #include <cstring>
 #include <utility>
 
+#include "core/Guard.hpp"
 #include "imgui.h"
 #include "public/cIGZS3DCameraService.h"
 #include "public/cIGZWorldDrawService.h"
@@ -61,28 +62,32 @@ void SeamlessPanel::OnRender()
     }
     bool open = visible_;
     ImGui::SetNextWindowSize(ImVec2(560.0f, 520.0f), ImGuiCond_FirstUseEver);
-    if (ImGui::Begin("Seamless Region", &open)) {
-        if (ImGui::BeginTabBar("SeamlessRegionTabs")) {
-            if (ImGui::BeginTabItem("Status")) {
-                DrawStatus_();
-                ImGui::EndTabItem();
+    // The ImGui service calls this from inside the game's frame: no exception may leave it.
+    // After one, ImGui closes the windows and tables that stayed open at the end of the frame.
+    Guarded("The Seamless Region panel", [&] {
+        if (ImGui::Begin("Seamless Region", &open)) {
+            if (ImGui::BeginTabBar("SeamlessRegionTabs")) {
+                if (ImGui::BeginTabItem("Status")) {
+                    DrawStatus_();
+                    ImGui::EndTabItem();
+                }
+                if (info_.enabled && ImGui::BeginTabItem("Tools")) {
+                    DrawTools_();
+                    ImGui::EndTabItem();
+                }
+                if (ImGui::BeginTabItem("Settings")) {
+                    DrawSettings_();
+                    ImGui::EndTabItem();
+                }
+                if (info_.supported && ImGui::BeginTabItem("Diagnostics")) {
+                    DrawDiagnostics_();
+                    ImGui::EndTabItem();
+                }
+                ImGui::EndTabBar();
             }
-            if (info_.enabled && ImGui::BeginTabItem("Tools")) {
-                DrawTools_();
-                ImGui::EndTabItem();
-            }
-            if (ImGui::BeginTabItem("Settings")) {
-                DrawSettings_();
-                ImGui::EndTabItem();
-            }
-            if (info_.supported && ImGui::BeginTabItem("Diagnostics")) {
-                DrawDiagnostics_();
-                ImGui::EndTabItem();
-            }
-            ImGui::EndTabBar();
         }
-    }
-    ImGui::End();
+        ImGui::End();
+    });
     visible_ = open;
 }
 

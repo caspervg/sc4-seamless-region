@@ -8,6 +8,7 @@
 #include "cIGZFrameWork.h"
 #include "cIGZMessage2.h"
 #include "cIGZMessageServer2.h"
+#include "core/Guard.hpp"
 #include "core/Hooking.hpp"
 #include "core/IdleScheduler.hpp"
 #include "public/ImGuiPanelAdapter.h"
@@ -49,8 +50,9 @@ namespace
     constexpr uint32_t kPanelId = 0x57F1F26Bu;
     constexpr auto kSettingsFileName = "SC4SeamlessRegion.ini";
 
+    // Runs one lifecycle step of a module. Returns what the step returns, false when it threw.
     template <typename Fn>
-    bool Guarded(const char* moduleName, const char* step, Fn&& fn)
+    bool ModuleCall(const char* moduleName, const char* step, Fn&& fn)
     {
         try {
             return fn();
@@ -197,17 +199,19 @@ bool SC4SeamlessRegionDirector::DoMessage(cIGZMessage2* pMsg)
     if (!pMsg) {
         return true;
     }
+    // The game calls this from its message servers: no exception may leave it.
     const uint32_t id = pMsg->GetType();
+    const auto dispatch = [&] { Guarded("A message handler", [&] { messages_.Dispatch(id, pMsg); }); };
     if (id == Messages::kPostCityInit) {
         OnPostCityInit_();
     }
     else if (id == Messages::kPreCityShutdown) {
         // Subscribers first, while the modules still have their city state.
-        messages_.Dispatch(id, pMsg);
+        dispatch();
         OnPreCityShutdown_();
         return true;
     }
-    messages_.Dispatch(id, pMsg);
+    dispatch();
     return true;
 }
 
@@ -228,7 +232,7 @@ void SC4SeamlessRegionDirector::OnPostCityInit_()
     }
     for (const PanelModule& m : panelModules_) {
         if (m.active) {
-            Guarded(m.module->Name(), "OnCityInit", [&] {
+            ModuleCall(m.module->Name(), "OnCityInit", [&] {
                 m.module->OnCityInit();
                 return true;
             });
@@ -240,7 +244,7 @@ void SC4SeamlessRegionDirector::OnPreCityShutdown_()
 {
     for (const PanelModule& m : std::views::reverse(panelModules_)) {
         if (m.active) {
-            Guarded(m.module->Name(), "OnCityShutdown", [&] {
+            ModuleCall(m.module->Name(), "OnCityShutdown", [&] {
                 m.module->OnCityShutdown();
                 return true;
             });
@@ -300,7 +304,7 @@ void SC4SeamlessRegionDirector::CreateModules_()
 
     int active = 0;
     for (PanelModule& m : panelModules_) {
-        m.active = Guarded(m.module->Name(), "Initialize", [&] { return m.module->Initialize(ctx_); });
+        m.active = ModuleCall(m.module->Name(), "Initialize", [&] { return m.module->Initialize(ctx_); });
         if (m.active) {
             ++active;
             LOG_INFO("{}: initialized", m.module->Name());
@@ -316,7 +320,7 @@ void SC4SeamlessRegionDirector::ShutdownModules_()
 {
     // Every module gets Shutdown, also when Initialize failed, newest first.
     for (const PanelModule& m : std::views::reverse(panelModules_)) {
-        Guarded(m.module->Name(), "Shutdown", [&] {
+        ModuleCall(m.module->Name(), "Shutdown", [&] {
             m.module->Shutdown();
             return true;
         });

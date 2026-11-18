@@ -17,6 +17,7 @@
 #include "cISC43DRender.h"
 #include "cISC4City.h"
 #include "cISTETerrain.h"
+#include "core/Guard.hpp"
 #include "core/IdleScheduler.hpp"
 #include "core/Messages.hpp"
 #include "imgui.h"
@@ -241,6 +242,12 @@ void MapOverlay::WorkerMain_()
             decoded = {};
             decoded.epoch = epoch;
             decoded.error = "There is not enough memory for this image";
+        }
+        catch (...) {
+            // Nothing may leave a thread function: that ends the game.
+            decoded = {};
+            decoded.epoch = epoch;
+            decoded.error = "The image could not be read";
         }
 
         lock.lock();
@@ -472,7 +479,7 @@ void MapOverlay::TakeDecoded_(Decoded&& decoded)
 void MapOverlay::UploadThunk_(void*)
 {
     if (sInstance) {
-        sInstance->UploadInFrame_();
+        Guarded("Overlay: the texture upload", [] { sInstance->UploadInFrame_(); });
     }
 }
 
@@ -625,7 +632,7 @@ bool MapOverlay::ShouldDraw_() const
 
 void MapOverlay::DrawThunk_(cIGZWorldDrawContext& context, void* userData)
 {
-    static_cast<MapOverlay*>(userData)->Draw_(context);
+    Guarded("Overlay: the draw callback", [&] { static_cast<MapOverlay*>(userData)->Draw_(context); });
 }
 
 void MapOverlay::Draw_(cIGZWorldDrawContext& context)

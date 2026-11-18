@@ -15,6 +15,7 @@
 #include "cISTETerrain.h"
 #include "cSC4BaseViewInputControl.h"
 #include "capture/CityCapturer.hpp"
+#include "core/Guard.hpp"
 #include "imgui.h"
 #include "interaction/InteractionAddresses.hpp"
 #include "public/cIGZImGuiService.h"
@@ -35,11 +36,18 @@ class NeighborPickerControl final : public cSC4BaseViewInputControl {
 
     void Detach() { owner_ = nullptr; }
 
+    // The city view calls these: no exception may leave them.
     bool OnMouseDownL(const int32_t x, const int32_t z, uint32_t) override {
-        return owner_ && owner_->OnMouseDownL(x, z);
+        bool taken = false;
+        Guarded("Interaction: mouse down", [&] { taken = owner_ && owner_->OnMouseDownL(x, z); });
+        return taken;
     }
 
-    bool OnMouseUpL(const int32_t x, const int32_t z, uint32_t) override { return owner_ && owner_->OnMouseUpL(x, z); }
+    bool OnMouseUpL(const int32_t x, const int32_t z, uint32_t) override {
+        bool taken = false;
+        Guarded("Interaction: mouse up", [&] { taken = owner_ && owner_->OnMouseUpL(x, z); });
+        return taken;
+    }
 
     bool OnMouseMove(const int32_t x, const int32_t z, uint32_t) override {
         if (owner_) {
@@ -317,7 +325,7 @@ void NeighborPicker::Rebuild_() {
 
 void NeighborPicker::PassCallback_(const DrawServicePass pass, const bool begin, void* userData) {
     if (pass == DrawServicePass::PreDynamic && begin) {
-        static_cast<NeighborPicker*>(userData)->Tick_();
+        Guarded("Interaction: the draw callback", [&] { static_cast<NeighborPicker*>(userData)->Tick_(); });
     }
 }
 
@@ -542,7 +550,7 @@ void NeighborPicker::Activate_(const int neighbor) {
 void NeighborPicker::OverlayRender_(void* data) {
     auto* self = static_cast<NeighborPicker*>(data);
     if (self->initialized_) {
-        self->DrawOverlay_();
+        Guarded("Interaction: the tooltip", [&] { self->DrawOverlay_(); });
     }
 }
 

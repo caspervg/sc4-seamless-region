@@ -13,6 +13,7 @@
 
 #include <windows.h>
 
+#include "core/Guard.hpp"
 #include "imgui.h"
 #include "render/NeighborRenderer.hpp"
 #include "render/TileLru.hpp"
@@ -314,7 +315,7 @@ void TileCache::PumpUploads()
 void TileCache::PumpThunk_(void*)
 {
     if (sInstance) {
-        sInstance->PumpInFrame_();
+        Guarded("Tile cache: the texture upload", [] { sInstance->PumpInFrame_(); });
     }
 }
 
