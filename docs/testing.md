@@ -586,3 +586,80 @@ example an 8000 x 8000 PNG of a real map), a small one (about 1000 px), a JPG an
    is found through its path relative to the region folder.
 4. "Remove overlay" deletes the JSON file. The city opens without an image next time.
 5. A city render (Capture) or the region thumbnail never shows the image.
+
+
+## Interaction
+
+Hover, tint, tooltip and click on neighbor cities (`src/dll/interaction/*`). Needs a region
+with founded and rendered neighbors on several sides, one unfounded neighbor slot next to
+the city, and at least one neighbor with an old render (play it and save after the render).
+
+### Start and city load
+
+- Log after the city loads: `Interaction: click control added to the city view`.
+- With a missing service the log says which part is off: `Interaction: no draw service
+  callback`, `no world draw layer` or `no ImGui overlay`.
+- Panel, Interaction section, "Interaction diagnostics": "Click control in the city view: yes".
+
+### Hover and tint
+
+1. At zoom 1 to 5 and at every rotation, move the pointer over each neighbor. The neighbor's
+   ground gets a light blue tint and a tooltip appears next to the pointer.
+2. The tinted area is exactly the area that reacts. Near the shared edge it lines up with the
+   city edge. Tall buildings of the neighbor that rise above its ground are not tinted (the
+   tint lies on the ground, see docs/re-notes/interaction.md).
+3. A neighbor behind the city (top of the screen): buildings of your city that stand in front
+   of it hide the tint, and the pointer over those buildings shows no tooltip.
+4. A neighbor in front of the city (bottom of the screen): the tint covers its whole ground.
+5. Move the pointer over a game panel (the bottom bar, a query window) or over an ImGui
+   window: the tint and the tooltip go away. Diagnostics: "Window under the pointer" says
+   "a game window" over panels and "the city view" over the map.
+6. Scroll the view with the keys while the pointer is still: the tint follows the neighbor
+   under the pointer.
+7. Panel: turn off "Tint the neighbor under the pointer". The tooltip stays, the tint goes.
+   Turn off "Draw neighbor cities": no tint, no tooltip, no click.
+8. Save the city (the region thumbnail is made): the thumbnail shows no tint.
+
+### Tooltip text
+
+- Founded and rendered: name, "Small city", "Medium city" or "Large city", "Rendered N
+  minutes/hours/days ago", "Click to play this city".
+- Render older than the save: an extra orange line "Out of date. The city changed after the
+  render."
+- Founded without a render: "No render yet".
+- Unfounded slot: "Not founded" and "Click: opens the region view to found this city".
+- With a tool (road, zone, bulldozer) active: "Close the tool you use to play this city." in
+  place of the click line. With the query tool the click line stays.
+
+### Click
+
+1. No tool active. Click a neighbor: the city is saved and the neighbor loads. Log:
+   `Interaction: click on '<name>' at cell (x, z)`, then `Interaction: switch to '<name>'
+   requested` and the switching module's lines.
+2. Press on a neighbor, move 4 pixels or more, release: nothing happens. Log (debug level):
+   `Interaction: the mouse moved, no switch`.
+3. Click inside your own city: the game reacts as always (query tool shows the query, no tool
+   does nothing). Right-drag and the mouse wheel work everywhere, also over neighbors.
+4. With a road, zone or bulldozer tool active, click and drag over a neighbor: the tool works
+   as it does without the plugin and no switch happens.
+5. With the query tool active, click a neighbor: it switches.
+6. Click an unfounded slot: the game goes to the region view.
+7. Panel "Last click" shows the result of the last click.
+
+### City that cannot be saved
+
+1. Open a city where saving is off (for example a city that another plugin marks as not
+   savable, see "Switching").
+2. Click a neighbor: a window asks "This city cannot be saved. Leave it without saving?".
+   Log: `Interaction: this city cannot be saved, asking first`.
+3. "Stay here": nothing happens. Log: `Interaction: switch without saving cancelled`.
+4. "Leave without saving": the neighbor loads. Log: `Interaction: switch to '<name>' without
+   saving requested`.
+
+### While other work runs
+
+- During "Render this city" and during a region batch render: no tint, no tooltip, clicks on
+  neighbors do nothing special.
+- During a switch: same, until the new city has loaded.
+- Exit to the region view and load another city: the log shows the control added again (no
+  error), and hover works in the new city.
