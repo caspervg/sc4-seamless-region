@@ -163,6 +163,11 @@ bool SC4SeamlessRegionDirector::PostAppShutdown()
 
     UnregisterMessages_();
     if (cityOpen_) {
+        // The game closes the city (and sends kPreCityShutdown) before this point. If it did
+        // not, the city view may be gone already: hide it from the modules first, so they
+        // only drop their own state.
+        LOG_WARN("The game shut down with a city still open");
+        GameAccess::OnCityShutdown();
         OnPreCityShutdown_();
     }
     ShutdownModules_();
