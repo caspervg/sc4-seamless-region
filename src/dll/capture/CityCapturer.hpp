@@ -113,8 +113,6 @@ private:
         cS3DVector3 target;
         bool neighborsOff = false;
         bool neighborsBefore = true;
-        bool hoverTintSaved = false;
-        bool hoverTint = false;
         bool freeRoamBefore = false;    // the scroll clamp was already off
         bool freeRoamByCamera = false;  // CameraExtender::SetFreeRoam(true) was called
         bool clampForced = false;       // the capture cleared the scroll clamp flag itself

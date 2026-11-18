@@ -461,12 +461,6 @@ bool CityCapturer::StepPrepare_()
         ctx_.neighborRenderer->SetEnabled(false);
         saved_.neighborsOff = true;
     }
-    if (ctx_.settings) {
-        saved_.hoverTint = ctx_.settings->hoverTint;
-        saved_.hoverTintSaved = true;
-        ctx_.settings->hoverTint = false;
-        ctx_.settings->MarkChanged();
-    }
 
     // Free roam: the view target of an edge tile lies outside the city.
     saved_.freeRoamBefore = !frame.scrollClampEnabled;
@@ -1113,14 +1107,10 @@ void CityCapturer::Restore_(const bool cityClosing)
             *clamp = 1;
         }
     }
-    if (saved_.hoverTintSaved && ctx_.settings) {
-        ctx_.settings->hoverTint = saved_.hoverTint;
-        ctx_.settings->MarkChanged();
-    }
     if (saved_.neighborsOff && ctx_.neighborRenderer) {
+        // The render was of this city, which its own view never shows as a neighbor: the
+        // neighbor tiles in the cache are still good. SetEnabled redraws the view.
         ctx_.neighborRenderer->SetEnabled(saved_.neighborsBefore);
-        // The renderer does not watch the store: tell it about the new tiles and meta.json.
-        ctx_.neighborRenderer->InvalidateAll();
     }
 
     const bool synchronous = saved_.synchronousModels;
