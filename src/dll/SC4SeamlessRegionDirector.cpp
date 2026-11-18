@@ -213,6 +213,14 @@ bool SC4SeamlessRegionDirector::DoMessage(cIGZMessage2* pMsg)
 
 void SC4SeamlessRegionDirector::OnPostCityInit_()
 {
+    // kPostCityInit is posted, not sent: it arrives on a later message pump, after LoadCity
+    // (and a switch task) returned. PartialCloseCity pumps the queues before it sends
+    // kPreCityShutdown, so the message normally comes while its city is still open. If the
+    // city is gone anyway, the modules must not start on it.
+    if (!GameAccess::City()) {
+        LOG_WARN("PostCityInit came without a city. The modules stay off until the next city load.");
+        return;
+    }
     cityOpen_ = true;
     GameAccess::OnCityInit();
     if (region_) {
@@ -239,6 +247,10 @@ void SC4SeamlessRegionDirector::OnPreCityShutdown_()
         }
     }
     GameAccess::OnCityShutdown();
+    // RegionIndex::Current() must not name the closed city until the next kPostCityInit.
+    if (region_) {
+        region_->ClearCurrent();
+    }
     cityOpen_ = false;
 }
 

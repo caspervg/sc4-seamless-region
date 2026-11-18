@@ -48,7 +48,9 @@ namespace GameAccess
 
     // Director only: caches the app at PostAppInit and drops it at shutdown. The city view
     // objects (View3D, Renderer, CameraControl) are only returned between OnCityInit (before
-    // the modules' OnCityInit) and OnCityShutdown (after the modules' OnCityShutdown).
+    // the modules' OnCityInit) and OnCityShutdown (after the modules' OnCityShutdown). So
+    // they are nullptr from CloseCity until the new city's kPostCityInit arrives, also when
+    // City() already returns the new city.
     void Initialize();
     void Shutdown();
     void OnCityInit();
@@ -147,9 +149,13 @@ public:
     virtual bool Initialize(const ModuleContext& ctx) = 0;
     // Called once at PostAppShutdown, in reverse creation order. Removes hooks, stops threads.
     virtual void Shutdown() = 0;
-    // After kPostCityInit (0x26D31EC1). RegionIndex is already refreshed.
+    // At kPostCityInit (0x26D31EC1). RegionIndex is already refreshed. The game posts this
+    // message: it arrives on a message pump after LoadCity returned, so after a city switch
+    // (CitySwitcher) has ended. Do not take "the switch is done" as "OnCityInit has run".
     virtual void OnCityInit() = 0;
-    // At kPreCityShutdown (0x26D31EC2), in reverse creation order.
+    // At kPreCityShutdown (0x26D31EC2), in reverse creation order. The game sends this
+    // message: it runs inside CloseCity while the city and its view still exist. It can come
+    // without an OnCityInit before it (a city that closed before its kPostCityInit arrived).
     virtual void OnCityShutdown() = 0;
     // Draws this module's part of the panel, inside an ImGui window. Game thread.
     virtual void DrawPanelSection() = 0;

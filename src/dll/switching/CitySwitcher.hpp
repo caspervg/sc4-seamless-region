@@ -9,9 +9,13 @@
 // idle task, so nothing repaints the old city screen while it has no city.
 //
 // It keeps the target region cell, never a cISC4RegionalCity pointer: CloseCity frees them.
-// CloseCity and LoadCity send PreCityShutdown and PostCityInit synchronously, so the director
-// calls OnCityShutdown and OnCityInit of every module (this one too) from inside the switch.
-// IsBusy stays true until the switch is done.
+//
+// Message timing (cSC4App::PostCityMessage 0x00449af0): CloseCity sends PreCityShutdown, so
+// every module's OnCityShutdown runs inside the switch. LoadCity only posts PostCityInit and
+// PostCityInitComplete, so the modules' OnCityInit runs on a later message pump, after the
+// switch task has ended and IsBusy is false again. In between, GameAccess::City() is the
+// new city, but RegionIndex::Current() is null and GameAccess::View3D() is null. "The switch
+// is done" never means "the city is ready": wait for OnCityInit or kPostCityInitComplete.
 //
 // Panel diagnostics: switch to the neighbor north, south, east or west of the current city.
 
@@ -36,7 +40,8 @@ public:
     // the cell is the current city, or the current city cannot be saved and allowWithoutSave
     // is false. Ask CanSaveCurrentCity first and confirm with the player before passing true.
     bool RequestSwitch(int cellX, int cellZ, bool allowWithoutSave = false);
-    // From RequestSwitch until the switch has finished or failed.
+    // From RequestSwitch until the switch task has ended (LoadCity returned or the switch
+    // failed). The new city's OnCityInit comes after that, see the note above.
     [[nodiscard]] bool IsBusy() const;
     // Why the last request or switch failed, empty after a success.
     [[nodiscard]] std::string LastError() const;

@@ -144,6 +144,7 @@ void RegionBatchRenderer::Shutdown()
     initialized_ = false;
 }
 
+// PostCityInit is posted: this runs on a message pump after the switch task has ended.
 void RegionBatchRenderer::OnCityInit()
 {
     if (running_) {
@@ -154,8 +155,9 @@ void RegionBatchRenderer::OnCityInit()
 
 void RegionBatchRenderer::OnCityShutdown()
 {
-    // Inside the switch: the switch saved the city already (it saves before CloseCity), with
-    // the game still paused. The pause ends here while the city and its clock still exist.
+    // PreCityShutdown is sent, so this runs inside CloseCity, inside the switch task. The
+    // switch saved the city already (it saves before CloseCity), with the game still paused.
+    // The pause ends here while the city and its clock still exist.
     pause_.reset();
     cityReady_ = false;
     if (running_ && phase_ != Phase::Switching && phase_ != Phase::Return) {

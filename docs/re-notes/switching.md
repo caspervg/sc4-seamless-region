@@ -13,8 +13,11 @@ It calls everything through the gzcom-dll headers, so it needs no new raw addres
 | `RZ::GS()` (`0x00913c1a`) = the system service `0xC416025C` queried for IID `0x0073283C`, which is `cIGZGraphicSystemPtr` | `ghx dis 0x00449560` | high |
 | cIGZGraphicSystem +0x44 = `cGZGraphicSystem::Draw` `0x0098e5c0`, the same as the gzcom-dll header slot of `Draw()` | vtables at `0x00adaa58` and `0x00adb050` (both referenced by constructors), +0x44 holds `0x0098e5c0` in both | high for the slot |
 | `cGZGraphicSystem::Draw` presents the frame: when its dirty flag (+0x26) is set it blits the canvas rect to the screen and flushes the driver, and it blits the cursor (+0x25). It does not redraw windows. Calling it twice before CloseCity shows the last complete frame (both buffers of a flipped display) while the game blocks in the close and load | decompile `0x0098e5c0`. The purpose of the second call is inferred | medium |
-| `cSC4App::PostCityMessage` (`0x00449af0`) uses MessageSend (+0xc) when its last argument is false, MessagePost (+0x10) otherwise. PartialCloseCity and LoadCity pass false, so PreCityShutdown, PostCityShutdown, PreCityInit, PostCityInit and PostCityInitComplete are synchronous: our director and every module react inside CloseCity and LoadCity | decompile, `dis 0x00454ab1` pushes 0 | high |
-| PartialCloseCity (`0x00454a60`) pumps both queues before PreCityShutdown, not after. CloseCity then reloads the touching cities and does not pump or draw | decompile `0x00454a60`, `0x00455330` | high |
+| `cSC4App::PostCityMessage` (`0x00449af0`, `RET 0x14`) takes (city, id, 0, 0, post). It uses MessageSend (message server 2 slot +0xc) when `post` is 0 and MessagePost (+0x10) when it is 1 | `ghx dis 0x00449af0`: `MOV AL,[ESP+0x20]`, `TEST AL,AL`, `JZ` to the +0xc call, else `CALL [EDX+0x10]` | high |
+| **Sent** (inside the game call): PreCityShutdown `0x26D31EC2` (PartialCloseCity, `PUSH 0x0` at `0x00454ab1`) and PreCityInit `0x26D31EC0` (LoadCity, `PUSH 0x0` at `0x00455889`) | `ghx dis 0x00454a60`, `ghx dis 0x004555f0` | high |
+| **Posted** (arrive on a later message pump, after the game call returned): PostCityShutdown `0x26D31EC3` (PartialCloseCity, `PUSH 0x1` at `0x00454acf`), and in LoadCity `0x2B96B3EA` (`0x004558a8`), PostCityInit `0x26D31EC1` (`0x004558bf`), `0xAB96B05F` (`0x004558d6`) and PostCityInitComplete `0xEA8AE29A` (`0x004558ed`), queued in this order | same disassembly, `PUSH 0x1` before each `CALL 0x00449af0` | high |
+| The save messages `0x26C63343` (pre-save) and `0x26C63345` (post-save) are **sent**: SaveCity(path) (`0x00455e20`) builds each message and calls message server slot +0xc itself, without PostCityMessage. So a listener of post-save runs inside the save, before the caller of RequestSaveCity goes on | `ghx dis 0x00455e20` at `0x00456102` .. `0x0045614b` and `0x00456380` .. `0x004563bd` (`CALL [reg+0xc]`) | high |
+| PartialCloseCity (`0x00454a60`) pumps both queues (`RunMessageServerPump` and `RunMessageServer2Pump` with 100, 500, 5000) before PreCityShutdown, not after. So a PostCityInit that still waits in the queue is delivered before the city shuts down. CloseCity then reloads the touching cities and does not pump or draw | decompile `0x00454a60`, `0x00455330` | high |
 | RequestSaveCity(false, false) returns the result of SaveCity(path). On a failure it shows the game's own message box. With IsSaveDisabled it shows a message and returns false | `dis 0x00455c00..0x00455e0f`: result in `[esp+0xf]`, returned at `0x00455e02` | high |
 | LoadCity stores the holder pointer it gets at cSC4App +0x4c (interface-relative) and keeps using it, so the holder must be the region's own entry (`GetCity(x,z)`), fetched after CloseCity | decompile `0x004555f0` and CloseCity (`**(this+0x4c)` deref) | high |
 | `cSC4WinRegionScreen::LaunchRegionalCity` (`0x007adc20`) is the region view's own launch: reads the save path (+0x7c); non-empty: `LoadCity(path, holder)`; empty or failed: clears NewCitySpecification +0x200 and calls `RequestNewCity(holder)` | decompile | high |
@@ -30,7 +33,7 @@ the screen swap inside LoadCity:
 - PartialCloseCity pumps before PreCityShutdown, not after.
 - CloseCity reloads the touching regional cities and returns. No pump, no draw.
 - LoadCity reads the file (`SC4ReadGZSerializable`) and then calls DestroyCurrentScreen and
-  CreateCityScreen before it sends any city message or pumps the queues.
+  CreateCityScreen before it sends or posts any city message. It does not pump the queues.
 - If LoadCity fails before the swap, we call RequestGoToRegionView(false) at once. It does not
   pump either: two presents (no window drawing), CloseCity (nothing to close), then the screen
   swap to the region view.
@@ -42,17 +45,43 @@ message of RequestSaveCity, and it comes before CloseCity, while the city is com
 
 ## Our DLL: ordering
 
-PreCityShutdown and PostCityInit reach the director synchronously inside CloseCity and LoadCity,
-so every module's OnCityShutdown and OnCityInit run inside the switch task, in the normal
-director order (RegionIndex::Refresh before the OnCityInit calls). CitySwitcher:
+PreCityShutdown is sent, so it reaches the director inside CloseCity: every module's
+OnCityShutdown runs inside the switch task. PostCityInit and PostCityInitComplete are posted, so
+the modules' OnCityInit runs on a later message pump, **after** the switch task has ended and
+`IsBusy()` is false again. An earlier version of this note said that both run inside the task.
+That was wrong (the review in wave 4 checked the disassembly, the batch module had found it
+first).
 
-- keeps `IsBusy()` true from RequestSwitch until the task ends, so other modules can see a switch
-  in progress during their OnCityShutdown and OnCityInit.
+What holds in the gap between the end of the switch task and PostCityInit:
+
+| | Value |
+|---|---|
+| `GameAccess::City()` | the new city |
+| `GameAccess::View3D()`, `Renderer()`, `CameraControl()` | nullptr (the director opens them at PostCityInit) |
+| `RegionIndex::Current()` | nullptr (the director clears it at PreCityShutdown and refreshes at PostCityInit) |
+| `CitySwitcher::IsBusy()` | false |
+| every module | in its "no city" state |
+
+Rules that follow:
+
+- "The switch is done" never means "the city is ready". Code that needs the new city waits for
+  its own OnCityInit, or for PostCityInitComplete on the message bus (the batch does this).
+- Work that belongs to one city must be dropped in OnCityShutdown, not checked against
+  `IsBusy()` some ticks later. Render on save was the bug of this kind: it noted the save of the
+  switch and rendered the next city (fixed, see `batch.md`).
+- A module can get OnCityShutdown without an OnCityInit before it (a city that closes before its
+  PostCityInit arrived). PartialCloseCity pumps the queues first, so this needs more than 500
+  queued messages or 5 seconds of pumping. The director also drops a PostCityInit that arrives
+  when no city is open.
+
+CitySwitcher:
+
+- keeps `IsBusy()` true from RequestSwitch until the task ends.
 - ignores its own OnCityShutdown while the task runs. If the city closes another way while a
   switch is only queued (the player went to the region view), it cancels the queued switch with a
   serial number. The posted task then does nothing.
-- must not be called from inside another module's OnCityShutdown or OnCityInit with a new
-  request: RequestSwitch refuses while busy.
+- must not be called from inside another module's OnCityShutdown with a new request:
+  RequestSwitch refuses while busy.
 
 Other modules must not pump the message queues or draw from OnCityShutdown, because the old
 screen then would draw while the city shuts down.
