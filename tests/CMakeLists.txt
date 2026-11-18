@@ -9,6 +9,7 @@ set(SC4SR_DLL_DIR "${CMAKE_SOURCE_DIR}/src/dll")
 set(SC4SR_TEST_SOURCES
     "${SC4SR_DLL_DIR}/view/ViewMath.cpp"
     "${SC4SR_DLL_DIR}/region/RegionLayout.cpp"
+    "${SC4SR_DLL_DIR}/switching/NeighborDirection.cpp"
 )
 
 add_executable(SC4SeamlessRegionTests

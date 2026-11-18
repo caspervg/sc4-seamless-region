@@ -63,3 +63,78 @@ SC4RenderServices.
 
 1. Quit the game.
 2. Log: `Hooking: shut down, all hooks removed`, then `Seamless Region shut down`. No crash.
+
+## Switching
+
+The Switching section is in the Tools tab. Use a region with at least three cities next to each
+other, one of them not founded (Status tab: Founded "No"). Set LogLevel=debug for the debug
+lines. Every switch logs one line per step with its time in ms.
+
+### Panel
+
+1. In the region view the section says "Open a city to switch to its neighbors."
+2. Open a city. The section shows "This city: <name>, cell (x, z)" and four buttons in a compass:
+   North on top, West and East in the middle, South below. Each button shows the neighbor's name,
+   or "no city" and is grey when there is no city on that side. North is the top edge of the
+   region's config.bmp: compare with the cells in the Status tab (north = smaller z).
+3. A medium or large city with several neighbors on one side: the button names the neighbor
+   nearest to the middle of that side.
+4. Hover a button: "Save this city and play <name>." or, for an unfounded neighbor,
+   "<name> is not founded. This saves this city and opens the region view."
+
+### Switch to a founded neighbor
+
+1. Press a button with a founded neighbor.
+2. The game saves, then shows the loading progress, then the neighbor city. No crash, no frame of
+   an empty city screen. The section now shows the new city and its neighbors. No red text.
+3. Log, in this order:
+   - `Switching: queued the switch from '<A>' to '<B>' at cell (x, z)`
+   - `Switching: start, from '<A>' to '<B>' at cell (x, z)`
+   - `Switching: step 1, pumped the message queues in N ms`
+   - `Switching: step 2, saved '<A>' in N ms`
+   - `Switching: step 3, presented the last frame in N ms`
+   - (debug) `Switching: the old city shuts down`, then the other modules' city shutdown lines
+   - `Switching: step 4, CloseCity returned true in N ms`
+   - `Switching: step 5, loading '<path of B>.sc4'`
+   - `RegionIndex: region '<region>' at '<folder>', N cities, current <B>`
+   - (debug) `Switching: the target city is initialized`
+   - `Switching: step 6, LoadCity returned true in N ms`
+   - `Switching: done, now in '<B>', N ms in total`
+4. Open city A again from the region view: the changes you made before the switch are there.
+5. Switch back and forth five times. Every switch ends with the `done` line. The time per switch
+   stays about the same.
+
+### Unfounded neighbor
+
+1. Press the button of a neighbor whose Status row says Founded "No".
+2. The game saves the current city and opens the region view. The panel shows (in orange)
+   "'<name>' is not founded yet. Found it from the region view."
+3. Log: steps 1 to 4 as above, then `Switching: '<name>' is not founded yet. Found it from the
+   region view.` and `Switching: RequestGoToRegionView returned true in N ms`. No step 5.
+
+### City that cannot be saved
+
+1. Open a city with saving turned off (a tutorial city). The section shows "This city cannot be
+   saved." in orange.
+2. If it has a neighbor, press its button. The popup "Switch without saving?" opens.
+3. Press Cancel. Nothing happens, no log line.
+4. Press the button again and then "Switch without saving". Log: `Switching: queued the switch
+   ... , without saving`, then `Switching: step 2, '<A>' cannot be saved, the switch goes on
+   without saving as confirmed`, and the other steps as above. The game shows no save message.
+5. A tutorial city with no neighbor: all four buttons are grey. This is correct.
+
+### Save failure
+
+1. Make the current city's .sc4 file read-only in Explorer, then press a neighbor button.
+2. Expected: the game shows its own "could not save" message. You stay in the current city, the
+   panel shows "Saving '<A>' failed. You stay in this city." Log: `Switching: Saving '<A>'
+   failed. You stay in this city.` and no step 3. If the game saves anyway, note it: then this
+   path cannot be tested this way.
+3. Remove the read-only flag again.
+
+### Not testable by hand
+
+A queued switch runs on the next idle tick and the buttons are grey while it waits, so a second
+request or a city close in between cannot be made from the panel. If a log ever shows
+`Switching: The city closed before the switch could start.` or `Switching: request refused: A
+switch is already in progress.`, nothing else must happen: you stay where you are.
