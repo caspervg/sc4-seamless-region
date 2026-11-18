@@ -51,6 +51,11 @@ namespace Messages
     constexpr uint32_t kThumbnailViewChangeBegin = 0x4AB04CBE;
     constexpr uint32_t kThumbnailViewChangeEnd = 0x4AB04CBF;
 
+    // Posted by cSTETerrain::RedisplayTerrain (0x00749850) after the altitudes in a rectangle
+    // changed. data1 = x0 << 16 | x1, data2 = z0 << 16 | z1, in cells, inclusive. See
+    // docs/re-notes/overlay.md.
+    constexpr uint32_t kTerrainAltitudeChanged = 0x278E6003;
+
     // Camera view change messages from cSC4CameraControl (0x007cc000, 0x007cc0b0).
     // The meaning of each post message is not confirmed. See docs/re-notes/foundation.md.
     constexpr uint32_t kCameraPreViewChange = 0xA6B79600;

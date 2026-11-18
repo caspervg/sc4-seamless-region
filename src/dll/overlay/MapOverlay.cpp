@@ -33,9 +33,6 @@ namespace fs = std::filesystem;
 
 namespace
 {
-    // cSTETerrain::RedisplayTerrain (0x00749850) posts this after the altitudes in a rectangle
-    // changed. data1 = x0 << 16 | x1, data2 = z0 << 16 | z1, in cells. docs/re-notes/overlay.md.
-    constexpr uint32_t kTerrainAltitudeChanged = 0x278E6003;
     // Terraforming posts many messages. Rebuild once the terrain is quiet for this long.
     constexpr auto kTerrainQuiet = std::chrono::milliseconds(500);
     // The game's own decals use depth offset 2 (terrain-decals.md). The overlay draws after them
@@ -149,7 +146,7 @@ bool MapOverlay::Initialize(const ModuleContext& ctx)
         return false;
     }
     terrainToken_ =
-        ctx_.messages->Subscribe(kTerrainAltitudeChanged, [this](cIGZMessage2* message) { OnTerrainChanged_(message); });
+        ctx_.messages->Subscribe(Messages::kTerrainAltitudeChanged, [this](cIGZMessage2* message) { OnTerrainChanged_(message); });
     stop_ = false;
     worker_ = std::thread([this] { WorkerMain_(); });
     sInstance = this;
