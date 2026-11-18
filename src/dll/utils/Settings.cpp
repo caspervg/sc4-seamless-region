@@ -2,16 +2,15 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <exception>
 #include <string>
 
 #include "Logger.h"
 #include "mini/ini.h"
 
-namespace {
-    constexpr auto kDefaultLogLevel = spdlog::level::info;
-    constexpr bool kDefaultLogToFile = true;
-    constexpr bool kDefaultStartWindowVisible = true;
+namespace
+{
     constexpr auto kSectionName = "SC4SeamlessRegion";
 
     std::string ToLower(std::string value)
@@ -22,106 +21,167 @@ namespace {
         return value;
     }
 
-    spdlog::level::level_enum ParseLogLevel(const std::string& value, bool& valid)
+    bool ParseLogLevel(const std::string& value, spdlog::level::level_enum& out)
     {
         const std::string normalized = ToLower(value);
-
-        if (normalized == "trace") { valid = true; return spdlog::level::trace; }
-        if (normalized == "debug") { valid = true; return spdlog::level::debug; }
-        if (normalized == "info") { valid = true; return spdlog::level::info; }
-        if (normalized == "warn" || normalized == "warning") { valid = true; return spdlog::level::warn; }
-        if (normalized == "error") { valid = true; return spdlog::level::err; }
-        if (normalized == "critical") { valid = true; return spdlog::level::critical; }
-        if (normalized == "off") { valid = true; return spdlog::level::off; }
-
-        valid = false;
-        return kDefaultLogLevel;
-    }
-
-    bool ParseBool(const std::string& value, bool& valid)
-    {
-        const std::string normalized = ToLower(value);
-
-        if (normalized == "true" || normalized == "1" || normalized == "yes") {
-            valid = true;
-            return true;
-        }
-        if (normalized == "false" || normalized == "0" || normalized == "no") {
-            valid = true;
-            return false;
-        }
-
-        valid = false;
+        if (normalized == "trace") { out = spdlog::level::trace; return true; }
+        if (normalized == "debug") { out = spdlog::level::debug; return true; }
+        if (normalized == "info") { out = spdlog::level::info; return true; }
+        if (normalized == "warn" || normalized == "warning") { out = spdlog::level::warn; return true; }
+        if (normalized == "error") { out = spdlog::level::err; return true; }
+        if (normalized == "critical") { out = spdlog::level::critical; return true; }
+        if (normalized == "off") { out = spdlog::level::off; return true; }
         return false;
     }
-}
 
-Settings::Settings()
-    : logLevel_(kDefaultLogLevel)
-    , logToFile_(kDefaultLogToFile)
-    , startWindowVisible_(kDefaultStartWindowVisible)
-{
+    const char* LogLevelName(const spdlog::level::level_enum level)
+    {
+        switch (level) {
+        case spdlog::level::trace: return "trace";
+        case spdlog::level::debug: return "debug";
+        case spdlog::level::warn: return "warn";
+        case spdlog::level::err: return "error";
+        case spdlog::level::critical: return "critical";
+        case spdlog::level::off: return "off";
+        default: return "info";
+        }
+    }
+
+    bool ParseBool(const std::string& value, bool& out)
+    {
+        const std::string normalized = ToLower(value);
+        if (normalized == "true" || normalized == "1" || normalized == "yes") { out = true; return true; }
+        if (normalized == "false" || normalized == "0" || normalized == "no") { out = false; return true; }
+        return false;
+    }
+
+    bool ParseInt(const std::string& value, int& out)
+    {
+        const char* begin = value.data();
+        const char* end = begin + value.size();
+        int parsed = 0;
+        const auto [ptr, ec] = std::from_chars(begin, end, parsed);
+        if (ec != std::errc() || ptr != end) {
+            return false;
+        }
+        out = parsed;
+        return true;
+    }
+
+    struct Reader
+    {
+        mINI::INIMap<std::string>& section;
+        const std::filesystem::path& path;
+
+        void Invalid(const char* key) const
+        {
+            LOG_WARN("Invalid {} in {}, using the default", key, path.string());
+        }
+
+        void Bool(const char* key, bool& field) const
+        {
+            bool value = field;
+            if (section.has(key)) {
+                if (ParseBool(section.get(key), value)) {
+                    field = value;
+                }
+                else {
+                    Invalid(key);
+                }
+            }
+        }
+
+        void Int(const char* key, int& field, const int min, const int max) const
+        {
+            if (!section.has(key)) {
+                return;
+            }
+            int value = field;
+            if (!ParseInt(section.get(key), value) || value < min || value > max) {
+                Invalid(key);
+                return;
+            }
+            field = value;
+        }
+    };
 }
 
 void Settings::Load(const std::filesystem::path& settingsFilePath)
 {
+    const uint32_t revision = revision_;
     *this = Settings();
+    revision_ = revision + 1;
 
     try {
         const mINI::INIFile file(settingsFilePath.string());
         mINI::INIStructure ini;
-
         if (!file.read(ini) || !ini.has(kSectionName)) {
             return;
         }
-
-        const auto section = ini.get(kSectionName);
+        auto& section = ini[kSectionName];
+        const Reader r{section, settingsFilePath};
 
         if (section.has("LogLevel")) {
-            bool valid = false;
-            logLevel_ = ParseLogLevel(section.get("LogLevel"), valid);
-            if (!valid) {
-                logLevel_ = kDefaultLogLevel;
-                LOG_WARN("Invalid LogLevel in {}", settingsFilePath.string());
+            spdlog::level::level_enum level = logLevel;
+            if (ParseLogLevel(section.get("LogLevel"), level)) {
+                logLevel = level;
+            }
+            else {
+                r.Invalid("LogLevel");
             }
         }
-
-        if (section.has("LogToFile")) {
-            bool valid = false;
-            logToFile_ = ParseBool(section.get("LogToFile"), valid);
-            if (!valid) {
-                logToFile_ = kDefaultLogToFile;
-                LOG_WARN("Invalid LogToFile in {}", settingsFilePath.string());
-            }
-        }
-
-        if (section.has("StartWindowVisible")) {
-            bool valid = false;
-            startWindowVisible_ = ParseBool(section.get("StartWindowVisible"), valid);
-            if (!valid) {
-                startWindowVisible_ = kDefaultStartWindowVisible;
-                LOG_WARN("Invalid StartWindowVisible in {}", settingsFilePath.string());
-            }
-        }
+        r.Bool("LogToFile", logToFile);
+        r.Bool("StartWindowVisible", startWindowVisible);
+        r.Bool("Enabled", enabled);
+        r.Bool("ShowNeighbors", showNeighbors);
+        r.Bool("ShowFrontNeighbors", showFrontNeighbors);
+        r.Bool("HoverTint", hoverTint);
+        r.Bool("ClickToSwitch", clickToSwitch);
+        r.Bool("RenderOnSave", renderOnSave);
+        r.Int("TileCacheMB", tileCacheMB, kMinTileCacheMB, kMaxTileCacheMB);
+        r.Int("UploadTilesPerFrame", uploadTilesPerFrame, kMinUploadTiles, kMaxUploadTiles);
+        r.Int("UploadMsPerFrame", uploadMsPerFrame, kMinUploadMs, kMaxUploadMs);
+        r.Int("Zoom45BandMetres", zoom45BandMetres, kMinBandMetres, kMaxBandMetres);
+        r.Int("WebpQuality", webpQuality, kMinWebpQuality, kMaxWebpQuality);
     }
     catch (const std::exception& e) {
         LOG_ERROR("Failed to read settings from {}: {}", settingsFilePath.string(), e.what());
         *this = Settings();
+        revision_ = revision + 1;
     }
 }
 
-spdlog::level::level_enum Settings::GetLogLevel() const noexcept
+bool Settings::Save(const std::filesystem::path& settingsFilePath) const
 {
-    return logLevel_;
+    try {
+        const mINI::INIFile file(settingsFilePath.string());
+        mINI::INIStructure ini;
+        file.read(ini);  // a missing file is fine, write() creates it
+        auto& s = ini[kSectionName];
+        const auto b = [](const bool v) { return std::string(v ? "true" : "false"); };
+        s["LogLevel"] = LogLevelName(logLevel);
+        s["LogToFile"] = b(logToFile);
+        s["StartWindowVisible"] = b(startWindowVisible);
+        s["Enabled"] = b(enabled);
+        s["ShowNeighbors"] = b(showNeighbors);
+        s["ShowFrontNeighbors"] = b(showFrontNeighbors);
+        s["HoverTint"] = b(hoverTint);
+        s["ClickToSwitch"] = b(clickToSwitch);
+        s["RenderOnSave"] = b(renderOnSave);
+        s["TileCacheMB"] = std::to_string(tileCacheMB);
+        s["UploadTilesPerFrame"] = std::to_string(uploadTilesPerFrame);
+        s["UploadMsPerFrame"] = std::to_string(uploadMsPerFrame);
+        s["Zoom45BandMetres"] = std::to_string(zoom45BandMetres);
+        s["WebpQuality"] = std::to_string(webpQuality);
+        if (!file.write(ini)) {
+            LOG_ERROR("Failed to write settings to {}", settingsFilePath.string());
+            return false;
+        }
+        LOG_INFO("Saved settings to {}", settingsFilePath.string());
+        return true;
+    }
+    catch (const std::exception& e) {
+        LOG_ERROR("Failed to write settings to {}: {}", settingsFilePath.string(), e.what());
+        return false;
+    }
 }
-
-bool Settings::GetLogToFile() const noexcept
-{
-    return logToFile_;
-}
-
-bool Settings::GetStartWindowVisible() const noexcept
-{
-    return startWindowVisible_;
-}
-

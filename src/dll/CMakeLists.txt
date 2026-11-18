@@ -27,6 +27,24 @@ list(REMOVE_ITEM GZCOM_SOURCES
 add_library(gzcom2 STATIC ${GZCOM_SOURCES} ${GZCOM_HEADERS})
 target_include_directories(gzcom2 PUBLIC "${GZCOM_DIR}/include")
 
+# ImGui is compiled into SC4RenderServices.dll and exported from it (ImGui service API 5):
+# plugins must call that ImGui. Building SC4RenderServices from the submodule gives its import
+# library. That needs the nested submodules imgui, Clipper2 and earcut.
+set(SC4RS_NESTED_SUBMODULES_READY OFF)
+if(EXISTS "${SC4_RENDER_SERVICES_ROOT}/vendor/imgui/imgui.h"
+   AND EXISTS "${SC4_RENDER_SERVICES_ROOT}/vendor/Clipper2/CPP/Clipper2Lib/include/clipper2/clipper.h"
+   AND EXISTS "${SC4_RENDER_SERVICES_ROOT}/vendor/earcut/include/mapbox/earcut.hpp")
+    set(SC4RS_NESTED_SUBMODULES_READY ON)
+    # Reuses gzcom2 and spdlog::spdlog. EXCLUDE_FROM_ALL keeps its other targets out.
+    add_subdirectory("${SC4_RENDER_SERVICES_ROOT}" "${CMAKE_CURRENT_BINARY_DIR}/sc4-render-services" EXCLUDE_FROM_ALL)
+else()
+    message(WARNING
+        "sc4-render-services is missing its nested submodules (imgui, Clipper2, earcut). "
+        "Building with the old d3d7imgui headers and the Seamless Region panel turned off. "
+        "Run 'git submodule update --init --recursive' for a working panel.")
+    include("${CMAKE_SOURCE_DIR}/cmake/LegacyImGui.cmake")
+endif()
+
 file(GLOB_RECURSE SC4_DLL_UTILITIES_HEADERS CONFIGURE_DEPENDS
     "${SC4_DLL_UTILITIES_DIR}/include/*.h"
     "${SC4_DLL_UTILITIES_DIR}/include/*.hpp"
@@ -78,10 +96,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     "${SC4_DLL_UTILITIES_DIR}/include"
 )
 
-if(SC4_ENABLE_IMGUI)
-    target_compile_definitions(${PROJECT_NAME} PRIVATE IMGUI_DLL_IMPORT)
-    target_include_directories(${PROJECT_NAME} PRIVATE "${SC4_RENDER_SERVICES_PUBLIC_DIR}")
-endif()
+target_include_directories(${PROJECT_NAME} PRIVATE "${SC4_RENDER_SERVICES_PUBLIC_DIR}")
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
     gzcom2
@@ -98,8 +113,15 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     dxguid
 )
 
-if(SC4_ENABLE_IMGUI)
-    target_link_libraries(${PROJECT_NAME} PRIVATE SC4RenderServices::imgui)
+if(SC4RS_NESTED_SUBMODULES_READY)
+    # Links the ImGui exported by SC4RenderServices.dll, delay-loaded so load order does not matter.
+    sc4rs_use_imgui(${PROJECT_NAME})
+else()
+    # Compiles against the old ImGui only. The DLL never calls it: the director drops the ImGui
+    # service and registers no panel. Delay loading keeps imgui.dll from being required.
+    target_compile_definitions(${PROJECT_NAME} PRIVATE IMGUI_DLL_IMPORT SC4SR_IMGUI_PANEL_DISABLED)
+    target_link_libraries(${PROJECT_NAME} PRIVATE SC4RenderServices::imgui delayimp)
+    target_link_options(${PROJECT_NAME} PRIVATE "/DELAYLOAD:imgui.dll")
 endif()
 
 set_target_properties(${PROJECT_NAME} PROPERTIES

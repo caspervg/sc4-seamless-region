@@ -54,12 +54,6 @@ option(SC4_ENABLE_PLUGIN_DEPLOYMENT "Copy the built DLL into Documents/SimCity 4
 set(SC4_PLUGINS_DIR "$ENV{USERPROFILE}/Documents/SimCity 4/Plugins" CACHE PATH
     "SimCity 4 Plugins directory used for post-build deployment")
 
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/dll/panels/HelloPanel.cpp")
-    set(SC4_ENABLE_IMGUI ON)
-else()
-    set(SC4_ENABLE_IMGUI OFF)
-endif()
-
 if(WIN32)
     add_definitions(-DWIN32 -D_WINDOWS -DUNICODE -D_UNICODE)
 endif()
@@ -77,11 +71,10 @@ find_package(WebP CONFIG REQUIRED)
 find_package(minhook CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 
-if(SC4_ENABLE_IMGUI)
-    include(cmake/SC4RenderServicesImGui.cmake)
-endif()
+enable_testing()
 
 add_subdirectory(src/dll)
+add_subdirectory(tests)
 
 install(TARGETS ${PROJECT_NAME}
     RUNTIME DESTINATION bin
