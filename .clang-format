@@ -1,8 +1,40 @@
 ---
+# The style of this code base: 4 spaces, 120 columns, namespace bodies indented, braces on
+# their own line for namespaces, classes and functions, attached for control statements, with
+# else and catch on a new line.
 BasedOnStyle: LLVM
 IndentWidth: 4
 ColumnLimit: 120
 PointerAlignment: Left
 AllowShortIfStatementsOnASingleLine: false
-SortIncludes: true
-
+SortIncludes: CaseSensitive
+NamespaceIndentation: All
+FixNamespaceComments: false
+AccessModifierOffset: -4
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterCaseLabel: false
+  AfterClass: true
+  AfterControlStatement: Never
+  AfterEnum: true
+  AfterFunction: true
+  AfterNamespace: true
+  AfterStruct: true
+  AfterUnion: true
+  AfterExternBlock: true
+  BeforeCatch: true
+  BeforeElse: true
+  BeforeLambdaBody: false
+  BeforeWhile: false
+  IndentBraces: false
+  SplitEmptyFunction: true
+  SplitEmptyRecord: false
+  SplitEmptyNamespace: false
+BreakConstructorInitializers: BeforeComma
+PackConstructorInitializers: Never
+AlwaysBreakTemplateDeclarations: Yes
+IndentCaseLabels: false
+AllowShortCaseLabelsOnASingleLine: true
+SpacesBeforeTrailingComments: 2
+AlignTrailingComments:
+  Kind: Leave
