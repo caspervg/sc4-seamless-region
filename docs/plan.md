@@ -125,12 +125,15 @@ do not overlap.
   back. Copy that pattern.
 - Readback: query `cIGZGDriver` for `0xE69BFE2A` and call slot 3,
   `cIGZBuffer* CopyColorBuffer(x, y, w, h, cIGZBuffer* reuse)`.
-  DX7 `0x008eb340`, OpenGL `0x0087d880`. SCD3D11 implements it too.
+  DX7 `0x00883950` (reads the back buffer), software `0x008eb340`, OpenGL `0x0087d880`.
+  SCD3D11 implements it too.
 - The size is limited by the game window, so capture in tiles by moving the view target.
 - Steps per tile: `SetCustomMagnification(1.0)`, `SetViewTargetPosition(tile centre)`,
   `ForceFullRedraw`, `Draw`, then `CopyColorBuffer`.
 - A rotation change reloads all models. A zoom change swaps model LODs. Models load in
-  the background from the screen outward. Open: a reliable signal that loading is done.
+  the background from the screen outward. The game never loads all models of a city, only
+  those around the view. Done signal: ModelMaker +0xa4 == 0. With +0xc0 (synchronous) set,
+  `SetViewTargetPosition` returns with the models loaded. See `docs/re-notes/capture.md`.
 - The thumbnail writer pauses the game and sets noon lighting. It sends
   `0x4ab04cbe`/`0x4ab04cbf` around the view change, and restores everything afterwards.
 
@@ -199,7 +202,6 @@ city, 12 MB for a small one. Zoom 5 is never stored.
 
 ## Open questions
 
-- A signal that background model loading is done (ModelMaker +0xa4/+0xc0 on Mac).
 - Whether the old city screen repaints with a null city during `LoadCity`.
 - Whether `DrawWaterBox` draws edge water walls that also need hiding.
 - Lighting differences between renders and the live city.
