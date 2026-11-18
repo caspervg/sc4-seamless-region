@@ -63,3 +63,47 @@ SC4RenderServices.
 
 1. Quit the game.
 2. Log: `Hooking: shut down, all hooks removed`, then `Seamless Region shut down`. No crash.
+
+## Store
+
+The store writes the tiles and meta.json of every rendered city. The capture module
+fills it, so the full check needs a capture. The panel part can be checked without one.
+
+### Folder and panel
+
+1. Open a city. Log: `Store: encode worker started, queue of 16 tiles`, then
+   `Store: renders folder is '<region folder>\RegionRenders'`, then
+   `Store: indexed N city folders, X MB on disk`.
+2. Tools tab, section "Store": the renders folder path, the button "Open folder" (it opens
+   the folder in Explorer, and creates it when it does not exist), "Size on disk", and one
+   row per city with Render ("Rendered", "Out of date", "Missing" or "Not founded"), Size and
+   a Delete button.
+3. "Size on disk" says "counting..." for a moment after the city loads. It never changes
+   every frame. The list refreshes at most once a second after a change and every 5 seconds.
+4. Region folder with non-ASCII letters in its name: the path shows correctly and
+   "Open folder" works.
+
+### Files after a capture
+
+1. Render the current city (Capture section). When it ends the log has one line
+   `Store: N tiles written, M transparent tiles skipped, 0 failed` and
+   `Store: wrote meta.json for '<key>', L levels`.
+2. In `<Region>\RegionRenders\<key>\` you find `meta.json` and one folder per rotation and
+   zoom, named `r<rotation>z<zoom>` (for example `r0z3`). Each folder holds files named
+   `<tx>_<ty>.webp`. Zoom 5 has no folder. No `.tmp` files stay behind.
+3. Open a `.webp` file in a browser. It shows a piece of the city with a transparent
+   background. Tiles that have no city in them do not exist as files.
+4. Open `meta.json`. It has formatVersion 1, cellX, cellZ, sizeX, sizeZ, tileSize,
+   saveFileTime, renderTime and one entry per level in "levels".
+5. Panel: the city is "Rendered" and its Size matches the folder size in Explorer (the
+   difference is meta.json only).
+6. Save the city again. After 5 seconds at most the panel says "Out of date".
+7. Press Delete for the city and confirm. Log: `Store: deleted the renders of '<key>', N files`.
+   The folder is gone and the panel says "Missing".
+
+### Problems
+
+- `Store: meta.json of '<key>' is not valid (<reason>), the city counts as not rendered`
+  (once per city): the file was edited or cut off. Render the city again.
+- `Store: encoding or writing '<file>' failed (more failures are only counted)`: the folder
+  is read only or the disk is full. The count shows in the next `... N failed` line.
