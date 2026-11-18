@@ -73,6 +73,9 @@ endif()
 
 find_package(spdlog CONFIG REQUIRED)
 find_package(wil CONFIG REQUIRED)
+find_package(WebP CONFIG REQUIRED)
+find_package(minhook CONFIG REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
 
 if(SC4_ENABLE_IMGUI)
     include(cmake/SC4RenderServicesImGui.cmake)

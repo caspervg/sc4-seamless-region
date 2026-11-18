@@ -87,6 +87,10 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     gzcom2
     spdlog::spdlog
     WIL::WIL
+    WebP::webp
+    WebP::webpdemux
+    minhook::minhook
+    nlohmann_json::nlohmann_json
     kernel32
     user32
     Version
