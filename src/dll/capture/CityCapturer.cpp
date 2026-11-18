@@ -240,8 +240,8 @@ bool CityCapturer::Begin_(const bool testTile, const CaptureRequest& request)
         if (!current || current->key.empty()) {
             return refuse("This city is not in the region list.");
         }
-        if (!ctx_.tileStore) {
-            return refuse("The tile store is not available.");
+        if (!ctx_.tileStore || ctx_.tileStore->RendersDirectory().empty()) {
+            return refuse("The folder for the renders of this region is not known.");
         }
     }
     cityKey_ = current ? current->key : std::string();
@@ -640,9 +640,19 @@ bool CityCapturer::StepLevelWait_()
     }
     phase_ = Phase::Tile;
     if (tx_ < 0) {
-        LOG_INFO("Capture: rotation {} zoom {}: {} tiles in a grid of {} x {}", levels_[levelIndex_].rotation,
-                 levels_[levelIndex_].zoom + 1, levels_[levelIndex_].tiles, levels_[levelIndex_].grid.tilesX,
-                 levels_[levelIndex_].grid.tilesY);
+        Level& level = levels_[levelIndex_];
+        LOG_INFO("Capture: rotation {} zoom {}: {} tiles in a grid of {} x {}", level.rotation, level.zoom + 1,
+                 level.tiles, level.grid.tilesX, level.grid.tilesY);
+        if (!testTile_) {
+            // The tile grid moves with the terrain heights, and a tile that was full can be
+            // empty now. So the older tiles of this level go first, and meta.json stops
+            // naming the level until its new tiles are complete.
+            level.started = true;
+            if (!WriteMeta_(false)) {
+                return Fail_("The render information (meta.json) could not be written.");
+            }
+            ctx_.tileStore->DeleteLevel(cityKey_, level.rotation, level.zoom);
+        }
         if (!NextTile_()) {
             NextLevel_();
         }
@@ -833,51 +843,61 @@ bool CityCapturer::StepFinish_()
         End_(true, "Done", std::string(), false);
         return false;
     }
+    if (std::ranges::none_of(levels_, [](const Level& level) { return level.captured; })) {
+        return Fail_("No zoom or rotation could be rendered.");
+    }
+    if (!WriteMeta_(true)) {
+        return Fail_("The render information (meta.json) could not be written.");
+    }
+    CameraAdapter::RefreshNeighborWalls(ctx_.cameraExtender);
+    End_(true, "Done", std::string(), false);
+    return false;
+}
+
+// meta.json always tells what is on disk: the levels this run has finished, and the levels of
+// an earlier render that this run has not started yet. A level that is being rendered is left
+// out. So a render that is cancelled or fails keeps every complete level and never leaves
+// tiles of two renders under one level.
+bool CityCapturer::WriteMeta_(const bool final)
+{
+    // Tiles first, then meta.json: a meta.json on disk means the tiles it names are there.
+    ctx_.tileStore->Flush();
+
     CityRenderMeta meta;
     meta.cellX = cellX_;
     meta.cellZ = cellZ_;
     meta.sizeX = sizeX_;
     meta.sizeZ = sizeZ_;
     meta.tileSize = tileSize_;
-    if (!CameraAdapter::StoreTimes(savePath_, meta.saveFileTime, meta.renderTime)) {
-        meta.saveFileTime = SaveFileTime(savePath_);
-        meta.renderTime = NowFileTime();
-    }
+    const std::optional<CityRenderMeta> earlier = ctx_.tileStore->LoadMeta(cityKey_);
+    const bool usable = earlier && earlier->tileSize == meta.tileSize && earlier->formatVersion == meta.formatVersion;
+
+    std::vector<CityRenderMeta::Level> rendered, dropped;
     for (const Level& level : levels_) {
-        if (level.captured) {
-            CityRenderMeta::Level out;
-            out.rotation = level.rotation;
-            out.zoom = level.zoom;
-            out.originX = level.grid.originCanvas.fX;
-            out.originY = level.grid.originCanvas.fY;
-            out.tilesX = level.grid.tilesX;
-            out.tilesY = level.grid.tilesY;
-            meta.levels.push_back(out);
+        if (level.captured || level.started) {
+            (level.captured ? rendered : dropped)
+                .push_back({level.rotation, level.zoom, level.grid.originCanvas.fX, level.grid.originCanvas.fY,
+                            level.grid.tilesX, level.grid.tilesY});
         }
     }
-    if (meta.levels.empty()) {
-        return Fail_("No zoom or rotation could be rendered.");
-    }
-    // A render of some levels keeps the other levels of an earlier render.
-    if (const std::optional<CityRenderMeta> earlier = ctx_.tileStore->LoadMeta(cityKey_);
-        earlier && earlier->tileSize == meta.tileSize && earlier->formatVersion == meta.formatVersion) {
-        for (const CityRenderMeta::Level& old : earlier->levels) {
-            const bool replaced = std::ranges::any_of(meta.levels, [&old](const CityRenderMeta::Level& l) {
-                return l.rotation == old.rotation && l.zoom == old.zoom;
-            });
-            if (!replaced) {
-                meta.levels.push_back(old);
-            }
+    meta.levels = CityMeta::MergeLevels(usable ? earlier->levels : std::vector<CityRenderMeta::Level>(), rendered,
+                                        dropped);
+    if (final) {
+        if (!CameraAdapter::StoreTimes(savePath_, meta.saveFileTime, meta.renderTime)) {
+            meta.saveFileTime = SaveFileTime(savePath_);
+            meta.renderTime = NowFileTime();
         }
     }
-    // Tiles first, then meta.json: a meta.json on disk means the tiles it names are there.
-    ctx_.tileStore->Flush();
-    if (!ctx_.tileStore->WriteMeta(cityKey_, meta)) {
-        return Fail_("The render information (meta.json) could not be written.");
+    else if (usable) {
+        // Not complete: the times of the earlier render stay.
+        meta.saveFileTime = earlier->saveFileTime;
+        meta.renderTime = earlier->renderTime;
     }
-    CameraAdapter::RefreshNeighborWalls(ctx_.cameraExtender);
-    End_(true, "Done", std::string(), false);
-    return false;
+    else if (!earlier && meta.levels.empty()) {
+        return true;  // the first render of this city, nothing on disk to describe yet
+    }
+    // Else the times stay 0: a first render that is not complete counts as out of date.
+    return ctx_.tileStore->WriteMeta(cityKey_, meta);
 }
 
 // ---- tiles -------------------------------------------------------------------------------------

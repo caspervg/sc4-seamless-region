@@ -100,7 +100,8 @@ private:
         ViewMath::TileGrid grid;
         CaptureMath::CityOutline outline;
         int tiles = 0;      // tiles that touch the outline
-        bool captured = false;
+        bool started = false;   // its older tiles were deleted, its new tiles are on their way
+        bool captured = false;  // every tile of this run is handed to the store
     };
 
     // What Prepare changed, so Restore puts back exactly that.
@@ -150,6 +151,8 @@ private:
     bool TileComplete_();
     void TileDone_();
     bool WriteTestTile_();
+    // Writes meta.json for the tiles that are on disk now. final = the render is complete.
+    bool WriteMeta_(bool final);
 
     void SetClearColor_(uint32_t rgba);
     void RestoreClearColor_();

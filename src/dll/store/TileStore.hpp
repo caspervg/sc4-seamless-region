@@ -70,6 +70,12 @@ namespace CityMeta
     // Stale when there is no render, or when the save file time differs from the one rendered.
     // A save file time of 0 (file missing) never makes an existing render stale.
     [[nodiscard]] bool IsStale(const std::optional<CityRenderMeta>& meta, int64_t saveFileTime);
+    // The levels meta.json may name while a render runs: the levels in `rendered` (complete
+    // on disk), plus every level of `earlier` that is neither in `rendered` nor in `dropped`
+    // (levels whose tiles are being replaced). Levels match by rotation and zoom.
+    [[nodiscard]] std::vector<CityRenderMeta::Level> MergeLevels(const std::vector<CityRenderMeta::Level>& earlier,
+                                                                 const std::vector<CityRenderMeta::Level>& rendered,
+                                                                 const std::vector<CityRenderMeta::Level>& dropped);
 }
 
 class TileStore final : public Module
@@ -119,6 +125,11 @@ public:
     // Deletes every render of a city (tiles and meta.json) on the worker. False when the
     // key is unsafe or the store is not running. Flush waits for it.
     bool DeleteCity(const std::string& cityKey);
+    // Deletes the tiles of one rotation and zoom of a city on the worker, in queue order: tiles
+    // queued after this call stay. A render calls it before it writes a level again, so no
+    // tile of the older render is left where the new one has none. Take the level out of
+    // meta.json first.
+    bool DeleteLevel(const std::string& cityKey, int rotation, int zoom);
     // City keys that have a meta.json in the renders folder. Reads the disk, not for every frame.
     [[nodiscard]] std::vector<std::string> ListRenderedCities() const;
 
@@ -142,9 +153,9 @@ public:
 private:
     struct Job
     {
-        enum class Type : uint8_t { Write, DeleteCity, Scan };
+        enum class Type : uint8_t { Write, DeleteCity, DeleteLevel, Scan };
         Type type = Type::Write;
-        TileKey key;          // Write
+        TileKey key;          // Write, DeleteLevel (city, rotation and zoom)
         std::string cityKey;  // DeleteCity
         std::vector<uint8_t> rgba;
         int w = 0, h = 0;
@@ -166,6 +177,7 @@ private:
     void WorkerMain();
     void ProcessWrite(Job& job, std::vector<uint8_t>& encoded, std::filesystem::path& lastDir);
     void ProcessDelete(const std::string& cityKey);
+    void ProcessDeleteLevel(const TileKey& level);
     void ProcessScan();
     void EnsureIndexed(const std::string& cityKey) const;
     void StopWorker();
