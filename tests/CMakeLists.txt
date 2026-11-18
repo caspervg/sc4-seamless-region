@@ -12,6 +12,7 @@ set(SC4SR_TEST_SOURCES
     "${SC4SR_DLL_DIR}/store/TileStore.cpp"
     "${SC4SR_DLL_DIR}/store/WebpCodec.cpp"
     "${SC4SR_DLL_DIR}/utils/Logger.cpp"
+    "${SC4SR_DLL_DIR}/switching/NeighborDirection.cpp"
 )
 
 add_executable(SC4SeamlessRegionTests
