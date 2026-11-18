@@ -33,7 +33,8 @@ them, and says who owns what.
   `Documents\SimCity 4`.
 - **Commit on your branch** with Conventional Commit messages. Never add
   `Co-Authored-By` lines or any tool attribution to commits.
-- **Style.** C++23, `.clang-format`, no emoji. User-facing text (panel labels, help,
+- **Style.** C++23, `.clang-format` (it describes the style of the code base: namespace bodies
+  indented, braces on their own line for namespaces, classes and functions), no emoji. User-facing text (panel labels, help,
   tooltips) uses friendly ASD-STE100 style English with no semicolons.
 - **Logging.** `LOG_INFO`/`LOG_WARN`/`LOG_ERROR`/`LOG_DEBUG` from `utils/Logger.h`. Never
   log every frame.
@@ -66,7 +67,7 @@ All paths are under `src/dll/`.
 
 | Module | Files | Owner (wave) |
 |---|---|---|
-| Core | `core/GameAddresses.hpp`, `core/Hooking.*`, `core/GameAccess.*`, `core/IdleScheduler.*`, `core/Messages.hpp` | Foundation (W1) |
+| Core | `core/GameAddresses.hpp`, `core/Hooking.*`, `core/GameAccess.*`, `core/IdleScheduler.*`, `core/Messages.hpp`, `core/Guard.hpp` | Foundation (W1) |
 | Region | `region/RegionIndex.*` | Foundation (W1) |
 | View math | `view/ViewMath.*`, `view/CameraReader.*` | Foundation (W1) |
 | UI shell | `ui/SeamlessPanel.*`, `utils/Settings.*`, director | Foundation (W1) |
@@ -91,11 +92,23 @@ bool Initialize(const ModuleContext& ctx);
 // Called once at PostAppShutdown. Removes hooks, stops threads.
 void Shutdown();
 // City lifecycle, from the director's message handler.
-void OnCityInit();      // after kSC4MessagePostCityInit (0x26D31EC1)
-void OnCityShutdown();  // at kSC4MessagePreCityShutdown (0x26D31EC2)
+void OnCityInit();      // at kPostCityInit (0x26D31EC1). Posted: arrives after LoadCity returned
+void OnCityShutdown();  // at kPreCityShutdown (0x26D31EC2). Sent: runs inside CloseCity
 // Draws this module's section of the panel. Called from ImGui, game thread.
 void DrawPanelSection();
 ```
+
+**Message timing.** The game sends PreCityShutdown (it runs inside CloseCity, while the city
+and its view still exist) and posts PostCityInit and PostCityInitComplete (they arrive on a
+later message pump, after LoadCity and after a city switch task returned). So "the switch is
+done" never means "OnCityInit has run". Between the two, `GameAccess::City()` is the new city,
+but `GameAccess::View3D()` and `RegionIndex::Current()` are null and every module is in its
+"no city" state. Work that belongs to one city is dropped in OnCityShutdown. Evidence:
+`docs/re-notes/switching.md`.
+
+**Exceptions.** No exception may leave a function that the game or SC4RenderServices calls
+(draw pass callbacks, ImGui callbacks, input controls, message handlers, detours, thread
+functions). Wrap the body in `Guarded` from `core/Guard.hpp`.
 
 `ModuleContext` (in `core/GameAccess.hpp`) holds the service pointers: the ImGui service,
 the draw service, the world draw service, the camera service, the settings, the idle
@@ -371,6 +384,46 @@ Large images are split into power-of-two tiles of at most 2048 px.
 Each agent works in its own git worktree `C:\Users\caspe\CLionProjects\ssr-wt-<name>` on
 branch `feat/<name>`. The orchestrator merges each wave into `main`, builds, and starts the
 next wave from the merged `main`.
+
+## Status after the review (W4)
+
+Every module builds with no warning and its unit tests pass. **Nothing has run in the game
+yet.** `docs/testing.md` starts with the order for the first run.
+
+| Module | State | Known limits |
+|---|---|---|
+| Core (addresses, hooking, game access, idle scheduler, messages, `core/Guard.hpp`) | Complete | Windows 1.1.641 only. City view objects and `RegionIndex::Current()` are null from CloseCity until the posted PostCityInit arrives |
+| Region | Complete, unit tested | Read once per city load. A city that is founded or renamed shows after the next city load |
+| View math, CameraReader | Complete, unit tested | The Diagnostics tab must be green in game before anything else is trusted |
+| UI shell | Complete | Ctrl+Shift+F9 shows and hides the panel (fixed key). No panel on an unsupported game version, only the log line |
+| Store | Complete, unit tested | A city shutdown waits for the encode queue and the folder scan on the game thread. Folders of cities that left the region stay on disk and count in the size |
+| Switching | Complete | An unfounded target opens the region view. The modules of the new city start after the switch task (posted PostCityInit) |
+| Camera | Complete, math unit tested | The four detours stay installed while ShowNeighbors is off and pass through. The scroll polygon is taken to hold 6 points (bounding box if not). Depth precision at zoom 1 to 3 in very large regions is open |
+| Capture | Complete, math unit tested | Needs the snapshot extension of the driver. Cars and sims of the paused game are in the tiles. A level that is rendered again is not drawn by neighbors until it is complete. A save during a render is handled but untested. SCD3D11 readback format is assumed |
+| Tile cache, Neighbors | Complete, math unit tested | Tiles must be a power of two. Each tile costs twice its size (see gaps). No neighbors at a custom magnification. Seam of at most half a pixel. Zoom 5 shows zoom 4 tiles at 2x |
+| Interaction | Complete, math unit tested | The pick is on the ground at the edge height: the top of a tall neighbor building can pick the city behind it. Tint limits in `re-notes/interaction.md` |
+| Batch | Complete, queue unit tested | Saves every city it leaves. A load that ends in the region view interrupts the run until a city is opened |
+| Export | **Not built.** Stub, never active | Deferred |
+| Overlay | Complete, math unit tested | No mipmaps (grainy at zoom 1). 64 MB texture limit. The two-point pick also sends the click to the game |
+
+What the review changed is in the git log of `feat/review` (one commit per defect).
+
+## Gaps in sc4-render-services (upstream candidates)
+
+The modules work around these. Each one is a change in sc4-render-services that would remove
+code or memory here.
+
+| Gap | Where it hurts | Workaround now | Wanted |
+|---|---|---|---|
+| **Texture CPU copy.** `cIGZImGuiService::CreateTexture` keeps the pixels of every texture (`sourceData`) to make it again after a device loss | Tile cache: one 512 px tile costs 2 MB, not 1 MB, in a 32 bit process. Overlay: 64 MB limit is 32 MB of picture | Both count twice against their limits | A flag "do not keep the pixels", with the generation change as the signal to upload again |
+| **Textures only inside the ImGui frame.** `GetTextureID` makes the driver texture only while `inFrame_` is set | Tile cache and overlay cannot upload in a draw pass or an idle tick | Uploads go through `QueueRender`, one frame later | Driver texture creation from any game thread call |
+| **Non power-of-two padding.** The built-in DirectX driver pads such textures, and only the ImGui renderer knows the padding | Tiles and overlay pieces must be a power of two. The overlay adds its own padding and border | Tiles of another size are refused | The real texture size or the UV scale from the service |
+| **Per-pass vector allocation in DrawService.** `DrawService::OnPassHook` copies the callback list into a new `std::vector` on every pass of every frame | Breaks the "no allocation per frame" rule for every plugin that uses the draw service | None | A reused buffer or a snapshot that is only rebuilt when the list changes |
+| **No state getters.** The draw service sets render state but cannot read it | The neighbor renderer reads the packed state, the stage 0 texture, wrap, filter, depth offset and fog from raw `SC4DrawContext` offsets to put them back (`render/RenderAddresses.hpp`) | Raw offsets, version checked | Getters, or a push and pop of the state |
+| **No public invalidate-rect.** No call marks a rectangle of the static view dirty | The neighbor renderer calls `cSC43DRender::AddDirtyRectangle` (`0x007c9540`) by address | Raw address, version checked | `InvalidateStaticRect(left, top, right, bottom)` on the draw service |
+| **SCD3D11 device removal.** After a device removal the textures come back blank and `GetDeviceGeneration()` does not change | Neighbor tiles and the overlay stay blank until the next city load or "Reload all tiles" | None | A generation change on device removal |
+| **No textured draw before the terrain** (from `docs/plan.md`). `WorldDraw` ignores `begin = true` | Back neighbors cannot use the world draw service | The neighbor renderer draws through the draw context itself in the begin callback of PreStatic | A world draw layer at the start of a pass |
+| **No camera bounds and clip plane service** (from `docs/plan.md`) | The camera module hooks two camera functions and writes camera fields | Detours, version checked | A service for scroll bounds, clip planes and free roam |
 
 ## In-game testing
 

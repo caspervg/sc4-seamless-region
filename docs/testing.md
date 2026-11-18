@@ -1,8 +1,63 @@
 # In-game tests
 
-Agents cannot run the game. Each module adds its checks here under its own heading: what to
-do in game, what should happen, and which log lines prove it. The log file is
+Nothing in this plugin has run in the game yet. Start with "First run": it tests the parts
+that can go wrong hardest first, with the least work. Each step points to the module section
+below it, which has the full checks and the log lines that prove them. The log file is
 `SC4SeamlessRegion.log` in the folder above Plugins (the SimCity 4 user folder).
+
+## First run
+
+### Install
+
+1. **Game.** SimCity 4 version 1.1.641 for Windows. On another version the plugin installs
+   nothing and says so in the log. It then has no panel.
+2. **SC4RenderServices.** The plugin needs `SC4RenderServices.dll` with the ImGui service
+   API 5 (ImGui 1.93 docking, service IID `0x40269664`), the draw service, the world draw
+   service and the camera service. Use the DLL from the same sc4-render-services commit as
+   `vendor/sc4-render-services` (the build makes it:
+   `cmake-build-release-visual-studio/src/dll/sc4-render-services/Release/SC4RenderServices.dll`).
+   The plugin calls the ImGui that this DLL exports, so an older DLL (API 1 to 4, with a
+   separate `imgui.dll`) does not work: the panel and the neighbor drawing stay off.
+3. **Build.** `cmake --preset vs2022-win32-release` then
+   `cmake --build --preset vs2022-win32-release-build`. No CMake warning about missing
+   submodules must show: with that warning the DLL has no panel
+   (`git submodule update --init --recursive` fixes it).
+4. **Deploy.** `SC4_ENABLE_PLUGIN_DEPLOYMENT` is ON by default: each build copies
+   `SC4SeamlessRegion.dll` into `SC4_PLUGINS_DIR` (default `Documents\SimCity 4\Plugins`) and
+   copies `dist/SC4SeamlessRegion.ini` next to it when no INI is there yet. For another
+   install pass `-DSC4_PLUGINS_DIR=<its Plugins folder>`. With
+   `-DSC4_ENABLE_PLUGIN_DEPLOYMENT=OFF` (what the agents use) nothing is copied: copy
+   `cmake-build-release-visual-studio/src/dll/Release/SC4SeamlessRegion.dll` and
+   `dist/SC4SeamlessRegion.ini` into the Plugins folder by hand. A DLL in the root of the
+   game's own Plugins folder loads too, so keep only one copy.
+5. **Settings for the test.** In the INI set `LogLevel=debug`. Leave the rest at the defaults.
+6. **Region.** Copy a small region (3 to 5 founded cities next to each other, one empty tile)
+   and test on the copy. The plugin saves cities and writes `RegionRenders` into the region
+   folder.
+
+### Order of the tests
+
+Stop at the first step that fails and send the log. A later step needs the steps before it.
+
+| # | Test | What it proves | Details |
+|---|---|---|---|
+| 1 | Start the game. Read the log up to `Registered the Seamless Region panel` | Version check, services, hooks, 11 of 12 modules active (Export is not built yet) | Foundation: Start |
+| 2 | Open a city. The panel shows. Ctrl+Shift+F9 hides and shows it. Status tab lists the region | Posted city messages reach the modules, region index | Foundation: Panel, Region list |
+| 3 | Diagnostics tab: every difference is green at each zoom and rotation | The plugin's camera math is the game's. Everything else builds on it | Foundation: Camera cross-check |
+| 4 | Tools, Camera: tick "Free roam", scroll far past the edge, untick it | The camera hooks and offsets are right. This is the first code that writes into the game | Camera: Free roam, Scroll bounds |
+| 5 | Tools, Camera: untick "Automatic", hide one edge wall, tick "Automatic" again | The terrain view detours | Camera: Edge walls |
+| 6 | Tools, Capture, on the built-in DirectX driver: "Render one test tile" at zoom 4 with the city edge on screen. Compare `test_tile.webp` with a screenshot | Readback, key colors, alignment to the pixel, full state restore. The riskiest step | Capture: Readback and model loader, One test tile |
+| 7 | "Render this city" in the smallest city. Look at the tiles and `meta.json` | The whole render loop, model loading, the store | Capture: Render this city. Store: Files after a capture |
+| 8 | Open a neighbor of that city from the region view. The rendered city shows past the edge | Tile cache, draw passes, depth order, wall hiding | Neighbor rendering: Start and city load, Alignment |
+| 9 | Hover the neighbor (tint and tooltip), then click it | Picking, the view input control, the city switch | Interaction: Hover and tint, Click. Switching: Switch to a founded neighbor |
+| 10 | Tools, Batch: "Render the region" on the small test region. Then cancel a second run | Switch, wait, render and save in a loop, and the way back | Batch: Start, Cancel |
+| 11 | Tools, Overlay: choose an image, move it, save and reload the city | WIC decode, world draw layer, terrain mesh | Map overlay |
+| 12 | Save the city (Ctrl+S) while step 7 runs and look at the region view afterwards | The region picture has no magenta, no neighbors, no tint and its walls | Capture: Cancel, close and failure |
+| 13 | Repeat steps 6 to 9 on SCD3D11 | Readback format and pixel centres of that driver | Capture, Neighbor rendering |
+| 14 | Quit from inside a city | Hooks removed, threads stopped | Foundation: Shutdown |
+
+What to send back when something is wrong: the log file, the step number, the graphics driver,
+the window size, and a screenshot. For a crash also the zoom and rotation.
 
 ## Foundation
 
@@ -17,8 +72,8 @@ SC4RenderServices.
    - `Seamless Region <version> starting, game version 641`
    - `Acquired the ImGui service`, `... draw service`, `... world draw service`, `... camera service`
    - `Hooking: initialized`
-   - one line per module, `<Name>: not active` while the module is still a stub
-   - `N of 12 modules are active`
+   - one line per module: `<Name>: initialized`, and `Export: not active` (not built yet)
+   - `11 of 12 modules are active`
    - `Registered the Seamless Region panel`
 3. On another game version: `Game version N is not supported (only 641). Seamless Region installs nothing and stays off.` and nothing else.
 
@@ -26,8 +81,11 @@ SC4RenderServices.
 
 1. The "Seamless Region" window shows (StartWindowVisible=true). It has the tabs Status,
    Tools, Settings and Diagnostics.
-2. Status in the region view: "Open a city to see the region."
-3. Tools: one section per module. A stub module shows "This part is not active."
+2. Ctrl+Shift+F9 hides the window and shows it again. Close it with its X: the same keys
+   bring it back. With StartWindowVisible=false it starts hidden and the keys show it.
+3. Status in the region view: "Open a city to see the region."
+4. Tools: one section per module. A module that could not start shows "This part is not
+   active." (Export always does).
 
 ### Region list
 
@@ -37,8 +95,10 @@ SC4RenderServices.
 3. Status tab: region name, the region folder (the folder of the .sc4 files), the current city
    in green with "(you play here)", and one row per city of the region.
 4. Compare with the region view: every city tile appears once, cells and sizes match (small 1,
-   medium 2, large 4), unfounded cities say Founded "No" and have a `cell_x_z` key.
+   medium 2, large 4), unfounded cities say Founded "No" and have a `cell_x_z` key. The render
+   state of each city is in Tools, Store.
 5. Open a neighbor city. The list refreshes and the green row moves.
+6. Go to the region view. "Current city" says "none" and no row is green.
 
 ### Camera cross-check (Diagnostics tab)
 
@@ -140,13 +200,18 @@ lines. Every switch logs one line per step with its time in ms.
    - (debug) `Switching: the old city shuts down`, then the other modules' city shutdown lines
    - `Switching: step 4, CloseCity returned true in N ms`
    - `Switching: step 5, loading '<path of B>.sc4'`
-   - `RegionIndex: region '<region>' at '<folder>', N cities, current <B>`
-   - (debug) `Switching: the target city is initialized`
    - `Switching: step 6, LoadCity returned true in N ms`
-   - `Switching: done, now in '<B>', N ms in total`
+   - `Switching: done, '<B>' is loaded, N ms in total. Its modules start at PostCityInit.`
+   - `RegionIndex: region '<region>' at '<folder>', N cities, current <B>`, then the city load
+     lines of the modules (`Camera: region extent ...`, `Interaction: click control added ...`)
+   The RegionIndex line must come **after** the `done` line: the game posts PostCityInit, so the
+   modules start in the new city after the switch has ended. If it comes before step 6, report
+   it (the notes in `docs/re-notes/switching.md` would be wrong for your game).
 4. Open city A again from the region view: the changes you made before the switch are there.
 5. Switch back and forth five times. Every switch ends with the `done` line. The time per switch
    stays about the same.
+6. With "Render the city after each save" on: after a switch no render starts in the new
+   city (no `Capture: the city was saved, rendering it` line after the `done` line).
 
 ### Unfounded neighbor
 
@@ -276,15 +341,16 @@ lines. The tools are in the panel: Tools, Camera.
 
 ### Clear color
 
-1. Tick "Test with magenta". Log: `Camera: outside clear color 0xFF00FFFF`. Where the game
+1. Tick "Test with magenta". Log (debug): `Camera: outside clear color 0xFF00FFFF`. Where the game
    shows no background picture outside the city, the area is magenta. With the background
    picture on you see no change (the capture module turns the picture off).
 2. Untick it. Log: `Camera: outside clear color restored`. The old color is back.
 
 ### Other parts of the game
 
-1. Save the city and go to the region view. The region picture of the city is normal (the
-   thumbnail writer moves the camera itself).
+1. Hide an edge wall (or have a rendered neighbor with "Automatic" on), save the city and go
+   to the region view. The region picture of the city is normal and has its edge walls, as
+   without the plugin (the wall detours do nothing while the thumbnail writer draws).
 2. Open another city. The log shows a new `Camera: region extent` line. Quit the game from
    inside a city: `Hooking: removed DrawWaterBox`, `... DrawSideCliffs`,
    `... UpdateCameraZoomAndRotationParams`, `... UpdateScrollBounds`, no crash.
@@ -341,8 +407,8 @@ driver, SCD3D11 and scvk. Panel: Tools, group "Neighbors".
    cover it.
 4. Rotate: the "Behind" and "In front" lists change. Two neighbors that overlap on screen
    always show the nearer one on top.
-5. Turn off "Draw neighbors in front of the city": only the front neighbors vanish. Turn off
-   "Draw neighbor cities": all vanish at once. Turn both on again.
+5. Turn off "Show neighbors in front": only the front neighbors vanish. Turn off
+   "Show neighbor cities": all vanish at once. Turn both on again.
 
 ### Other checks
 
@@ -350,7 +416,8 @@ driver, SCD3D11 and scvk. Panel: Tools, group "Neighbors".
    scene changes when neighbors are on (no stray textures, no lost fog, UI as before).
 2. Save the city and go to the region view. The city's region picture has no neighbor parts.
 3. While a capture runs (`Neighbors: drawing off` in the log, "Paused while a city render
-   runs." in the panel) no neighbor is drawn. Afterwards: `Neighbors: drawing on`.
+   runs." in the panel) no neighbor is drawn. Afterwards: `Neighbors: drawing on`, and the
+   neighbors are back at once: the "Tile cache" section shows no new uploads for them.
 4. Set "Tile memory (MB)" to 16 and pan around a large region. Memory in the "Tile cache"
    section never passes the limit and Evicted goes up. If the view needs more than the limit,
    some tiles stay empty and the log says once
@@ -361,7 +428,9 @@ driver, SCD3D11 and scvk. Panel: Tools, group "Neighbors".
 6. Built-in DirectX driver, full screen: Alt+Tab away and back. Log:
    `Tile cache: the graphics device was reset, dropping N tile textures`. The neighbors come back.
 7. Switch to another city and back. No crash, the cache starts at 0 textures in each city.
-8. Quit. No crash, no hang (the decode thread stops).
+8. Tools, Store: delete the renders of a neighbor. It vanishes from the view at once and its
+   edge wall comes back.
+9. Quit. No crash, no hang (the decode thread stops).
 
 ## Capture
 
@@ -384,7 +453,7 @@ installed. The checks are the same for both. Tools tab, group "Capture".
 
 1. Go to zoom 4 over a part of the city with buildings and the city edge on screen. Take a
    screenshot of the game (magnification must be 1, do not use the mouse wheel zoom of a mod).
-2. Press "Capture one test tile". The view jumps for a moment and comes back.
+2. Press "Render one test tile". The view jumps for a moment and comes back.
 3. `test_tile.webp` (512 x 512, lossless) is next to `SC4SeamlessRegion.log`. Log lines:
    - `Capture: test tile started, rotation R zoom Z tile (X, Y)`
    - `Capture: key colors on screen (255, 0, 255) and (0, 255, 0)` (other numbers on a 16 bit screen)
@@ -424,16 +493,30 @@ installed. The checks are the same for both. Tools tab, group "Capture".
    without a seam.
 6. After the end: "Last result: Done in ... tiles written", the camera is back, the game runs
    again, neighbors are drawn again.
+7. Render the same city again after a change: bulldoze a tall building at the city edge, or
+   raise a hill higher than every other point of the city (this moves the tile grid). Open a
+   neighbor: the city shows as it is now, with no part of the building left and no shifted
+   strip. In the level folders no file is older than the second render. Log per level:
+   `Store: wrote meta.json for '<key>', L levels` with L one less than the full count while
+   the render runs (the level in work is left out) and the full count at the end.
 
 ### Cancel, close and failure
 
 1. Start a render and press "Cancel". Log: `Capture: stopped (...)`. "Last result" says
    "Cancelled after N of M tiles." The view, zoom, rotation and game speed are as before.
+   `meta.json` names the levels that were finished and the levels of the earlier render that
+   were not started, not the level that was in work. Its folder is empty or has part of the
+   new tiles. The neighbors of this city draw the levels that `meta.json` names.
 2. Start a render and leave to the region view. Log: `Capture: stopped`, no crash, the next
    city opens with the normal view (no magenta outside the city, walls back).
-3. Start a render and press Page Up or zoom with the keyboard. The render puts the zoom back
+3. Start a render and save the city (Ctrl+S). Log: `Capture: the city is saved during the
+   render, the render goes on after the save`. The render goes on and its tiles are right. In
+   the region view the picture of the city is normal: no magenta, and its edge walls are there.
+4. Start a render and press Page Up or zoom with the keyboard. The render puts the zoom back
    and goes on.
-4. Make the game window smaller during a render. The render goes on.
+5. Make the game window smaller during a render. The render goes on.
+6. While a render runs, "Tint the neighbor under the pointer" in the Interaction section and
+   in the Settings tab stays as you set it. The render does not change the setting.
 
 ### Render after each save
 
@@ -442,6 +525,9 @@ installed. The checks are the same for both. Tools tab, group "Capture".
    rendering it`, then a normal render.
 3. Save and exit to the region. No render starts for the closed city, or a render that
    started stops when the city closes. Nothing crashes.
+4. Click a neighbor (the switch saves the city first). No render starts in the neighbor.
+5. Start a region render (Batch). No `Capture: the city was saved, rendering it` line shows
+   during the batch: the batch renders each city itself.
 
 ## Batch
 
@@ -471,6 +557,8 @@ the batch saves every city. The log lines start with `Batch:` in the plugin log.
 
 - In a city that cannot be saved, or while a render or a switch runs, the buttons are off and
   the panel tells why. Nothing changes.
+- While the batch runs, "Render this city" and "Render one test tile" in the Capture section
+  are off ("Off while the region render runs.").
 
 ### Cancel
 
@@ -617,7 +705,7 @@ the city, and at least one neighbor with an old render (play it and save after t
 6. Scroll the view with the keys while the pointer is still: the tint follows the neighbor
    under the pointer.
 7. Panel: turn off "Tint the neighbor under the pointer". The tooltip stays, the tint goes.
-   Turn off "Draw neighbor cities": no tint, no tooltip, no click.
+   Turn off "Show neighbor cities": no tint, no tooltip, no click.
 8. Save the city (the region thumbnail is made): the thumbnail shows no tint.
 
 ### Tooltip text
@@ -660,6 +748,7 @@ the city, and at least one neighbor with an old render (play it and save after t
 
 - During "Render this city" and during a region batch render: no tint, no tooltip, clicks on
   neighbors do nothing special.
-- During a switch: same, until the new city has loaded.
+- During a switch: same, until the new city has loaded and the log shows
+  `Interaction: click control added to the city view` for it.
 - Exit to the region view and load another city: the log shows the control added again (no
   error), and hover works in the new city.
