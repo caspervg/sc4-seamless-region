@@ -1,11 +1,16 @@
 {
-  "name": "sc4-dll-template",
+  "name": "sc4-seamless-region",
   "version-string": "0.1.0",
-  "builtin-baseline": "cc73782a88db48af17f8bfb8328d4cab3d4c246f",
+  "builtin-baseline": "ea49500a3353603af1190ca9a786a9015d638ea0",
   "dependencies": [
     {
+      "name": "libwebp",
+      "default-features": false,
+      "version>=": "1.6.0"
+    },
+    {
       "name": "pulzed-mini",
-      "version>=": "0.9.18"
+      "version>=": "0.9.20"
     },
     {
       "name": "spdlog",
@@ -21,7 +26,7 @@
     },
     {
       "name": "wil",
-      "version>=": "1.0.250325.1"
+      "version>=": "1.0.260126.7"
     }
   ]
 }
