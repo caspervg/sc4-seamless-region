@@ -976,10 +976,10 @@ bool CityCapturer::WriteTestTile_()
     }
     WebPFree(encoded);
     if (!ok) {
-        LOG_ERROR("Capture: could not write the test tile to {}", path.string());
+        LOG_ERROR("Capture: could not write the test tile to {}", Logger::PathText(path));
         return false;
     }
-    testTilePath_ = path.string();
+    testTilePath_ = Logger::PathText(path);
 
     // Where the tile was on the screen before the capture moved the view, so it can be laid
     // over a screenshot. Only exact when the live magnification was 1.

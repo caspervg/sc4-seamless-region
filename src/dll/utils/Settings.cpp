@@ -75,7 +75,7 @@ namespace
 
         void Invalid(const char* key) const
         {
-            LOG_WARN("Invalid {} in {}, using the default", key, path.string());
+            LOG_WARN("Invalid {} in {}, using the default", key, Logger::PathText(path));
         }
 
         void Bool(const char* key, bool& field) const
@@ -113,7 +113,7 @@ void Settings::Load(const std::filesystem::path& settingsFilePath)
     revision_ = revision + 1;
 
     try {
-        const mINI::INIFile file(settingsFilePath.string());
+        const mINI::INIFile file(settingsFilePath);
         mINI::INIStructure ini;
         if (!file.read(ini) || !ini.has(kSectionName)) {
             return;
@@ -145,7 +145,7 @@ void Settings::Load(const std::filesystem::path& settingsFilePath)
         r.Int("WebpQuality", webpQuality, kMinWebpQuality, kMaxWebpQuality);
     }
     catch (const std::exception& e) {
-        LOG_ERROR("Failed to read settings from {}: {}", settingsFilePath.string(), e.what());
+        LOG_ERROR("Failed to read settings from {}: {}", Logger::PathText(settingsFilePath), e.what());
         *this = Settings();
         revision_ = revision + 1;
     }
@@ -154,7 +154,7 @@ void Settings::Load(const std::filesystem::path& settingsFilePath)
 bool Settings::Save(const std::filesystem::path& settingsFilePath) const
 {
     try {
-        const mINI::INIFile file(settingsFilePath.string());
+        const mINI::INIFile file(settingsFilePath);
         mINI::INIStructure ini;
         file.read(ini);  // a missing file is fine, write() creates it
         auto& s = ini[kSectionName];
@@ -174,14 +174,14 @@ bool Settings::Save(const std::filesystem::path& settingsFilePath) const
         s["Zoom45BandMetres"] = std::to_string(zoom45BandMetres);
         s["WebpQuality"] = std::to_string(webpQuality);
         if (!file.write(ini)) {
-            LOG_ERROR("Failed to write settings to {}", settingsFilePath.string());
+            LOG_ERROR("Failed to write settings to {}", Logger::PathText(settingsFilePath));
             return false;
         }
-        LOG_INFO("Saved settings to {}", settingsFilePath.string());
+        LOG_INFO("Saved settings to {}", Logger::PathText(settingsFilePath));
         return true;
     }
     catch (const std::exception& e) {
-        LOG_ERROR("Failed to write settings to {}: {}", settingsFilePath.string(), e.what());
+        LOG_ERROR("Failed to write settings to {}: {}", Logger::PathText(settingsFilePath), e.what());
         return false;
     }
 }

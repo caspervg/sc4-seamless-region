@@ -15,7 +15,7 @@ std::shared_ptr<spdlog::logger> Logger::Get()
     return s_logger;
 }
 
-void Logger::Initialize(const std::string& logName, const std::string& userDir, const bool logToFile)
+void Logger::Initialize(const std::string& logName, const std::filesystem::path& userDir, const bool logToFile)
 {
     if (s_initialized && s_logger) {
         return;
@@ -27,11 +27,8 @@ void Logger::Initialize(const std::string& logName, const std::string& userDir, 
         std::vector<spdlog::sink_ptr> sinks;
         sinks.push_back(std::make_shared<spdlog::sinks::msvc_sink_mt>());
 
-        std::filesystem::path logDir;
-        if (!userDir.empty()) {
-            logDir = std::filesystem::path(userDir);
-        }
-        else {
+        std::filesystem::path logDir = userDir;
+        if (logDir.empty()) {
             const char* userProfileEnv = std::getenv("USERPROFILE");
             const std::string userProfile = userProfileEnv ? userProfileEnv : "";
             if (!userProfile.empty()) {
@@ -41,6 +38,8 @@ void Logger::Initialize(const std::string& logName, const std::string& userDir, 
 
         if (logToFile && !logDir.empty()) {
             std::filesystem::create_directories(logDir);
+            // spdlog takes a narrow file name here. A folder the ANSI code page cannot hold
+            // throws, and the catch below keeps the debugger sink only.
             const std::string logPath = (logDir / (s_logName + ".log")).string();
             sinks.push_back(std::make_shared<spdlog::sinks::basic_file_sink_mt>(logPath, true));
         }
@@ -58,6 +57,17 @@ void Logger::Initialize(const std::string& logName, const std::string& userDir, 
         spdlog::set_default_logger(s_logger);
         s_logger->set_level(spdlog::level::info);
         s_initialized = true;
+    }
+}
+
+std::string Logger::PathText(const std::filesystem::path& path) noexcept
+{
+    try {
+        const std::u8string text = path.u8string();
+        return {reinterpret_cast<const char*>(text.data()), text.size()};
+    }
+    catch (...) {
+        return "(path)";
     }
 }
 

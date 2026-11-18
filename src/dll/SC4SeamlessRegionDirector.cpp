@@ -397,10 +397,10 @@ void SC4SeamlessRegionDirector::InitializeLogger_()
     const auto pluginsPath = GetUserPluginsPath_();
     const auto settingsPath = pluginsPath / kSettingsFileName;
     // A console-only logger first, so Load can report problems.
-    Logger::Initialize("SC4SeamlessRegion", pluginsPath.parent_path().string(), false);
+    Logger::Initialize("SC4SeamlessRegion", pluginsPath.parent_path(), false);
     settings_.Load(settingsPath);
     Logger::Shutdown();
-    Logger::Initialize("SC4SeamlessRegion", pluginsPath.parent_path().string(), settings_.logToFile);
+    Logger::Initialize("SC4SeamlessRegion", pluginsPath.parent_path(), settings_.logToFile);
     Logger::SetLevel(settings_.logLevel);
-    LOG_INFO("Using settings file: {}", settingsPath.string());
+    LOG_INFO("Using settings file: {}", Logger::PathText(settingsPath));
 }
