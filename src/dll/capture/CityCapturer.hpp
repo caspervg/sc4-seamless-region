@@ -15,7 +15,9 @@
 //
 // Writes through TileStore. Restores the game state (zoom, rotation, camera target,
 // magnification, data view, view level, background, clear color, free roam, walls, neighbor
-// drawing, model loading, pause) whether it succeeds, fails, is cancelled or the city closes.
+// drawing, model loading, pause) whether it succeeds, fails or is cancelled. When the city
+// closes during a render, only the state that outlives the city view is put back. The hover
+// tint and the map overlay stay out of the tiles on their own: they check IsRunning().
 // Details: docs/re-notes/capture.md.
 
 #include <array>

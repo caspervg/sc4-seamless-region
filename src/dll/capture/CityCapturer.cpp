@@ -1097,6 +1097,12 @@ void CityCapturer::Restore_(const bool cityClosing)
     if (saved_.backgroundSaved && game.renderer) {
         game.renderer->EnableBackgroundPicture(saved_.backgroundPicture);
     }
+    // A city that closes takes its view, camera and data views with it, and other listeners
+    // of PreCityShutdown may have let go of their parts already. So no view change then: it
+    // would send view messages and load models into a city that shuts down.
+    if (cityClosing) {
+        game.view = nullptr;
+    }
     if (saved_.viewLevelSaved && game.view) {
         game.view->SetCurrentViewLevel(saved_.viewLevel);
     }
