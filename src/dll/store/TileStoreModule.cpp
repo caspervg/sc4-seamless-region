@@ -6,8 +6,10 @@
 
 #include <cstdio>
 
+#include "camera/CameraExtender.hpp"
 #include "imgui.h"
 #include "region/RegionIndex.hpp"
+#include "render/NeighborRenderer.hpp"
 #include "store/TileStore.hpp"
 #include "utils/Logger.h"
 
@@ -161,7 +163,16 @@ void TileStore::DrawPanelSection()
         ImGui::Text("Delete the renders of \"%s\"?", pendingDelete_.c_str());
         ImGui::TextUnformatted("You can render the city again at any time.");
         if (ImGui::Button("Delete")) {
-            DeleteCity(pendingDelete_);
+            // Wait for the worker, then let the view forget the neighbor and get its wall back.
+            if (DeleteCity(pendingDelete_)) {
+                Flush();
+                if (ctx_.neighborRenderer) {
+                    ctx_.neighborRenderer->InvalidateAll();
+                }
+                if (ctx_.cameraExtender) {
+                    ctx_.cameraExtender->RefreshNeighborWalls();
+                }
+            }
             rowsTick_ = 0;
             pendingDelete_.clear();
             ImGui::CloseCurrentPopup();
