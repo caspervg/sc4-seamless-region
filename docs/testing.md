@@ -298,10 +298,11 @@ driver, SCD3D11 and scvk. Panel: Tools, group "Neighbors".
 
 ### Start and city load
 
-1. Log at start: `Tile cache: ready, limit 96 MB, read through ..., decode through ...` and
+1. Log at start: `Tile cache: ready, limit 96 MB` and
    `Neighbors: draw callbacks registered (back at the start of PreStatic, front at the end of PostStatic)`.
 2. Open a city with rendered neighbors. Log: `Neighbors: N of M founded neighbor cities have a render`.
-3. The neighbors appear around the city within a second. The "Neighbors" section lists every
+3. The neighbors appear around the city once the store has indexed the renders folder (a second or
+   so in a large region). The "Neighbors" section lists every
    rendered neighbor with "Behind" or "In front", "Yes" under "Render for this view" and
    "x of x" tiles loaded for the ones on screen.
 4. "Tile cache" section: Textures and Memory go up, Waiting goes back to 0, Failed stays 0.

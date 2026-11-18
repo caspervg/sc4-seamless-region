@@ -168,3 +168,14 @@ DirectX driver, SCD3D11 and scvk. Limits found in the service source:
   renderer knows the padding. Tiles that are not a power of two are refused (logged once).
 - SCD3D11 gives textures back blank after a device removal without telling anyone (noted in
   `generic-backend-re.md`). The cache only sees `GetDeviceGeneration()` changes.
+
+## Store and camera modules
+
+- Game thread: `TileStore::LoadMeta` once per city at rebuild, `HasTile` per visible tile and
+  only while `IsIndexReady()` is true (before that `HasTile` scans a city folder on the calling
+  thread, so nothing is drawn and the view is redrawn once the index is ready).
+- Decode worker: `TileStore::ReadTile(key, bytes)` and
+  `WebpCodec::DecodeInto(data, rgba, capacityBytes, w, h)` into one of 8 reused buffers.
+- The near and far planes are read from cS3DCamera `+0x184/+0x188` on every pass, after the
+  camera module's `SetOrtho`, so the tile plane follows widened clip planes. No code here
+  uses the eye distance.

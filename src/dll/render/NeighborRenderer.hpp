@@ -91,6 +91,7 @@ private:
     bool outlineTiles_ = false;
     bool shownNeighbors_ = true;
     bool shownFront_ = true;
+    bool indexReady_ = false;
     uint32_t settingsRevision_ = 0;
     uint32_t regionGeneration_ = 0;
     uint32_t deviceGeneration_ = 0;

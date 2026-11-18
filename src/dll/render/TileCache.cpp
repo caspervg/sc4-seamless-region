@@ -3,9 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
-#include <concepts>
 #include <condition_variable>
-#include <fstream>
 #include <mutex>
 #include <span>
 #include <thread>
@@ -22,92 +20,31 @@
 #include "utils/Logger.h"
 #include "utils/Settings.h"
 
-namespace WebpCodec
-{
-    // Keeps the name declared until the store module (W2-D) adds the real
-    // bool DecodeInto(std::span<const uint8_t> data, uint8_t* rgba, size_t capacity, int& w, int& h).
-    // The real function always wins overload resolution against this one.
-    void DecodeInto(...) = delete;
-}
-
 namespace
 {
     constexpr size_t kMaxRequests = 256;  // more than one 4K screen of tiles
     constexpr int kDecodeBuffers = 8;     // decoded tiles waiting for upload, 1 MB each
-    constexpr int kMaxTileEdge = 4096;
+    constexpr int kMaxTileEdge = 2048;
     constexpr size_t kDefaultTileBytes = 512 * 512 * 4;
-    constexpr size_t kMaxTileFileBytes = 32u * 1024 * 1024;
     constexpr int kMaxUploadAttempts = 3;
 
-    // The store contract grows by ReadTile and DecodeInto in parallel with this module. Use
-    // them when they exist, else the calls the foundation header already has.
-    template <typename Store>
-    constexpr bool kStoreReadsTiles = requires(Store& store, const TileKey& key, std::vector<uint8_t>& bytes) {
-        { store.ReadTile(key, bytes) } -> std::convertible_to<bool>;
-    };
-
-    template <typename Buffer>
-    constexpr bool kCodecDecodesInto = requires(std::span<const uint8_t> data, Buffer& buffer, int& w, int& h) {
-        { WebpCodec::DecodeInto(data, buffer.data(), buffer.size(), w, h) } -> std::convertible_to<bool>;
-    };
-
-    // Game thread, at request time. Empty when the store reads the tile itself.
-    template <typename Store>
-    std::filesystem::path RequestPath(Store& store, const TileKey& key)
+    // Worker thread. rgba keeps its storage between tiles, so decoding allocates nothing in
+    // steady state.
+    bool DecodeTile(const std::span<const uint8_t> data, std::vector<uint8_t>& rgba, int& w, int& h)
     {
-        if constexpr (kStoreReadsTiles<Store>) {
-            return {};
+        if (rgba.size() < kDefaultTileBytes) {
+            rgba.resize(kDefaultTileBytes);
         }
-        else {
-            return store.TilePath(key);
+        if (WebpCodec::DecodeInto(data, rgba.data(), static_cast<int>(rgba.size()), w, h)) {
+            return true;
         }
-    }
-
-    // Worker thread.
-    template <typename Store>
-    bool ReadTileBytes(Store& store, const TileKey& key, const std::filesystem::path& path,
-                       std::vector<uint8_t>& bytes)
-    {
-        if constexpr (kStoreReadsTiles<Store>) {
-            return store.ReadTile(key, bytes);
+        // DecodeInto sets w and h when the buffer is too small. Grow it once and try again.
+        if (w <= 0 || h <= 0 || w > kMaxTileEdge || h > kMaxTileEdge ||
+            static_cast<size_t>(w) * h * 4 <= rgba.size()) {
+            return false;
         }
-        else {
-            std::ifstream file(path, std::ios::binary | std::ios::ate);
-            if (!file) {
-                return false;
-            }
-            const std::streamoff size = file.tellg();
-            if (size <= 0 || static_cast<size_t>(size) > kMaxTileFileBytes) {
-                return false;
-            }
-            bytes.resize(static_cast<size_t>(size));
-            file.seekg(0);
-            return static_cast<bool>(file.read(reinterpret_cast<char*>(bytes.data()), size));
-        }
-    }
-
-    // Worker thread. rgba keeps its storage between tiles.
-    template <typename Buffer>
-    bool DecodeTile(const std::span<const uint8_t> data, Buffer& rgba, int& w, int& h)
-    {
-        if constexpr (kCodecDecodesInto<Buffer>) {
-            if (rgba.size() < kDefaultTileBytes) {
-                rgba.resize(kDefaultTileBytes);
-            }
-            if (WebpCodec::DecodeInto(data, rgba.data(), rgba.size(), w, h)) {
-                return true;
-            }
-            // The buffer may be too small for this tile. Grow it once and try again.
-            if (w <= 0 || h <= 0 || w > kMaxTileEdge || h > kMaxTileEdge ||
-                static_cast<size_t>(w) * h * 4 <= rgba.size()) {
-                return false;
-            }
-            rgba.resize(static_cast<size_t>(w) * h * 4);
-            return WebpCodec::DecodeInto(data, rgba.data(), rgba.size(), w, h);
-        }
-        else {
-            return WebpCodec::Decode(data, rgba, w, h);
-        }
+        rgba.resize(static_cast<size_t>(w) * h * 4);
+        return WebpCodec::DecodeInto(data, rgba.data(), static_cast<int>(rgba.size()), w, h);
     }
 
     // Bilinear filtering (zoom 5) needs premultiplied colours, or the colours that the
@@ -138,7 +75,6 @@ struct TileCache::Impl
     struct Request
     {
         TileKey key;
-        std::filesystem::path path;
         uint32_t epoch = 0;
     };
     struct Done
@@ -213,9 +149,7 @@ bool TileCache::Initialize(const ModuleContext& ctx)
     s.lru.SetBudget(static_cast<size_t>(ctx_.settings->tileCacheMB) * 1024 * 1024);
     s.initialized = true;
     sInstance = this;
-    LOG_INFO("Tile cache: ready, limit {} MB, read through {}, decode through {}", ctx_.settings->tileCacheMB,
-             kStoreReadsTiles<TileStore> ? "TileStore::ReadTile" : "TileStore::TilePath",
-             kCodecDecodesInto<std::vector<uint8_t>> ? "WebpCodec::DecodeInto" : "WebpCodec::Decode");
+    LOG_INFO("Tile cache: ready, limit {} MB", ctx_.settings->tileCacheMB);
     return true;
 }
 
@@ -291,7 +225,7 @@ void TileCache::WorkerMain_()
         bool ok = false;
         try {
             std::vector<uint8_t>& rgba = s.buffers[buffer];
-            ok = ReadTileBytes(*ctx_.tileStore, request.key, request.path, s.fileBytes) &&
+            ok = ctx_.tileStore->ReadTile(request.key, s.fileBytes) &&
                  DecodeTile(std::span<const uint8_t>(s.fileBytes), rgba, w, h) && w > 0 && h > 0 &&
                  w <= kMaxTileEdge && h <= kMaxTileEdge && rgba.size() >= static_cast<size_t>(w) * h * 4;
             if (ok) {
@@ -331,7 +265,7 @@ const TileTexture* TileCache::Acquire(const TileKey& key)
         return nullptr;
     }
 
-    Impl::Request request{key, RequestPath(*ctx_.tileStore, key), 0};
+    Impl::Request request{key, 0};
     {
         std::lock_guard lock(s.mutex);
         request.epoch = s.epoch;

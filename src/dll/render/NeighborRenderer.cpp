@@ -193,8 +193,10 @@ void NeighborRenderer::RequestFullRedraw_() const
 
 bool NeighborRenderer::ShouldDraw_() const
 {
+    // TileStore::HasTile scans a city folder on the calling thread until the store's
+    // background index is done. Draw nothing before that, Tick_ redraws when it is ready.
     return initialized_ && enabled_ && cityActive_ && ctx_.settings->showNeighbors && !neighbors_.empty() &&
-           GameAccess::Renderer() != nullptr;
+           ctx_.tileStore->IsIndexReady() && GameAccess::Renderer() != nullptr;
 }
 
 void NeighborRenderer::Rebuild_()
@@ -221,7 +223,7 @@ void NeighborRenderer::Rebuild_()
         if (!meta) {
             continue;
         }
-        if (meta->tileSize < 16 || meta->tileSize > 4096 || meta->sizeX != city.sizeX || meta->sizeZ != city.sizeZ) {
+        if (meta->tileSize < 16 || meta->tileSize > 2048 || meta->sizeX != city.sizeX || meta->sizeZ != city.sizeZ) {
             LOG_WARN("Neighbors: the render of '{}' does not fit the city (tile size {}, size {}x{}). It is skipped.",
                      city.name, meta->tileSize, meta->sizeX, meta->sizeZ);
             continue;
@@ -320,6 +322,10 @@ void NeighborRenderer::Tick_()
     if (ctx_.imgui->GetDeviceGeneration() != deviceGeneration_) {
         // The tile cache drops its textures on its own. Ask for them again.
         deviceGeneration_ = ctx_.imgui->GetDeviceGeneration();
+        redraw = true;
+    }
+    if (ctx_.tileStore->IsIndexReady() != indexReady_) {
+        indexReady_ = !indexReady_;
         redraw = true;
     }
     if (redraw) {
