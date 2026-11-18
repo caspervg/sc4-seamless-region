@@ -19,6 +19,7 @@
 #include "capture/CameraAdapter.hpp"
 #include "capture/CaptureAddresses.hpp"
 #include "capture/ModelLoadMonitor.hpp"
+#include "batch/RegionBatchRenderer.hpp"
 #include "capture/SnapshotReader.hpp"
 #include "core/GameAddresses.hpp"
 #include "core/IdleScheduler.hpp"
@@ -151,6 +152,7 @@ bool CityCapturer::Initialize(const ModuleContext& ctx)
 
 void CityCapturer::Shutdown()
 {
+    CancelRenderOnSave_();
     if (phase_ != Phase::Idle) {
         End_(false, "Stopped", "The game closed during the render.", true);
     }
@@ -165,6 +167,9 @@ void CityCapturer::OnCityInit() {}
 
 void CityCapturer::OnCityShutdown()
 {
+    // A save that waits for its render belongs to this city. A city switch saves and then
+    // closes the city in one task: without this the render would start in the next city.
+    CancelRenderOnSave_();
     if (phase_ != Phase::Idle) {
         End_(false, "Stopped", "The city closed during the render.", true);
     }
@@ -1227,28 +1232,43 @@ double CityCapturer::EtaSeconds_() const
 
 // ---- render on save ----------------------------------------------------------------------------
 
+// A city switch or the region render works with the cities: no render on save then. The
+// region render saves every city it leaves and renders each city itself.
+bool CityCapturer::OtherWorkRuns_() const
+{
+    return (ctx_.switcher && ctx_.switcher->IsBusy()) || (ctx_.batch && ctx_.batch->IsRunning());
+}
+
 void CityCapturer::OnSaved_()
 {
-    // Inside the save message: only note it. The capture starts some idle ticks later, when
-    // the save is over and a city switch or a quit that came with the save has begun.
-    if (!ctx_.settings || !ctx_.settings->renderOnSave || renderOnSavePending_ || phase_ != Phase::Idle) {
+    // Inside the save message: only note it. The render starts some idle ticks later, when
+    // the save is over. A save that is part of leaving the city (a switch, the region view, a
+    // quit) is followed by OnCityShutdown, which drops the note. So only the city that was
+    // saved is ever rendered, never the city that is open some ticks later.
+    if (!ctx_.settings || !ctx_.settings->renderOnSave || renderOnSaveId_ != 0 || phase_ != Phase::Idle ||
+        OtherWorkRuns_() || !GameAccess::View3D()) {
         return;
     }
-    renderOnSavePending_ = true;
     renderOnSaveTicks_ = kRenderOnSaveDelayTicks;
-    ctx_.idle->AddRecurring([this] {
+    renderOnSaveId_ = ctx_.idle->AddRecurring([this] {
         if (--renderOnSaveTicks_ > 0) {
             return true;
         }
-        renderOnSavePending_ = false;
-        const bool switching = ctx_.switcher && ctx_.switcher->IsBusy();
-        if (ctx_.settings && ctx_.settings->renderOnSave && phase_ == Phase::Idle && !switching && GameAccess::City() &&
-            GameAccess::View3D()) {
+        renderOnSaveId_ = 0;
+        if (ctx_.settings->renderOnSave && phase_ == Phase::Idle && !OtherWorkRuns_()) {
             LOG_INFO("Capture: the city was saved, rendering it");
             Start(CaptureRequest());
         }
         return false;
     });
+}
+
+void CityCapturer::CancelRenderOnSave_()
+{
+    if (renderOnSaveId_ != 0) {
+        ctx_.idle->Cancel(renderOnSaveId_);
+        renderOnSaveId_ = 0;
+    }
 }
 
 // ---- panel -------------------------------------------------------------------------------------
@@ -1281,7 +1301,9 @@ void CityCapturer::DrawPanelSection()
         return;
     }
 
-    ImGui::BeginDisabled(!cityOpen || !readback);
+    // The region render starts the render of each city itself.
+    const bool batchRuns = ctx_.batch && ctx_.batch->IsRunning();
+    ImGui::BeginDisabled(!cityOpen || !readback || batchRuns);
     if (ImGui::Button("Render this city")) {
         Start(CaptureRequest());
     }
@@ -1301,6 +1323,9 @@ void CityCapturer::DrawPanelSection()
 
     if (!cityOpen) {
         ImGui::TextDisabled("Open a city to render it.");
+    }
+    else if (batchRuns) {
+        ImGui::TextDisabled("Off while the region render runs.");
     }
     else if (!readback) {
         ImGui::TextWrapped("The graphics driver cannot read the screen back, so a render is not possible.");

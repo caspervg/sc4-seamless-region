@@ -35,8 +35,8 @@ namespace
 
     // A switch blocks while the city loads. A large city takes a minute or two.
     constexpr auto kSwitchTimeout = std::chrono::minutes(5);
-    // Ticks and time in a city before its render starts. More than the 10 ticks of the
-    // capture's render on save, so that render starts (and is taken over) before ours.
+    // Ticks and time in a city before its render starts, so the game finishes the work it
+    // posts at a city load. Render on save never runs during a batch (CityCapturer).
     constexpr int kSettleTicks = 30;
     constexpr auto kSettleTime = std::chrono::seconds(3);
     // The render of a city shows no progress for this long: it is cancelled.
@@ -148,7 +148,8 @@ void RegionBatchRenderer::Shutdown()
 void RegionBatchRenderer::OnCityInit()
 {
     if (running_) {
-        // Paused from the start: the simulation must not change the city before its render.
+        // Paused as soon as the modules see the city: the simulation must not change it
+        // before its render.
         pause_.emplace(false, true, true, true);
     }
 }
@@ -490,21 +491,13 @@ void RegionBatchRenderer::StepSettle_()
     lastDone_ = -1;
     lastProgress_ = Clock::now();
     lastProgressRead_ = Clock::time_point{};
-    if (ctx_.capturer->IsRunning()) {
-        // A render of this city started on its own (render on save). It is the same full
-        // render: wait for it instead of starting another.
-        Log_(std::format("A render of '{}' runs already, the batch waits for it", current_.name));
-        phase_ = Phase::Capture;
-        return;
-    }
-    if (++settleTicks_ < kSettleTicks || Clock::now() - phaseStart_ < kSettleTime) {
+    // Nothing else starts a render while the batch runs. If one runs anyway, wait for its
+    // end: the batch only counts a render it started itself.
+    if (ctx_.capturer->IsRunning() || ++settleTicks_ < kSettleTicks || Clock::now() - phaseStart_ < kSettleTime) {
         return;
     }
     phase_ = Phase::Capture;
     if (!ctx_.capturer->Start(CaptureRequest())) {
-        if (ctx_.capturer->IsRunning()) {
-            return;  // someone else's render, as above
-        }
         const std::string error = ctx_.capturer->Progress().error;
         BatchQueue::Fail(run_, current_, "The render did not start: " + (error.empty() ? "no reason given." : error));
         Log_(std::format("Failed '{}': {}", current_.name, run_.failed.back().reason));

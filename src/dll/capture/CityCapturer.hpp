@@ -168,6 +168,8 @@ private:
     void PhaseText_(char* text, size_t size) const;
     [[nodiscard]] double EtaSeconds_() const;
     void OnSaved_();
+    void CancelRenderOnSave_();
+    [[nodiscard]] bool OtherWorkRuns_() const;
 
     ModuleContext ctx_;
     std::function<void(bool ok)> onFinished_;
@@ -175,7 +177,9 @@ private:
     Phase phase_ = Phase::Idle;
     uint32_t stepId_ = 0;
     uint32_t saveToken_ = 0;
-    bool renderOnSavePending_ = false;
+    // Render on save: the countdown step, 0 when no save waits for its render. It only lives
+    // inside the city that was saved (OnCityShutdown cancels it).
+    uint32_t renderOnSaveId_ = 0;
     int renderOnSaveTicks_ = 0;
     bool cancelRequested_ = false;
     bool testTile_ = false;

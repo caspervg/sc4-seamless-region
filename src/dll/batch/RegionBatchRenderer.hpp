@@ -11,8 +11,8 @@
 // The run lives in <RendersDirectory>/batch.json (BatchQueue, atomic writes): a restart offers
 // to continue it, and a city that was started twice without an end (the game stopped) is
 // skipped. The game stays paused (hidden pause, the speed is not touched) while the batch
-// works in a city. "Render this city" and render on save are in CityCapturer. Details:
-// docs/re-notes/batch.md.
+// works in a city. "Render this city" and render on save are in CityCapturer, and both are
+// off while a batch runs. Details: docs/re-notes/batch.md.
 
 #include <chrono>
 #include <cstdint>
