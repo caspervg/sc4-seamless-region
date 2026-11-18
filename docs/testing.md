@@ -443,3 +443,80 @@ installed. The checks are the same for both. Tools tab, group "Capture".
 3. Save and exit to the region. No render starts for the closed city, or a render that
    started stops when the city closes. Nothing crashes.
 
+
+## Map overlay
+
+Needs SC4RenderServices with the world draw service and the ImGui service. Panel: Tools, group
+"Overlay". Test on the built-in DirectX driver, SCD3D11 and scvk. Have a large image ready (for
+example an 8000 x 8000 PNG of a real map), a small one (about 1000 px), a JPG and a GIF.
+
+### Start and loading
+
+1. Log at start: `Overlay: ready, texture limit 64 MB`.
+2. Open a city. Click "Choose image..." and pick the large PNG. The game keeps running while it
+   loads (the panel shows "Loading the image..."). Log, in order:
+   `Overlay: loading <path>`,
+   `Overlay: the image is 8000x8000 pixels, made smaller to WxH to fit the 64 MB texture limit`,
+   `Overlay: decoded in N ms, K textures, M MB with the service copy` (M at most 64),
+   `Overlay: K textures uploaded`.
+3. The image appears on the ground, as large as the city and centred on it. The panel shows the
+   pixel size, the texture count and the memory.
+4. Pick the small PNG, then a JPG, BMP, TIFF and an animated GIF (first frame). Each one
+   replaces the last. A file that is not an image gives an orange line in the panel and a log
+   line `Overlay: could not load <path>: ...`. Nothing crashes.
+5. Type a path in the box and click "Load": same result as the dialog.
+6. Task Manager: memory of the game goes up by about the panel's MB and comes back down when you
+   click "Remove overlay" or leave the city.
+
+### Look and draw order
+
+1. With "Draw over buildings" off, the image lies on the terrain, over roads and lot textures,
+   under buildings, trees and props. Cars drive over it. Water covers it where the ground is
+   under water.
+2. Turn "Draw over buildings" on: the image covers everything. Off again: back to step 1.
+3. Opacity slider from 0 to 1: the scene shows through less and less. "Show the image" off hides
+   it at once.
+4. With fog on in the game options, the far part of the image fades like the terrain.
+5. Seams: at zoom 5, look where two textures of a split image meet (the large image has them
+   about every 2046 image pixels). No line, no gap, no colour from the other side of the image.
+6. The edge of the city clips the image. Nothing is drawn outside the city.
+7. Pan slowly and fast in all directions, and zoom and rotate. The image stays on the ground
+   without tearing at the edges of the strips the game redraws during a pan.
+8. Use the Alt+Tab or full screen switch that resets the device on the built-in driver. Log:
+   `Overlay: the graphics device was reset, loading the image again`, then the image is back.
+
+### Placement
+
+1. "Centre on the view": the image centre jumps to the centre of the screen.
+2. The arrows move the image by the step (16 m by default) in the screen direction of each arrow
+   at every rotation.
+3. Width with "Keep the image shape" on: the height follows. Off: only the width changes.
+4. Type 2 in the metres box and click "Set 1 pixel = this many metres": a 1000 px image becomes
+   2000 m wide.
+5. Turn slider and "+90": the image turns around its centre.
+6. "Fit to city": the turned image fits inside the city edges.
+7. "Pick two points": with no game tool selected, click two features on the image whose real
+   distance you know, type it, "Apply". The first point stays in place and the distance between
+   the two features is now the typed one (check with the 16 m grid of the terrain).
+
+### Terrain
+
+1. On a hilly city, with "Follow the terrain" on, the image lies on every slope with no part
+   under the ground and no part floating (check at zoom 5 along ridges and valleys).
+2. Raise and lower terrain under the image with the god mode tools. About half a second after
+   you stop, log `Overlay: the terrain under the overlay changed, the mesh follows it` and the
+   image follows the new ground. Terraforming away from the image gives no such line.
+3. Plop a lot on a slope under the image (the game levels the ground): the image follows too.
+4. "Follow the terrain" off: the image is flat at the height under its centre. Change "Height
+   above sea": it moves up and down, and hills cover it where they are higher.
+
+### Save and reload
+
+1. After a change, `<Region>/RegionRenders/overlays/<city key>.json` holds the new values (no
+   `.tmp` file left over).
+2. Save the city, go to the region, open the city again. Log `Overlay: loaded <file>` and the
+   image is back in the same place, size, turn, opacity and mode.
+3. Copy the region folder with an image inside it to another place and load the copy: the image
+   is found through its path relative to the region folder.
+4. "Remove overlay" deletes the JSON file. The city opens without an image next time.
+5. A city render (Capture) or the region thumbnail never shows the image.
