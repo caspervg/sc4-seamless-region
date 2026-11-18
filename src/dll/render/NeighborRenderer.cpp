@@ -575,8 +575,8 @@ void NeighborRenderer::DrawGroup_(const bool front)
 void NeighborRenderer::DrawPanelSection()
 {
     Settings* settings = ctx_.settings;
-    bool changed = ImGui::Checkbox("Draw neighbor cities", &settings->showNeighbors);
-    changed |= ImGui::Checkbox("Draw neighbors in front of the city", &settings->showFrontNeighbors);
+    bool changed = ImGui::Checkbox("Show neighbor cities", &settings->showNeighbors);
+    changed |= ImGui::Checkbox("Show neighbors in front", &settings->showFrontNeighbors);
     if (changed) {
         settings->MarkChanged();
     }

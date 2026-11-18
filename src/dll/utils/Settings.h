@@ -33,7 +33,7 @@ public:
     bool showNeighbors = true;
     // Draw neighbors that are in front of the city (they can hide parts of it).
     bool showFrontNeighbors = true;
-    // Tint the neighbor under the mouse.
+    // Tint the neighbor under the pointer.
     bool hoverTint = true;
     // Click a neighbor to save this city and play the neighbor.
     bool clickToSwitch = true;

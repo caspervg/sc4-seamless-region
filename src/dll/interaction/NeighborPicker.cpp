@@ -642,7 +642,7 @@ void NeighborPicker::DrawPanelSection() {
     if (!settings->showNeighbors) {
         ImGui::TextDisabled("Turn on the neighbor cities to use this.");
     } else if (ctx_.capturer->IsRunning()) {
-        ImGui::TextDisabled("Off while a city render runs.");
+        ImGui::TextDisabled("Off while a render runs.");
     } else if (ctx_.batch && ctx_.batch->IsRunning()) {
         ImGui::TextDisabled("Off while the region render runs.");
     } else if (ctx_.switcher->IsBusy()) {

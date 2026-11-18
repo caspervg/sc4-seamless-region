@@ -1328,7 +1328,7 @@ void CityCapturer::DrawPanelSection()
                           "It renders 4 rotations and zooms 1 to 4. A large city takes some minutes.");
     }
     ImGui::SameLine();
-    if (ImGui::Button("Capture one test tile")) {
+    if (ImGui::Button("Render one test tile")) {
         StartTestTile();
     }
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
