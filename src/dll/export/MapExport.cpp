@@ -387,8 +387,18 @@ namespace
                 fs::create_directories(column, ec);
                 l.columnMade[tx] = 1;
             }
-            if (!WriteFile(column / (std::to_wstring(ty) + L".webp"), encoded_.data(), encoded_.size())) {
-                LOG_WARN("Export: writing '{}' failed", Logger::PathText(column));
+            // A virus scanner or the search indexer can hold a new folder for a moment: try again
+            // a few times before giving up (seen in Documents on a first export).
+            const fs::path file = column / (std::to_wstring(ty) + L".webp");
+            bool written = WriteFile(file, encoded_.data(), encoded_.size());
+            for (int attempt = 1; !written && attempt <= 5; ++attempt) {
+                Sleep(20 * attempt);
+                std::error_code ec;
+                fs::create_directories(column, ec);
+                written = WriteFile(file, encoded_.data(), encoded_.size());
+            }
+            if (!written) {
+                LOG_WARN("Export: writing '{}' failed", Logger::PathText(file));
                 return false;
             }
             l.written[l.Index(tx, ty)] = 1;

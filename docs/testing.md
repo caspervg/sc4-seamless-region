@@ -724,6 +724,18 @@ levels the browser stops at full size.
 temporary folder and runs the whole export. Set `SC4SR_KEEP_EXPORT_TEST=1` to keep the folder
 (`%TEMP%\sc4sr_export_test_...`) and open its `RegionRenders\map\index.html`.
 
+### Outside the game
+
+`SC4RegionMap.exe` (in `cmake-build-release-visual-studio\src	ools\Release`) makes the same
+map without the game:
+
+```
+SC4RegionMap.exe "%USERPROFILE%\Documents\SimCity 4\Regions\Fairview" [--rotation 1..4] [--open]
+```
+
+It reads the save files and the `meta.json` of each rendered city. Fairview (49 cities) took
+3.4 minutes and 118 MB.
+
 ## Map overlay
 
 Needs SC4RenderServices with the world draw service and the ImGui service. Panel: Tools, group

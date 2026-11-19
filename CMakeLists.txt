@@ -74,6 +74,7 @@ find_package(nlohmann_json CONFIG REQUIRED)
 enable_testing()
 
 add_subdirectory(src/dll)
+add_subdirectory(src/tools)
 add_subdirectory(tests)
 
 install(TARGETS ${PROJECT_NAME}
