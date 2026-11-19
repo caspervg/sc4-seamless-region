@@ -307,18 +307,20 @@ bool CityCapturer::Begin_(const bool testTile, const CaptureRequest& request)
         BuildLevels_(request);
     }
     int total = 0;
+    size_t largestGrid = 0;
     for (const Level& level : levels_) {
         total += level.tiles;
+        largestGrid = std::max(largestGrid, static_cast<size_t>(level.grid.tilesX) * level.grid.tilesY);
     }
     if (levels_.empty() || total == 0) {
         return refuse("There is no zoom or rotation to render.");
     }
 
-    const size_t tileBytes = static_cast<size_t>(tileSize_) * tileSize_ * 4;
-    tileA_.assign(tileBytes, 0);
-    tileB_.assign(tileBytes, 0);
-    readBuffer_.reserve(tileBytes);
+    // The block buffers and the read buffer grow on the first block (and when the window
+    // grows), then keep their size until the end.
+    tileB_.assign(static_cast<size_t>(tileSize_) * tileSize_ * 4, 0);
     outgoing_.clear();
+    pending_.reserve(largestGrid);
 
     saved_ = SavedState();
     cancelRequested_ = false;
@@ -329,12 +331,13 @@ bool CityCapturer::Begin_(const bool testTile, const CaptureRequest& request)
     misalignedLogged_ = false;
     levelIndex_ = 0;
     levelRetries_ = 0;
-    tx_ = -1;
-    ty_ = 0;
+    levelBegun_ = false;
+    block_.count = 0;
     levelTilesDone_ = 0;
     tilesWritten_ = 0;
     tilesEmpty_ = 0;
     tilesTwoPass_ = 0;
+    framesDrawn_ = 0;
     progress_ = CaptureProgress();
     progress_.total = total;
     startTime_ = Clock::now();
@@ -429,7 +432,7 @@ bool CityCapturer::Step_()
         case Phase::CalibrateSecond: more = StepCalibrate_(true); break;
         case Phase::LevelBegin: more = StepLevelBegin_(); break;
         case Phase::LevelWait: more = StepLevelWait_(); break;
-        case Phase::Tile: more = StepTile_(); break;
+        case Phase::Block: more = StepBlock_(); break;
         case Phase::WaitStore: more = StepWaitStore_(); break;
         case Phase::Finish: more = StepFinish_(); break;
         case Phase::Idle: break;
@@ -643,9 +646,9 @@ bool CityCapturer::StepLevelWait_()
     if (!ModelsReady_(false)) {
         return true;
     }
-    phase_ = Phase::Tile;
-    if (tx_ < 0) {
-        Level& level = levels_[levelIndex_];
+    phase_ = Phase::Block;
+    Level& level = levels_[levelIndex_];
+    if (!levelBegun_) {
         LOG_INFO("Capture: rotation {} zoom {}: {} tiles in a grid of {} x {}", level.rotation, level.zoom + 1,
                  level.tiles, level.grid.tilesX, level.grid.tilesY);
         if (!testTile_) {
@@ -658,18 +661,28 @@ bool CityCapturer::StepLevelWait_()
             }
             ctx_.tileStore->DeleteLevel(cityKey_, level.rotation, level.zoom);
         }
-        if (!NextTile_()) {
-            NextLevel_();
+        // Once per level: the reserved capacity of the largest grid is reused.
+        pending_.assign(static_cast<size_t>(level.grid.tilesX) * level.grid.tilesY, 0);
+        for (int ty = 0; ty < level.grid.tilesY; ++ty) {
+            for (int tx = 0; tx < level.grid.tilesX; ++tx) {
+                const bool wanted = testTile_ ? tx == testTx_ && ty == testTy_ : TileTouchesCity_(level, tx, ty);
+                pending_[static_cast<size_t>(ty) * level.grid.tilesX + tx] = wanted ? 1 : 0;
+            }
         }
+        levelBegun_ = true;
     }
     else {
-        // The level was put back in the middle of a tile. Start that tile again.
-        BeginTile_();
+        // The level was put back in the middle of a block. Plan its tiles again: the window
+        // can have changed too.
+        CaptureMath::ReturnTileBlock(pending_, level.grid.tilesX, block_);
+    }
+    if (!NextBlock_()) {
+        NextLevel_();
     }
     return true;
 }
 
-bool CityCapturer::StepTile_()
+bool CityCapturer::StepBlock_()
 {
     Game game;
     if (!game.Fetch() || !ctx_.cameraReader->Update()) {
@@ -686,22 +699,29 @@ bool CityCapturer::StepTile_()
             phase_ = Phase::LevelBegin;
             return true;
         }
-        // A new window size needs a new split of the tile.
+        // A new window size holds other blocks. Plan the tiles of this block again. Nothing of
+        // the block is handed to the store yet, so no tile is lost or written twice.
         if (frame.viewportWidth != viewportW_ || frame.viewportHeight != viewportH_) {
             if (pass_ == 1) {
                 SetClearColor_(kKeyColorA);
             }
-            BeginTile_();
+            CaptureMath::ReturnTileBlock(pending_, level.grid.tilesX, block_);
+            if (!NextBlock_()) {
+                NextLevel_();
+                return true;
+            }
         }
     }
     if (reads_.empty()) {
         return Fail_("The game window has no size.");
     }
 
-    // 1. Aim the view so this part of the tile lies on whole screen pixels.
+    // 1. Aim the view so this part of the block lies on whole screen pixels, in the middle of
+    // the window. The whole window can be read (see docs/re-notes/capture.md, Blocks).
     const CaptureMath::TileRead& read = reads_[readIndex_];
-    const cS3DVector2 tileOrigin = level.grid.TileOrigin(tx_, ty_);
-    const cS3DVector2 partOrigin{tileOrigin.fX + static_cast<float>(read.x), tileOrigin.fY + static_cast<float>(read.y)};
+    const cS3DVector2 blockOrigin = level.grid.TileOrigin(block_.tx, block_.ty);
+    const cS3DVector2 partOrigin{blockOrigin.fX + static_cast<float>(read.x),
+                                 blockOrigin.fY + static_cast<float>(read.y)};
     const int wantX = (viewportW_ - read.w) / 2;
     const int wantY = (viewportH_ - read.h) / 2;
     const cS3DVector3 target =
@@ -732,15 +752,15 @@ bool CityCapturer::StepTile_()
     const int screenY = static_cast<int>(std::lround(actualY));
     if (screenX < 0 || screenY < 0 || screenX + read.w > frame.viewportWidth ||
         screenY + read.h > frame.viewportHeight) {
-        LOG_ERROR("Capture: tile ({}, {}) part {} landed at ({:.2f}, {:.2f}), wanted ({}, {})", tx_, ty_, readIndex_,
-                  actualX, actualY, wantX, wantY);
+        LOG_ERROR("Capture: block at tile ({}, {}) part {} landed at ({:.2f}, {:.2f}), wanted ({}, {})", block_.tx,
+                  block_.ty, readIndex_, actualX, actualY, wantX, wantY);
         return Fail_("The camera did not reach a tile. The scroll limits of the game may still be on.");
     }
     const float offGrid = std::max(std::fabs(actualX - static_cast<float>(screenX)), std::fabs(actualY - static_cast<float>(screenY)));
     if (offGrid > 0.05f && !misalignedLogged_) {
         misalignedLogged_ = true;
-        LOG_WARN("Capture: the view is {:.3f} px off the pixel grid at tile ({}, {}). Tiles can be soft.", offGrid, tx_,
-                 ty_);
+        LOG_WARN("Capture: the view is {:.3f} px off the pixel grid at tile ({}, {}). Tiles can be soft.", offGrid,
+                 block_.tx, block_.ty);
     }
 
     // 3. Models for this view.
@@ -748,96 +768,133 @@ bool CityCapturer::StepTile_()
         return true;
     }
 
-    // 4. Draw and read. This is the one read of this tick.
+    // 4. Draw and read. This is the one draw and the one read of this tick.
     game.renderer->ForceFullRedraw();
     game.renderer->Draw();
-    if (!ctx_.snapshotReader->Read(screenX, screenY, read.w, read.h, readBuffer_)) {
-        return Fail_("The screen could not be read back: " + ctx_.snapshotReader->LastError());
+    ++framesDrawn_;
+    std::vector<uint8_t>& pass = pass_ == 0 ? blockA_ : blockB_;
+    if (reads_.size() == 1) {
+        // The read is the whole block: straight into the block buffer.
+        if (!ctx_.snapshotReader->Read(screenX, screenY, read.w, read.h, pass)) {
+            return Fail_("The screen could not be read back: " + ctx_.snapshotReader->LastError());
+        }
     }
-    CaptureMath::BlitRgba(readBuffer_.data(), read.w, read.h, pass_ == 0 ? tileA_.data() : tileB_.data(), tileSize_,
-                          read.x, read.y);
+    else {
+        if (!ctx_.snapshotReader->Read(screenX, screenY, read.w, read.h, readBuffer_)) {
+            return Fail_("The screen could not be read back: " + ctx_.snapshotReader->LastError());
+        }
+        const int blockW = block_.w * tileSize_;
+        pass.resize(static_cast<size_t>(blockW) * block_.h * tileSize_ * 4);
+        CaptureMath::BlitRgba(readBuffer_.data(), read.w, read.h, pass.data(), blockW, read.x, read.y);
+    }
     shakeTicks_ = 0;
     if (++readIndex_ < reads_.size()) {
         return true;
     }
-    return TileComplete_();
+    return BlockRead_();
 }
 
-bool CityCapturer::TileComplete_()
+// Every part of the block is read for this pass.
+bool CityCapturer::BlockRead_()
 {
-    const size_t pixels = static_cast<size_t>(tileSize_) * tileSize_;
     if (pass_ == 0) {
-        const size_t keyPixels = CaptureMath::CountKeyPixels(tileA_.data(), pixels, keyA_);
-        if (keyPixels == pixels) {
-            ++tilesEmpty_;
-            TileDone_();
-            return true;
+        const int blockW = block_.w * tileSize_;
+        const size_t pixels = static_cast<size_t>(tileSize_) * tileSize_;
+        bool second = false;
+        for (int i = 0; i < block_.count; ++i) {
+            const CaptureMath::BlockTile& tile = block_.tiles[i];
+            const size_t keys =
+                CaptureMath::CountKeyPixelsIn(blockA_.data(), blockW, tile.x, tile.y, tileSize_, tileSize_, keyA_);
+            tileKinds_[i] = keys == pixels ? TileKind::Empty : keys == 0 ? TileKind::Opaque : TileKind::TwoPass;
+            second = second || tileKinds_[i] == TileKind::TwoPass;
         }
-        if (keyPixels != 0) {
-            // Part of the tile shows the area outside the city. Draw it again over the second
-            // color to tell that area from city pixels that happen to have the key color.
+        if (second) {
+            // Part of a tile shows the area outside the city. Draw the block again over the
+            // second color to tell that area from city pixels that happen to have the key color.
             pass_ = 1;
             readIndex_ = 0;
-            ++tilesTwoPass_;
             SetClearColor_(kKeyColorB);
             return true;
         }
     }
     else {
         SetClearColor_(kKeyColorA);
-        if (CaptureMath::ComposeTwoPasses(tileA_.data(), tileB_.data(), pixels, keyA_, keyB_) == 0) {
-            ++tilesEmpty_;
-            TileDone_();
-            return true;
-        }
     }
-
-    if (testTile_) {
-        if (!WriteTestTile_()) {
-            return Fail_("The test tile could not be written.");
-        }
-        ++tilesWritten_;
-        TileDone_();
-        return true;
-    }
-    const Level& level = levels_[levelIndex_];
-    outgoingKey_.cityKey = cityKey_;
-    outgoingKey_.rotation = level.rotation;
-    outgoingKey_.zoom = level.zoom;
-    outgoingKey_.tx = tx_;
-    outgoingKey_.ty = ty_;
-    outgoing_.clear();
+    handIndex_ = 0;
     waiting_ = false;
     phase_ = Phase::WaitStore;
     return StepWaitStore_();
 }
 
-// Hands the finished tile to the store. The store keeps the buffer, so each written tile
-// costs one allocation and one copy of the tile. A full queue is tried again on later ticks.
+// Cuts the tiles out of the block and hands them to the store one by one. The store keeps the
+// buffer, so each written tile costs one allocation and one copy of the tile. A full queue is
+// tried again on later ticks, from the tile it refused.
 bool CityCapturer::StepWaitStore_()
 {
     if (waiting_ && ElapsedMs(lastStoreTry_) < kStoreRetryMs) {
         return true;
     }
-    lastStoreTry_ = Clock::now();
-    if (outgoing_.size() != tileA_.size()) {
-        // A refused write leaves outgoing_ intact, so this copy runs once per tile.
-        outgoing_.assign(tileA_.begin(), tileA_.end());
-    }
-    if (ctx_.tileStore->QueueWrite(outgoingKey_, std::move(outgoing_), tileSize_, tileSize_)) {
+    const int blockW = block_.w * tileSize_;
+    const size_t pixels = static_cast<size_t>(tileSize_) * tileSize_;
+    while (handIndex_ < block_.count) {
+        const CaptureMath::BlockTile& tile = block_.tiles[handIndex_];
+        const TileKind kind = tileKinds_[handIndex_];
+        if (kind == TileKind::Empty) {
+            ++tilesEmpty_;
+            TileDone_();
+            continue;
+        }
+        if (outgoing_.size() != pixels * 4) {
+            // A refused write leaves outgoing_ intact, so this runs once per tile.
+            outgoing_.resize(pixels * 4);
+            CaptureMath::CropRgba(blockA_.data(), blockW, tile.x, tile.y, tileSize_, tileSize_, outgoing_.data());
+            if (kind == TileKind::TwoPass) {
+                ++tilesTwoPass_;
+                CaptureMath::CropRgba(blockB_.data(), blockW, tile.x, tile.y, tileSize_, tileSize_, tileB_.data());
+                if (CaptureMath::ComposeTwoPasses(outgoing_.data(), tileB_.data(), pixels, keyA_, keyB_) == 0) {
+                    outgoing_.clear();
+                    ++tilesEmpty_;
+                    TileDone_();
+                    continue;
+                }
+            }
+        }
+        if (testTile_) {
+            if (!WriteTestTile_()) {
+                return Fail_("The test tile could not be written.");
+            }
+            outgoing_.clear();
+            ++tilesWritten_;
+            TileDone_();
+            continue;
+        }
+        const Level& level = levels_[levelIndex_];
+        outgoingKey_.cityKey = cityKey_;
+        outgoingKey_.rotation = level.rotation;
+        outgoingKey_.zoom = level.zoom;
+        outgoingKey_.tx = tile.tx;
+        outgoingKey_.ty = tile.ty;
+        lastStoreTry_ = Clock::now();
+        if (!ctx_.tileStore->QueueWrite(outgoingKey_, std::move(outgoing_), tileSize_, tileSize_)) {
+            if (!waiting_) {
+                waiting_ = true;
+                waitStart_ = Clock::now();
+            }
+            else if (ElapsedMs(waitStart_) > kStoreTimeoutMs) {
+                return Fail_("The tile store does not take tiles. The log file tells why.");
+            }
+            return true;
+        }
         outgoing_.clear();
         waiting_ = false;
         ++tilesWritten_;
-        phase_ = Phase::Tile;
         TileDone_();
-        return true;
     }
-    if (!waiting_) {
-        waiting_ = true;
-        waitStart_ = Clock::now();
+    if (NextBlock_()) {
+        phase_ = Phase::Block;
     }
-    else if (ElapsedMs(waitStart_) > kStoreTimeoutMs) {
-        return Fail_("The tile store does not take tiles. The log file tells why.");
+    else {
+        NextLevel_();
     }
     return true;
 }
@@ -905,54 +962,32 @@ bool CityCapturer::WriteMeta_(const bool final)
     return ctx_.tileStore->WriteMeta(cityKey_, meta);
 }
 
-// ---- tiles -------------------------------------------------------------------------------------
+// ---- blocks ------------------------------------------------------------------------------------
 
-bool CityCapturer::NextTile_()
+bool CityCapturer::NextBlock_()
 {
     const Level& level = levels_[levelIndex_];
-    if (testTile_) {
-        if (tx_ >= 0) {
-            return false;
-        }
-        tx_ = testTx_;
-        ty_ = testTy_;
-        BeginTile_();
-        return true;
+    ctx_.cameraReader->Update();
+    viewportW_ = ctx_.cameraReader->Frame().viewportWidth;
+    viewportH_ = ctx_.cameraReader->Frame().viewportHeight;
+    if (!CaptureMath::NextTileBlock(pending_, level.grid.tilesX, level.grid.tilesY, tileSize_, viewportW_, viewportH_,
+                                    block_)) {
+        return false;
     }
-    for (;;) {
-        if (++tx_ >= level.grid.tilesX) {
-            tx_ = 0;
-            ++ty_;
-        }
-        if (ty_ >= level.grid.tilesY) {
-            return false;
-        }
-        if (TileTouchesCity_(level, tx_, ty_)) {
-            BeginTile_();
-            return true;
-        }
-    }
-}
-
-void CityCapturer::BeginTile_()
-{
     readIndex_ = 0;
     pass_ = 0;
     shakeTicks_ = 0;
     waiting_ = false;
-    ctx_.cameraReader->Update();
-    viewportW_ = ctx_.cameraReader->Frame().viewportWidth;
-    viewportH_ = ctx_.cameraReader->Frame().viewportHeight;
-    CaptureMath::PlanTileReads(tileSize_, viewportW_, viewportH_, reads_);
+    handIndex_ = 0;
+    CaptureMath::PlanReads(block_.w * tileSize_, block_.h * tileSize_, viewportW_, viewportH_, reads_);
+    return true;
 }
 
 void CityCapturer::TileDone_()
 {
     ++progress_.done;
     ++levelTilesDone_;
-    if (!NextTile_()) {
-        NextLevel_();
-    }
+    ++handIndex_;
 }
 
 void CityCapturer::NextLevel_()
@@ -963,8 +998,8 @@ void CityCapturer::NextLevel_()
     ++levelIndex_;
     levelRetries_ = 0;
     levelTilesDone_ = 0;
-    tx_ = -1;
-    ty_ = 0;
+    levelBegun_ = false;
+    block_.count = 0;
     phase_ = levelIndex_ < levels_.size() ? Phase::LevelBegin : Phase::Finish;
 }
 
@@ -972,7 +1007,7 @@ bool CityCapturer::WriteTestTile_()
 {
     const std::filesystem::path path = ctx_.pluginDirectory.parent_path() / "test_tile.webp";
     uint8_t* encoded = nullptr;
-    const size_t size = WebPEncodeLosslessRGBA(tileA_.data(), tileSize_, tileSize_, tileSize_ * 4, &encoded);
+    const size_t size = WebPEncodeLosslessRGBA(outgoing_.data(), tileSize_, tileSize_, tileSize_ * 4, &encoded);
     bool ok = false;
     if (size != 0 && encoded) {
         std::ofstream file(path, std::ios::binary | std::ios::trunc);
@@ -989,14 +1024,16 @@ bool CityCapturer::WriteTestTile_()
     // Where the tile was on the screen before the capture moved the view, so it can be laid
     // over a screenshot. Only exact when the live magnification was 1.
     const Level& level = levels_[levelIndex_];
-    const cS3DVector2 origin = level.grid.TileOrigin(tx_, ty_);
+    const CaptureMath::BlockTile& tile = block_.tiles[handIndex_];
+    const cS3DVector2 origin = level.grid.TileOrigin(tile.tx, tile.ty);
     const cS3DVector2 before = ViewMath::GameCanvasToScreen(
         level.projection, saved_.target, ViewMath::BaseCorner(level.rotation, citySizeX_, citySizeZ_),
         static_cast<float>(viewportW_), static_cast<float>(viewportH_));
     LOG_INFO("Capture: test tile written to {}. Rotation {} zoom {} tile ({}, {}), canvas origin ({:.0f}, {:.0f}), "
              "top left on the screen before the capture ({:.0f}, {:.0f}), {}",
-             testTilePath_, level.rotation, level.zoom + 1, tx_, ty_, origin.fX, origin.fY, origin.fX + before.fX,
-             origin.fY + before.fY, pass_ == 1 ? "two passes" : "one pass");
+             testTilePath_, level.rotation, level.zoom + 1, tile.tx, tile.ty, origin.fX, origin.fY,
+             origin.fX + before.fX, origin.fY + before.fY,
+             tileKinds_[handIndex_] == TileKind::TwoPass ? "two passes" : "one pass");
     return true;
 }
 
@@ -1185,11 +1222,13 @@ void CityCapturer::End_(const bool ok, std::string phase, std::string error, con
     }
     Restore_(cityClosing);
 
-    // Three megabytes that an idle plugin does not need in a 32 bit process.
-    std::vector<uint8_t>().swap(tileA_);
+    // Megabytes that an idle plugin does not need in a 32 bit process.
+    std::vector<uint8_t>().swap(blockA_);
+    std::vector<uint8_t>().swap(blockB_);
     std::vector<uint8_t>().swap(tileB_);
     std::vector<uint8_t>().swap(readBuffer_);
     std::vector<uint8_t>().swap(outgoing_);
+    std::vector<uint8_t>().swap(pending_);
 
     const uint32_t seconds = ElapsedMs(startTime_) / 1000;
     progress_.finished = true;
@@ -1211,8 +1250,9 @@ void CityCapturer::End_(const bool ok, std::string phase, std::string error, con
                       progress_.total, progress_.error.c_str());
     }
     lastResult_ = text;
-    LOG_INFO("Capture: {} ({} of {} tiles, {} written, {} empty, {} drawn twice, {} s)", ok ? "finished" : "stopped",
-             progress_.done, progress_.total, tilesWritten_, tilesEmpty_, tilesTwoPass_, seconds);
+    LOG_INFO("Capture: {} ({} of {} tiles, {} written, {} empty, {} drawn twice, {} frames, {} s)",
+             ok ? "finished" : "stopped", progress_.done, progress_.total, tilesWritten_, tilesEmpty_, tilesTwoPass_,
+             framesDrawn_, seconds);
 
     if (onFinished_) {
         // A copy: the callback may set another callback or start the next capture.
@@ -1233,7 +1273,7 @@ void CityCapturer::PhaseText_(char* text, const size_t size) const
         std::snprintf(text, size, "Rotation %d, zoom %d: loading models", level ? level->rotation : 0,
                       level ? level->zoom + 1 : 0);
         break;
-    case Phase::Tile:
+    case Phase::Block:
     case Phase::WaitStore:
         std::snprintf(text, size, "Rotation %d, zoom %d: tile %d of %d%s", level ? level->rotation : 0,
                       level ? level->zoom + 1 : 0, levelTilesDone_ + 1, level ? level->tiles : 0,

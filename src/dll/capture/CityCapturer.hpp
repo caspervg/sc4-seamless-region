@@ -8,10 +8,15 @@
 // Rotation is the outer loop, zoom the inner. Tiles lie on ViewMath::TileGrid, so every
 // tile pixel is one screen pixel of the game.
 //
-// Transparency: the area outside the city is cleared to a key color. A tile that shows the
-// key color is drawn a second time over another key color, and alpha comes from the
-// difference (CaptureMath::ComposeTwoPasses). Both key colors are measured from the screen
-// first, so the pixel format of the back buffer does not matter.
+// Blocks: one frame gives as many whole tiles as the game window holds (at most 4 x 4,
+// CaptureMath::NextTileBlock). One view move, one model wait, one draw and one read per
+// block, then the tiles are cut out of the block and handed to the store one by one. A
+// window smaller than a tile gives blocks of one tile, read in parts.
+//
+// Transparency: the area outside the city is cleared to a key color. A block with a tile
+// that shows the key color is drawn a second time over another key color, and the alpha of
+// those tiles comes from the difference (CaptureMath::ComposeTwoPasses). Both key colors are
+// measured from the screen first, so the pixel format of the back buffer does not matter.
 //
 // Writes through TileStore. Restores the game state (zoom, rotation, camera target,
 // magnification, data view, view level, background, clear color, free roam, walls, neighbor
@@ -89,8 +94,8 @@ private:
         CalibrateSecond,
         LevelBegin,
         LevelWait,
-        Tile,
-        WaitStore,
+        Block,
+        WaitStore,  // hands the tiles of the block to the store
         Finish,
     };
 
@@ -143,14 +148,14 @@ private:
     bool StepCalibrate_(bool second);
     bool StepLevelBegin_();
     bool StepLevelWait_();
-    bool StepTile_();
+    bool StepBlock_();
     bool StepWaitStore_();
     bool StepFinish_();
 
-    bool NextTile_();
+    // Plans the next block of the level for the window size of now. False when no tile waits.
+    bool NextBlock_();
     void NextLevel_();
-    void BeginTile_();
-    bool TileComplete_();
+    bool BlockRead_();
     void TileDone_();
     bool WriteTestTile_();
     // Writes meta.json for the tiles that are on disk now. final = the render is complete.
@@ -206,21 +211,32 @@ private:
     std::vector<Level> levels_;
     size_t levelIndex_ = 0;
     int levelRetries_ = 0;
-    int tx_ = -1, ty_ = 0;          // current tile, tx_ = -1 before the first of a level
+    bool levelBegun_ = false;        // the tiles of the level wait in pending_
     int levelTilesDone_ = 0;
+    std::vector<uint8_t> pending_;   // tilesX * tilesY flags: the tile still waits for its render
 
-    // The current tile.
+    // The current block.
+    enum class TileKind : uint8_t
+    {
+        Empty,    // only the key color
+        Opaque,   // no key color
+        TwoPass,  // part key color: needs the second pass
+    };
+    CaptureMath::TileBlock block_;
+    std::array<TileKind, CaptureMath::kMaxBlockSide * CaptureMath::kMaxBlockSide> tileKinds_{};
+    int handIndex_ = 0;              // the next tile of the block for the store
     std::vector<CaptureMath::TileRead> reads_;
     size_t readIndex_ = 0;
     int pass_ = 0;                   // 0: over the first key color, 1: over the second
     int viewportW_ = 0, viewportH_ = 0;
     int shakeTicks_ = 0;
 
-    // Buffers, allocated once per capture and reused for every tile.
-    std::vector<uint8_t> tileA_;     // first pass, then the finished tile
-    std::vector<uint8_t> tileB_;     // second pass
-    std::vector<uint8_t> readBuffer_;
-    std::vector<uint8_t> outgoing_;  // the copy handed to the store, one allocation per written tile
+    // Buffers, reused for every block. The block buffers grow when the window grows.
+    std::vector<uint8_t> blockA_;    // the read area of the block over the first key color
+    std::vector<uint8_t> blockB_;    // the same over the second key color
+    std::vector<uint8_t> tileB_;     // one tile of blockB_, for the compose
+    std::vector<uint8_t> readBuffer_;  // one part, when the window is smaller than the block
+    std::vector<uint8_t> outgoing_;  // the tile handed to the store, one allocation per written tile
     TileKey outgoingKey_;
 
     // Key colors as the screen gives them back.
@@ -241,6 +257,7 @@ private:
     int tilesWritten_ = 0;
     int tilesEmpty_ = 0;
     int tilesTwoPass_ = 0;
+    int framesDrawn_ = 0;
 
     // Last result, for the panel.
     std::string lastResult_;

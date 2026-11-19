@@ -1,7 +1,7 @@
 #pragma once
 
 // Pure helpers of the capture module: pixel conversion, the two clear color alpha trick, the
-// projected city outline and the split of a tile into reads. No game calls, header only so
+// projected city outline, the blocks of tiles of one frame and their reads. No game calls, header only so
 // the offline tests build them without a change to the test CMake file.
 // Tests: tests/CaptureTests.cpp.
 
@@ -230,30 +230,145 @@ namespace CaptureMath
     };
 
     // -----------------------------------------------------------------------------------------
-    // One read of a part of a tile. A tile needs more than one when the game window is smaller
-    // than the tile.
+    // One read of a part of a block. A block needs more than one when the game window is
+    // smaller than the block (only when the window is smaller than one tile).
     // -----------------------------------------------------------------------------------------
     struct TileRead
     {
-        int x = 0, y = 0;  // top-left of the part inside the tile
+        int x = 0, y = 0;  // top-left of the part inside the block
         int w = 0, h = 0;
     };
 
-    // Splits a tileSize x tileSize tile into parts of at most viewportW x viewportH, row by row.
-    // Reuses the capacity of `reads`. Empty when the viewport has no size.
-    inline void PlanTileReads(const int tileSize, const int viewportW, const int viewportH, std::vector<TileRead>& reads)
+    // Splits a width x height block into parts of at most viewportW x viewportH, row by row.
+    // Reuses the capacity of `reads`. Empty when the block or the viewport has no size.
+    inline void PlanReads(const int width, const int height, const int viewportW, const int viewportH,
+                          std::vector<TileRead>& reads)
     {
         reads.clear();
-        const int partW = std::min(tileSize, viewportW);
-        const int partH = std::min(tileSize, viewportH);
-        if (tileSize <= 0 || partW <= 0 || partH <= 0) {
+        const int partW = std::min(width, viewportW);
+        const int partH = std::min(height, viewportH);
+        if (partW <= 0 || partH <= 0) {
             return;
         }
-        for (int y = 0; y < tileSize; y += partH) {
-            for (int x = 0; x < tileSize; x += partW) {
-                reads.push_back({x, y, std::min(partW, tileSize - x), std::min(partH, tileSize - y)});
+        for (int y = 0; y < height; y += partH) {
+            for (int x = 0; x < width; x += partW) {
+                reads.push_back({x, y, std::min(partW, width - x), std::min(partH, height - y)});
             }
         }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Blocks: the tiles that one drawn frame gives. The game window holds viewportW / tileSize
+    // by viewportH / tileSize whole tiles, so one view move, one draw and one read give all of
+    // them. The read area is always blockW x blockH tiles, also when fewer tiles of the block
+    // touch the city: the driver then reuses its buffer of the same size.
+    // -----------------------------------------------------------------------------------------
+    // At most this many tiles per side. Every tile of a block costs two block buffers of 1 MB
+    // (both passes) plus 1 MB in the driver's own buffer, in a 32 bit process.
+    constexpr int kMaxBlockSide = 4;
+
+    struct BlockTile
+    {
+        int tx = 0, ty = 0;  // the tile in the grid
+        int x = 0, y = 0;    // its top-left pixel inside the read area of the block
+    };
+
+    struct TileBlock
+    {
+        int tx = 0, ty = 0;  // the grid tile at the top-left of the read area (can be empty)
+        int w = 1, h = 1;    // the read area, in tiles
+        std::array<BlockTile, kMaxBlockSide * kMaxBlockSide> tiles{};
+        int count = 0;       // tiles to render, row by row
+    };
+
+    // Whole tiles the viewport holds per side, at least 1 and at most kMaxBlockSide.
+    inline void BlockSize(const int tileSize, const int viewportW, const int viewportH, int& w, int& h)
+    {
+        w = tileSize > 0 ? std::clamp(viewportW / tileSize, 1, kMaxBlockSide) : 1;
+        h = tileSize > 0 ? std::clamp(viewportH / tileSize, 1, kMaxBlockSide) : 1;
+    }
+
+    // Plans the next block of a level and takes its tiles out of `pending` (tilesX * tilesY
+    // flags, row by row, non-zero for a tile that waits for its render). The block starts at
+    // the first row with a waiting tile, at the leftmost waiting tile of the next blockH rows,
+    // and moves down to its first row with a waiting tile. False when no tile waits.
+    inline bool NextTileBlock(std::vector<uint8_t>& pending, const int tilesX, const int tilesY, const int tileSize,
+                              const int viewportW, const int viewportH, TileBlock& block)
+    {
+        block.count = 0;
+        if (tilesX <= 0 || tilesY <= 0 || pending.size() < static_cast<size_t>(tilesX) * tilesY) {
+            return false;
+        }
+        BlockSize(tileSize, viewportW, viewportH, block.w, block.h);
+        // A tile of row ty in the columns [x0, x1) waits.
+        const auto rowWaits = [&](const int ty, const int x0, const int x1) {
+            const auto row = pending.begin() + static_cast<ptrdiff_t>(ty) * tilesX;
+            return std::any_of(row + x0, row + x1, [](const uint8_t p) { return p != 0; });
+        };
+
+        int firstRow = 0;
+        while (firstRow < tilesY && !rowWaits(firstRow, 0, tilesX)) {
+            ++firstRow;
+        }
+        if (firstRow >= tilesY) {
+            return false;
+        }
+        const int bandEnd = std::min(firstRow + block.h, tilesY);
+        int left = tilesX;
+        for (int ty = firstRow; ty < bandEnd; ++ty) {
+            for (int tx = 0; tx < left; ++tx) {
+                if (pending[static_cast<size_t>(ty) * tilesX + tx] != 0) {
+                    left = tx;
+                    break;
+                }
+            }
+        }
+        const int right = std::min(left + block.w, tilesX);
+        int top = firstRow;
+        while (!rowWaits(top, left, right)) {
+            ++top;  // stops inside the band: the leftmost waiting tile is in [left, right)
+        }
+        block.tx = left;
+        block.ty = top;
+        for (int ty = top; ty < std::min(top + block.h, tilesY); ++ty) {
+            for (int tx = left; tx < right; ++tx) {
+                if (pending[static_cast<size_t>(ty) * tilesX + tx] != 0) {
+                    pending[static_cast<size_t>(ty) * tilesX + tx] = 0;
+                    block.tiles[block.count++] = {tx, ty, (tx - left) * tileSize, (ty - top) * tileSize};
+                }
+            }
+        }
+        return true;
+    }
+
+    // Puts the tiles of a block back into `pending`, for a new plan after the window changed.
+    inline void ReturnTileBlock(std::vector<uint8_t>& pending, const int tilesX, TileBlock& block)
+    {
+        for (int i = 0; i < block.count; ++i) {
+            pending[static_cast<size_t>(block.tiles[i].ty) * tilesX + block.tiles[i].tx] = 1;
+        }
+        block.count = 0;
+    }
+
+    // Copies the w * h block at (srcX, srcY) of a larger RGBA image out into a w * h image.
+    inline void CropRgba(const uint8_t* src, const int srcWidth, const int srcX, const int srcY, const int w,
+                         const int h, uint8_t* dst)
+    {
+        for (int y = 0; y < h; ++y) {
+            std::memcpy(dst + static_cast<size_t>(y) * w * 4,
+                        src + (static_cast<size_t>(srcY + y) * srcWidth + srcX) * 4, static_cast<size_t>(w) * 4);
+        }
+    }
+
+    // How many pixels of the w * h block at (x, y) of a larger RGBA image have exactly the key.
+    [[nodiscard]] inline size_t CountKeyPixelsIn(const uint8_t* rgba, const int width, const int x, const int y,
+                                                 const int w, const int h, const Rgb key)
+    {
+        size_t count = 0;
+        for (int row = 0; row < h; ++row) {
+            count += CountKeyPixels(rgba + (static_cast<size_t>(y + row) * width + x) * 4, static_cast<size_t>(w), key);
+        }
+        return count;
     }
 
     // The view target that makes the game draw the canvas point `canvasTopLeft` at the screen

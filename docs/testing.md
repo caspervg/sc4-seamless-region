@@ -459,7 +459,7 @@ installed. The checks are the same for both. Tools tab, group "Capture".
    - `Capture: key colors on screen (255, 0, 255) and (0, 255, 0)` (other numbers on a 16 bit screen)
    - `Capture: test tile written to ... top left on the screen before the capture (SX, SY), one pass`
      or `two passes`
-   - `Capture: finished (1 of 1 tiles, 1 written, ...)`
+   - `Capture: finished (1 of 1 tiles, 1 written, ... 1 frames, ...)` or `2 frames` for two passes
 4. Alignment: open the screenshot and the tile in an image editor. Put the tile on the
    screenshot with its top left corner at (SX, SY) from the log. Every pixel must be the same
    (switch the layer on and off: nothing moves, nothing gets soft). A shift of one pixel or a
@@ -480,7 +480,10 @@ installed. The checks are the same for both. Tools tab, group "Capture".
    - `Capture: started for city '<key>', 16 levels, N tiles of 512 px, heights A to B m`
    - `Capture: rotation R zoom Z: N tiles in a grid of X x Y`, 16 times, rotation 0 to 3 and
      zoom 1 to 4 inside each rotation
-   - `Capture: finished (N of N tiles, W written, E empty, T drawn twice, S s)`
+   - `Capture: finished (N of N tiles, W written, E empty, T drawn twice, F frames, S s)`.
+     F is much smaller than N + T when the window holds more than one tile: at 1920 x 1080
+     about a quarter of N + T, at 1280 x 720 about half. When the window holds only one tile (less than
+     1024 pixels wide and less than 1024 pixels high), F is about N + T as before.
    - no `Capture: models did not finish loading` and no `off the pixel grid` warning
 3. Output: `<Region>/RegionRenders/<city key>/` has `meta.json` and the folders `r0z0` to
    `r3z3` (16 folders, zoom index 0 to 3) with `<tx>_<ty>.webp` files. There is no zoom 5 folder.
@@ -489,11 +492,19 @@ installed. The checks are the same for both. Tools tab, group "Capture".
 4. Look at some tiles: buildings are complete (no grey boxes, no missing models), the look
    matches the live view (same time of day), tiles in the middle of the city have no
    transparent pixels, edge tiles are transparent outside the city.
-5. Put two neighbor tiles side by side (`3_2.webp` and `4_2.webp`): the picture goes on
-   without a seam.
-6. After the end: "Last result: Done in ... tiles written", the camera is back, the game runs
+5. Put two neighbor tiles side by side (`3_2.webp` and `4_2.webp`), and two tiles one above
+   the other (`3_2.webp` and `3_3.webp`): the picture goes on without a seam. Check a pair
+   that came from one frame and a pair from two frames (at 1920 x 1080 a frame holds 3 x 2
+   tiles, so `2_0` and `3_0` can be in different frames).
+6. Same pixels from a big and a small frame: render the city at a window of at least 1920 x 1080.
+   Then make the window less than 1024 pixels wide and high (one tile per frame) and press "Render one
+   test tile" over a part of the city with buildings. Compare `test_tile.webp` with the tile
+   file of the same rotation, zoom and tile number from the full render (the log line of the
+   test tile gives the tile number). Every pixel must be the same. A shift of one pixel is a
+   fault: report the two window sizes and the log lines.
+7. After the end: "Last result: Done in ... tiles written", the camera is back, the game runs
    again, neighbors are drawn again.
-7. Render the same city again after a change: bulldoze a tall building at the city edge, or
+8. Render the same city again after a change: bulldoze a tall building at the city edge, or
    raise a hill higher than every other point of the city (this moves the tile grid). Open a
    neighbor: the city shows as it is now, with no part of the building left and no shifted
    strip. In the level folders no file is older than the second render. Log per level:
@@ -514,7 +525,10 @@ installed. The checks are the same for both. Tools tab, group "Capture".
    the region view the picture of the city is normal: no magenta, and its edge walls are there.
 4. Start a render and press Page Up or zoom with the keyboard. The render puts the zoom back
    and goes on.
-5. Make the game window smaller during a render. The render goes on.
+5. Make the game window smaller during a render, then larger again. The render goes on and
+   the progress keeps counting up with no jump back. After the end, look at the tiles of the
+   level that was in work during the resize: no tile is missing, shifted or cut, and the log
+   has no `Capture: block at tile` error.
 6. While a render runs, "Tint the neighbor under the pointer" in the Interaction section and
    in the Settings tab stays as you set it. The render does not change the setting.
 
