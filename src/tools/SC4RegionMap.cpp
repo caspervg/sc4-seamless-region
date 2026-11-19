@@ -1,7 +1,9 @@
 // SC4RegionMap: makes the browsable region map outside the game, from the renders that the
 // plugin stored. The same export as the "Region map" section of the in-game panel.
 //
-//   SC4RegionMap.exe <region folder> [--rotation 1..4] [--quality 0..100] [--upscale 0..3]
+//   SC4RegionMap.exe <region folder> [--rotation 1..4] [--zoom 3..5] [--quality 0..100] [--upscale 0..3]
+//
+// Without --zoom the map uses the highest zoom that every rendered city has.
 //
 // The region folder is the one with the .sc4 save files, for example
 // "Documents\SimCity 4\Regions\Fairview". The map goes to <region>\RegionRenders\map\index.html.
@@ -112,8 +114,10 @@ namespace
     {
         std::fprintf(stderr,
                      "Makes the browsable map of a region from the renders of SC4 Seamless Region.\n\n"
-                     "  SC4RegionMap.exe <region folder> [--rotation 1..4] [--quality 0..100] [--upscale 0..3] "
-                     "[--open]\n\n"
+                     "  SC4RegionMap.exe <region folder> [--rotation 1..4] [--zoom 3..5] [--quality 0..100] "
+                     "[--upscale 0..3] [--open]\n\n"
+                     "--zoom: the zoom of the city renders that the map uses. Zoom 5 gives the most detail. The\n"
+                     "map is then about 4 times the size of zoom 4. Without --zoom: the highest zoom of all cities.\n\n"
                      "Example: SC4RegionMap.exe \"%%USERPROFILE%%\\Documents\\SimCity 4\\Regions\\Fairview\"\n");
         return 2;
     }
@@ -132,6 +136,9 @@ int wmain(const int argc, wchar_t** argv)
         const bool hasValue = i + 1 < argc;
         if (arg == L"--rotation" && hasValue) {
             request.rotation = std::clamp(_wtoi(argv[++i]), 1, 4) - 1;
+        }
+        else if (arg == L"--zoom" && hasValue) {
+            request.sourceZoom = std::clamp(_wtoi(argv[++i]), 3, 5) - 1;
         }
         else if (arg == L"--quality" && hasValue) {
             request.quality = std::clamp(_wtoi(argv[++i]), 0, 100);
@@ -177,9 +184,16 @@ int wmain(const int argc, wchar_t** argv)
     std::atomic<int> stop{MapExport::kRun};
     MapExport::Result result;
     std::thread worker([&] { result = MapExport::Run(request, progress, stop); });
+    bool estimateShown = false;
     while (worker.joinable()) {
         if (WaitForSingleObject(worker.native_handle(), 500) == WAIT_OBJECT_0) {
             break;
+        }
+        if (const int64_t estimate = progress.estimateBytes.load(); estimate > 0 && !estimateShown) {
+            estimateShown = true;
+            std::printf("From the zoom %d renders. The map will be about %lld MB.%s\n", progress.sourceZoom.load() + 1,
+                        static_cast<long long>(estimate / (1024 * 1024)),
+                        estimate > MapExport::kLargeMapBytes ? " This is a large map. Check the free disk space." : "");
         }
         const int64_t total = progress.total.load();
         if (total > 0) {

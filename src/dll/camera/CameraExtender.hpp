@@ -22,6 +22,7 @@
 #include "cS3DVector2.h"
 #include "camera/CameraBounds.hpp"
 #include "core/GameAccess.hpp"
+#include "view/ViewMath.hpp"
 
 class CameraExtender final : public Module
 {
@@ -54,8 +55,9 @@ public:
     void SetOutsideClearColor(uint32_t rgba);
     // Puts back the color from before the first SetOutsideClearColor.
     void RestoreOutsideClearColor();
-    // Reads again which neighbors have renders (TileStore::LoadMeta) and updates the walls.
-    // Call it after renders were written or removed.
+    // Reads again which neighbors have renders (TileStore::LoadMeta) and updates the walls. Per
+    // view: an edge wall is hidden only at the zooms and rotations where the neighbor across it
+    // is drawn (CityMeta::ChooseLevel). Call it after renders were written or removed.
     void RefreshNeighborWalls();
 
     // For the hooks in CameraExtender.cpp only.
@@ -79,6 +81,8 @@ private:
     // Moves the fog range with the eye plane, so the city keeps the fog the game gives it.
     void ApplyFogShift_(float shiftMetres);
     void UpdateWallMask_();
+    // The hidden walls of the view the camera shows now.
+    [[nodiscard]] uint32_t CurrentWalls_() const;
     void ForceRedraw_() const;
     bool Tick_();
 
@@ -98,11 +102,12 @@ private:
     uint8_t savedClampFlag_ = 1;
     bool panelFreeRoam_ = false;
 
-    uint32_t autoWalls_ = 0;    // edges with a rendered neighbor
+    // Per view (rotation * ViewMath::kZoomCount + zoom index): edges with a neighbor drawn there.
+    std::array<uint32_t, 4 * ViewMath::kZoomCount> autoWalls_{};
     uint32_t forcedWalls_ = 0;  // SetEdgeWallsHidden
     bool panelWallsAuto_ = true;
     uint32_t panelWalls_ = 0;
-    uint32_t effectiveWalls_ = 0;
+    std::array<uint32_t, 4 * ViewMath::kZoomCount> effectiveWalls_{};  // per view, as autoWalls_
 
     bool fogSaved_ = false;
     float savedFog_[2] = {};  // start, end

@@ -640,3 +640,99 @@ TEST_CASE(MetaGroundHeightIsOptional)
     const auto parsed = CityMeta::Parse(text);
     CHECK(parsed && parsed->groundHeight && *parsed->groundHeight == 312.5f);
 }
+
+// The magnification of a level is optional in meta.json: older files read as 1.
+TEST_CASE(MetaLevelMagnification)
+{
+    CityRenderMeta meta = SampleMeta();
+    meta.levels[1].magnification = 0.5f;
+    const std::string text = CityMeta::ToJson(meta);
+    const auto parsed = CityMeta::Parse(text);
+    CHECK(parsed && parsed->levels.size() == 2);
+    if (parsed && parsed->levels.size() == 2) {
+        CHECK(parsed->levels[0].magnification == 1.0f && parsed->levels[1].magnification == 0.5f);
+    }
+    // An older meta.json without the field.
+    std::string old = text;
+    for (size_t at = old.find("\"magnification\""); at != std::string::npos; at = old.find("\"magnification\"")) {
+        // nlohmann::json sorts the keys: "magnification" comes first, a comma follows it.
+        const size_t end = old.find(',', at);
+        old.erase(at, end + 1 - at);
+    }
+    const auto oldParsed = CityMeta::Parse(old);
+    CHECK(oldParsed && oldParsed->levels.size() == 2 && oldParsed->levels[1].magnification == 1.0f);
+    // Zero is not a magnification.
+    meta.levels[1].magnification = 0.0f;
+    CHECK(!CityMeta::Parse(CityMeta::ToJson(meta)).has_value());
+}
+
+// Which tiles the neighbor renderer draws at each zoom.
+TEST_CASE(MetaChooseLevelPerZoom)
+{
+    using Level = CityRenderMeta::Level;
+    const auto levels = [](const int maxZoom) {
+        std::vector<Level> out;
+        for (int r = 0; r < 4; ++r) {
+            for (int z = 0; z <= maxZoom; ++z) {
+                out.push_back({r, z, 0.0f, 0.0f, 2, 2});
+            }
+        }
+        return out;
+    };
+    // Up to zoom 4: zoom 1 to 4 draw their own level 1:1, zoom 5 draws zoom 4 at 2x.
+    const std::vector<Level> upTo4 = levels(3);
+    for (int z = 0; z < 4; ++z) {
+        const Level* l = CityMeta::ChooseLevel(upTo4, 1, z);
+        CHECK(l && l->zoom == z && l->rotation == 1 && CityMeta::LevelScale(*l, z) == 1.0);
+    }
+    const Level* z5 = CityMeta::ChooseLevel(upTo4, 2, 4);
+    CHECK(z5 && z5->zoom == 3 && CityMeta::LevelScale(*z5, 4) == 2.0);
+    // Up to zoom 5: zoom 5 draws its own level, zoom 4 never shrinks zoom 5.
+    const std::vector<Level> upTo5 = levels(4);
+    const Level* native = CityMeta::ChooseLevel(upTo5, 0, 4);
+    CHECK(native && native->zoom == 4 && CityMeta::LevelScale(*native, 4) == 1.0);
+    const Level* z4 = CityMeta::ChooseLevel(upTo5, 0, 3);
+    CHECK(z4 && z4->zoom == 3);
+    // Up to zoom 3: nothing at zoom 4 and 5 (another pitch cannot stand in).
+    const std::vector<Level> upTo3 = levels(2);
+    CHECK(CityMeta::ChooseLevel(upTo3, 0, 3) == nullptr);
+    CHECK(CityMeta::ChooseLevel(upTo3, 0, 4) == nullptr);
+    CHECK(CityMeta::ChooseLevel(upTo3, 0, 2) != nullptr);
+    // Only zoom 5: zoom 4 does not shrink it, zoom 5 draws it.
+    const std::vector<Level> only5 = {{0, 4, 0.0f, 0.0f, 2, 2}};
+    CHECK(CityMeta::ChooseLevel(only5, 0, 3) == nullptr);
+    CHECK(CityMeta::ChooseLevel(only5, 0, 4) != nullptr);
+    // Another rotation, an empty grid: not drawn.
+    CHECK(CityMeta::ChooseLevel(only5, 1, 4) == nullptr);
+    CHECK(CityMeta::ChooseLevel({{0, 3, 0.0f, 0.0f, 0, 0}}, 0, 3) == nullptr);
+    // Pitches differ between zoom 1 to 4: no stand-in.
+    CHECK(CityMeta::LevelScale({0, 2, 0.0f, 0.0f, 1, 1}, 3) == 0.0);
+    CHECK(CityMeta::LevelScale({0, 0, 0.0f, 0.0f, 1, 1}, 1) == 0.0);
+    // A zoom 4 level at magnification 0.5 draws at 2x at zoom 4 and 4x at zoom 5. A full zoom 4
+    // level wins over it at zoom 4 and 5 (less scaling).
+    const Level reduced{0, 3, 0.0f, 0.0f, 2, 2, 0.5f};
+    CHECK(CityMeta::LevelScale(reduced, 3) == 2.0 && CityMeta::LevelScale(reduced, 4) == 4.0);
+    const Level* onlyReduced = CityMeta::ChooseLevel({reduced}, 0, 4);
+    CHECK(onlyReduced && onlyReduced->magnification == 0.5f);
+    const std::vector<Level> both = {reduced, {0, 3, 0.0f, 0.0f, 2, 2}};
+    const Level* full = CityMeta::ChooseLevel(both, 0, 4);
+    CHECK(full && full->magnification == 1.0f);
+}
+
+// Levels above the new render's zoom stay while the city did not change since they were made.
+TEST_CASE(MetaHigherLevelsToDrop)
+{
+    CityRenderMeta earlier;
+    earlier.saveFileTime = 500;
+    for (int r = 0; r < 4; ++r) {
+        for (int z = 0; z < 5; ++z) {
+            earlier.levels.push_back({r, z, 0.0f, 0.0f, 1, 1});
+        }
+    }
+    CHECK(CityMeta::HigherLevelsToDrop(earlier, 3, 500).empty());  // same save: zoom 5 stays
+    const auto drop = CityMeta::HigherLevelsToDrop(earlier, 3, 600);  // saved since
+    CHECK(drop.size() == 4);
+    CHECK(std::ranges::all_of(drop, [](const CityRenderMeta::Level& l) { return l.zoom == 4; }));
+    CHECK(CityMeta::HigherLevelsToDrop(earlier, 2, 600).size() == 8);
+    CHECK(CityMeta::HigherLevelsToDrop(earlier, 4, 600).empty());
+}

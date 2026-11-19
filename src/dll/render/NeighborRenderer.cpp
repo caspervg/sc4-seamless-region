@@ -236,15 +236,15 @@ void NeighborRenderer::Rebuild_()
         n.tileSize = meta->tileSize;
         n.key.cityKey = city.key;
         bool any = false;
-        for (const CityRenderMeta::Level& level : meta->levels) {
-            if (level.rotation < 0 || level.rotation > 3 || level.zoom < 0 || level.zoom > 3 || level.tilesX <= 0 ||
-                level.tilesY <= 0) {
-                continue;
+        for (int r = 0; r < ViewMath::kRotationCount; ++r) {
+            for (int z = 0; z < ViewMath::kZoomCount; ++z) {
+                if (const CityRenderMeta::Level* level = CityMeta::ChooseLevel(meta->levels, r, z)) {
+                    const int slot = r * ViewMath::kZoomCount + z;
+                    n.levels[slot] = *level;
+                    n.scale[slot] = CityMeta::LevelScale(*level, z);
+                    any = true;
+                }
             }
-            const int slot = level.rotation * 4 + level.zoom;
-            n.levels[slot] = level;
-            n.hasLevel[slot] = true;
-            any = true;
         }
         if (any) {
             rects.push_back(n.cells);
@@ -266,15 +266,15 @@ void NeighborRenderer::Rebuild_()
 bool NeighborRenderer::Place_(const Neighbor& neighbor, const CameraFrame& frame,
                               NeighborMath::LevelPlacement& placement, const CityRenderMeta::Level*& level) const
 {
-    // Zoom 5 shows the zoom 4 tiles at twice the size.
-    const int levelZoom = std::min(frame.zoomIndex, 3);
-    const int slot = frame.rotation * 4 + levelZoom;
-    if (!neighbor.hasLevel[slot]) {
+    if (!ViewMath::IsValidZoom(frame.zoomIndex) || !ViewMath::IsValidRotation(frame.rotation)) {
+        return false;
+    }
+    const int slot = frame.rotation * ViewMath::kZoomCount + frame.zoomIndex;
+    if (neighbor.scale[slot] <= 0.0) {
         return false;
     }
     level = &neighbor.levels[slot];
-    const double scale = static_cast<double>(ViewMath::Zoom(frame.zoomIndex).cellPixels) /
-                         ViewMath::Zoom(levelZoom).cellPixels * frame.magnification;
+    const double scale = neighbor.scale[slot] * frame.magnification;
     const cS3DVector2 neighborCanvas = frame.projection.WorldToCanvas(neighbor.originOffset);
     const cS3DVector2 baseCanvas = frame.projection.WorldToCanvas(frame.baseCorner);
     placement = NeighborMath::PlaceLevel(neighborCanvas.fX, neighborCanvas.fY, level->originX, level->originY,
@@ -491,7 +491,8 @@ void NeighborRenderer::DrawGroup_(const bool front)
 
     TileStore* store = ctx_.tileStore;
     TileCache* cache = ctx_.tileCache;
-    const bool linear = frame.zoomIndex > 3;
+    // Tiles drawn 1:1 stay crisp. Tiles drawn larger (zoom 4 at zoom 5) are filtered.
+    bool linear = false;
     SavedState saved;
     bool begun = false;
     SC4WorldVertex quad[6];
@@ -526,6 +527,12 @@ void NeighborRenderer::DrawGroup_(const bool front)
         }
         neighbor.key.rotation = frame.rotation;
         neighbor.key.zoom = level->zoom;
+        const bool neighborLinear = placement.tilePixels != static_cast<double>(neighbor.tileSize);
+        if (begun && neighborLinear != linear) {
+            const int filter = neighborLinear ? Drv::kFilterLinear : Drv::kFilterNearest;
+            ctx_.draw->SetTexFiltering(context, filter, filter, 0);
+        }
+        linear = neighborLinear;
         for (int ty = ty0; ty < ty1; ++ty) {
             const double y0 = NeighborMath::TileEdge(placement.originY, placement.tilePixels, ty);
             const double y1 = NeighborMath::TileEdge(placement.originY, placement.tilePixels, ty + 1);
@@ -608,7 +615,7 @@ void NeighborRenderer::DrawPanelSection()
     if (neighbors_.empty()) {
         return;
     }
-    const int slot = rotation * 4 + std::min(zoom, 3);
+    const int slot = rotation * ViewMath::kZoomCount + std::clamp(zoom, 0, ViewMath::kZoomCount - 1);
     if (ImGui::BeginTable("neighbors", 4,
                           ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY |
                               ImGuiTableFlags_SizingStretchProp,
@@ -628,7 +635,15 @@ void NeighborRenderer::DrawPanelSection()
                 ImGui::TableNextColumn();
                 ImGui::TextUnformatted((n.frontMask >> rotation) & 1 ? "In front" : "Behind");
                 ImGui::TableNextColumn();
-                ImGui::TextUnformatted(n.hasLevel[slot] ? "Yes" : "No");
+                if (n.scale[slot] <= 0.0) {
+                    ImGui::TextUnformatted("No");
+                }
+                else if (n.scale[slot] == 1.0) {
+                    ImGui::TextUnformatted("Yes");
+                }
+                else {
+                    ImGui::Text("Zoom %d at %.0fx", n.levels[slot].zoom + 1, n.scale[slot]);
+                }
                 ImGui::TableNextColumn();
                 ImGui::Text("%d of %d", n.readyTiles, n.visibleTiles);
             }

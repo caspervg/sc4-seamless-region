@@ -4,7 +4,9 @@
 //
 // Back neighbors at the start of PreStatic, front neighbors at the end of PostStatic with
 // depth always passing and written (docs/plan.md "Draw order"). Neighbors sorted back to
-// front. Marks a dirty rectangle when a tile arrives. Zoom 5 uses zoom 4 tiles at 2x.
+// front. Marks a dirty rectangle when a tile arrives. Each zoom draws the neighbor's level of
+// that zoom. A zoom without one takes a level of the same pitch drawn larger
+// (CityMeta::ChooseLevel): zoom 5 without zoom 5 tiles shows zoom 4 at 2x. Else nothing.
 // Placement: neighbor canvas = ViewMath canvas shifted by
 // projection.WorldToCanvas(RegionIndex::OriginOffset(city)), screen = canvas +
 // CameraReader::CanvasToScreenOffset(), rounded to the game's pixel grid.
@@ -23,6 +25,7 @@
 #include "public/cIGZWorldDrawService.h"
 #include "render/NeighborMath.hpp"
 #include "store/TileStore.hpp"
+#include "view/ViewMath.hpp"
 
 struct CameraFrame;
 
@@ -45,7 +48,8 @@ public:
     void InvalidateAll();
 
 private:
-    static constexpr int kLevelSlots = 16;  // rotation * 4 + zoom index (0..3)
+    // One slot per view: rotation * kZoomCount + zoom index of the view.
+    static constexpr int kLevelSlots = 4 * ViewMath::kZoomCount;
 
     struct Neighbor
     {
@@ -53,8 +57,10 @@ private:
         NeighborMath::CellRect cells;
         cS3DVector3 originOffset;  // metres, relative to the current city
         int tileSize = 512;
+        // Per view: the level drawn there and its scale (screen pixels per tile pixel at
+        // magnification 1). Scale 0: nothing to draw in that view.
         std::array<CityRenderMeta::Level, kLevelSlots> levels{};
-        std::array<bool, kLevelSlots> hasLevel{};
+        std::array<double, kLevelSlots> scale{};
         uint8_t frontMask = 0;     // bit r: drawn in front of the current city at rotation r
         TileKey key;               // cityKey is fixed, the rest changes per tile (no allocation)
         int visibleTiles = 0;      // last draw, for the panel

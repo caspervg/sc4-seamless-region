@@ -141,6 +141,7 @@ void Settings::Load(const std::filesystem::path& settingsFilePath)
         r.Bool("CaptureAtNoon", captureAtNoon);
         r.Bool("CaptureWaterGlare", captureWaterGlare);
         r.Bool("CaptureSnapshotFlag", captureSnapshotFlag);
+        r.Int("MaxRenderZoom", maxRenderZoom, kMinRenderZoom, kMaxRenderZoom);
         r.Int("TileCacheMB", tileCacheMB, kMinTileCacheMB, kMaxTileCacheMB);
         r.Int("UploadTilesPerFrame", uploadTilesPerFrame, kMinUploadTiles, kMaxUploadTiles);
         r.Int("UploadMsPerFrame", uploadMsPerFrame, kMinUploadMs, kMaxUploadMs);
@@ -177,6 +178,7 @@ bool Settings::Save(const std::filesystem::path& settingsFilePath) const
         s["CaptureAtNoon"] = b(captureAtNoon);
         s["CaptureWaterGlare"] = b(captureWaterGlare);
         s["CaptureSnapshotFlag"] = b(captureSnapshotFlag);
+        s["MaxRenderZoom"] = std::to_string(maxRenderZoom);
         s["TileCacheMB"] = std::to_string(tileCacheMB);
         s["UploadTilesPerFrame"] = std::to_string(uploadTilesPerFrame);
         s["UploadMsPerFrame"] = std::to_string(uploadMsPerFrame);

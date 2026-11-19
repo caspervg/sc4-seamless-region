@@ -222,6 +222,15 @@ level and the new times. meta.json always names only levels that are complete on
 that is cancelled or fails keeps its finished levels and the untouched earlier ones, with the
 earlier times (0 for a first render, which counts as out of date).
 
+**Which zooms.** A render makes zoom 1 up to `MaxRenderZoom` (3, 4 or 5, default 4) for every
+rotation (`CaptureMath::LevelOrder`). Zoom 5 is now a real level: the same blocks, two passes and
+restore as the others, at 146 px per cell. A level above the chosen zoom that an earlier render
+left (zoom 5 on disk, now a render up to zoom 4) is not touched while the city has not been saved
+since that render (`saveFileTime` of the earlier meta equals the save of now): it still shows the
+city as it is. When the city was saved since, it is out of date: the final `meta.json` leaves it
+out, then `TileStore::DeleteLevel` removes its tiles (`CityMeta::HigherLevelsToDrop`). So stale
+tiles never show and `meta.json` names only levels that are on disk.
+
 **What stays out of the tiles.** Neighbor tiles (`NeighborRenderer::SetEnabled(false)`), the
 edge walls (`CameraExtender::SetEdgeWallsHidden(all)`), the hover tint and the map overlay (both
 check `CityCapturer::IsRunning()` themselves, the capture changes no setting for them).

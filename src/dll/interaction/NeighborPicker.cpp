@@ -325,6 +325,13 @@ void NeighborPicker::Rebuild_()
             n.hasRender = meta && meta->sizeX == city.sizeX && meta->sizeZ == city.sizeZ && !meta->levels.empty();
             n.renderTime = meta ? meta->renderTime : 0;
             n.stale = n.hasRender && ctx_.tileStore->IsStale(city);
+            for (int r = 0; n.hasRender && r < ViewMath::kRotationCount; ++r) {
+                for (int z = 0; z < ViewMath::kZoomCount; ++z) {
+                    if (CityMeta::ChooseLevel(meta->levels, r, z)) {
+                        n.drawnViews |= 1u << (r * ViewMath::kZoomCount + z);
+                    }
+                }
+            }
         }
         if (n.hasRender) {
             rects.push_back({city.cellX, city.cellZ, city.cellX + city.sizeX, city.cellZ + city.sizeZ});
@@ -499,8 +506,13 @@ void NeighborPicker::UpdateLayer_()
         // A neighbor drawn in front of the city covers everything, so its tint must too.
         // Behind the city, the city's terrain and buildings hide the tint where they hide
         // the neighbor.
+        // A neighbor that is not drawn at this zoom (no render up to it) covers nothing.
         const int rotation = GameAccess::Rotation();
-        const bool front = rotation >= 0 && ((neighbors_[hovered_].frontMask >> rotation) & 1) != 0;
+        const int zoom = GameAccess::Zoom();
+        const Neighbor& n = neighbors_[hovered_];
+        const bool front = ViewMath::IsValidRotation(rotation) && ViewMath::IsValidZoom(zoom) &&
+                           ((n.frontMask >> rotation) & 1) != 0 &&
+                           ((n.drawnViews >> (rotation * ViewMath::kZoomCount + zoom)) & 1) != 0;
         if (front != layerFront_) {
             ctx_.worldDraw->SetLayerStyle(layer_, front ? kFrontStyle : kBackStyle);
             layerFront_ = front;

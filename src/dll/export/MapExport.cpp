@@ -155,11 +155,12 @@ namespace
             result.cityTilesDecoded = decodes_;
             result.bytesWritten = bytesWritten_;
             result.indexHtml = finalDir_ / L"index.html";
+            result.sourceZoom = zoom_;
             char text[160];
-            std::snprintf(text, sizeof(text), "The map is ready: %d cities, %lld tiles, %.1f MB.", result.cities,
-                          static_cast<long long>(tilesWritten_),
+            std::snprintf(text, sizeof(text), "The map is ready: %d cities from zoom %d, %lld tiles, %.1f MB.",
+                          result.cities, zoom_ + 1, static_cast<long long>(tilesWritten_),
                           static_cast<double>(bytesWritten_) / (1024.0 * 1024.0));
-            result.message = text;
+            result.message = text + LeftOutText_();
             return result;
         }
 
@@ -176,9 +177,21 @@ namespace
 
         // ---- cities ------------------------------------------------------------------------
 
+        // A level the map can use: the rotation of the map, a sane grid, and drawn 1:1 at its
+        // own zoom. The canvas has no resampling, so a level rendered at another magnification
+        // (scale not 1) is left out.
+        [[nodiscard]] bool Usable_(const CityRenderMeta::Level& l) const
+        {
+            return l.rotation == req_.rotation && l.tilesX > 0 && l.tilesY > 0 && l.tilesX <= 4096 &&
+                   l.tilesY <= 4096 && CityMeta::LevelScale(l, l.zoom) == 1.0;
+        }
+
         bool ReadCities_(MapExport::Result& result)
         {
             progress_.phase = static_cast<int>(MapExport::Phase::Reading);
+            // Every city with a render in this rotation, and the zooms it has.
+            std::vector<std::pair<CityInfo, CityRenderMeta>> rendered;
+            std::vector<uint32_t> masks;
             std::vector<uint8_t> bytes;
             for (const CityInfo& city : req_.cities) {
                 if (Stopped_()) {
@@ -191,28 +204,46 @@ namespace
                 if (!ReadFile(cityDir / L"meta.json", bytes)) {
                     continue;  // not rendered
                 }
-                const std::optional<CityRenderMeta> meta =
+                std::optional<CityRenderMeta> meta =
                     CityMeta::Parse(std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
                 if (!meta || meta->sizeX != city.sizeX || meta->sizeZ != city.sizeZ || meta->tileSize < 16 ||
                     meta->tileSize > 2048) {
                     LOG_WARN("Export: the render of '{}' does not fit the city. It is not on the map.", city.name);
                     continue;
                 }
-                const auto level = std::ranges::find_if(meta->levels, [&](const CityRenderMeta::Level& l) {
-                    return l.rotation == req_.rotation && l.zoom == MapMath::kZoomIndex && l.tilesX > 0 &&
-                           l.tilesY > 0 && l.tilesX <= 4096 && l.tilesY <= 4096;
-                });
-                if (level == meta->levels.end()) {
-                    continue;  // no zoom 4 render in this rotation
+                uint32_t mask = 0;
+                for (const CityRenderMeta::Level& l : meta->levels) {
+                    mask |= Usable_(l) ? 1u << l.zoom : 0u;
+                }
+                if (mask != 0) {
+                    rendered.emplace_back(city, std::move(*meta));
+                    masks.push_back(mask);
+                }
+            }
+            zoom_ = req_.sourceZoom >= 0 ? std::clamp(req_.sourceZoom, MapMath::kMinSourceZoom, MapMath::kMaxSourceZoom)
+                                         : MapMath::ChooseSourceZoom(masks);
+            if (zoom_ < 0) {
+                return Fail_(result, "No city of the region has a render at zoom 3, 4 or 5 in this rotation. Render "
+                                     "the cities first.");
+            }
+            progress_.sourceZoom = zoom_;
+
+            uint64_t sourceBytes = 0;
+            for (const auto& [city, meta] : rendered) {
+                const auto level = std::ranges::find_if(
+                    meta.levels, [&](const CityRenderMeta::Level& l) { return l.zoom == zoom_ && Usable_(l); });
+                if (level == meta.levels.end()) {
+                    leftOut_.push_back(city.name.empty() ? city.key : city.name);
+                    continue;
                 }
                 Placed p;
                 p.info = city;
                 p.level = *level;
-                p.groundHeight = meta->groundHeight.value_or(MapMath::kDefaultGroundHeight);
+                p.groundHeight = meta.groundHeight.value_or(MapMath::kDefaultGroundHeight);
                 p.source.tilesX = level->tilesX;
                 p.source.tilesY = level->tilesY;
-                p.source.tileSize = meta->tileSize;
-                TileKey key{city.key, req_.rotation, MapMath::kZoomIndex, 0, 0};
+                p.source.tileSize = meta.tileSize;
+                const TileKey key{city.key, req_.rotation, zoom_, 0, 0};
                 p.levelDir = TileStore::TilePathIn(req_.rendersDir, key).parent_path();
                 p.present.assign(static_cast<size_t>(p.source.tilesX) * p.source.tilesY, 0);
                 std::error_code ec;
@@ -222,16 +253,49 @@ namespace
                     if (ParseTileName(it->path().filename().native(), tx, ty) && tx < p.source.tilesX &&
                         ty < p.source.tilesY) {
                         p.present[static_cast<size_t>(ty) * p.source.tilesX + tx] = 1;
+                        std::error_code sizeEc;
+                        const uintmax_t size = it->file_size(sizeEc);
+                        sourceBytes += sizeEc ? 0 : size;
                     }
                 }
                 cities_.push_back(std::move(p));
             }
             if (cities_.empty()) {
-                return Fail_(result, "No city of the region has a render at zoom 4 in this rotation. Render the "
-                                     "cities first.");
+                return Fail_(result, "No city of the region has a render at this zoom in this rotation. Choose "
+                                     "another zoom or render the cities first.");
             }
-            LOG_INFO("Export: {} cities have a render in rotation {}", cities_.size(), req_.rotation);
+            // The base level has about as many pixels as the city tiles, the smaller levels add a
+            // third. ponytail: the city tile sizes stand in for the map tile sizes (quality differs).
+            const int64_t estimate = static_cast<int64_t>(sourceBytes / 3 * 4);
+            progress_.estimateBytes = estimate;
+            LOG_INFO("Export: {} cities have a render at zoom {} in rotation {}, the map will be about {} MB",
+                     cities_.size(), zoom_ + 1, req_.rotation, estimate / (1024 * 1024));
+            if (!leftOut_.empty()) {
+                LOG_INFO("Export: {} rendered cities have no render at zoom {} and are not on the map", leftOut_.size(),
+                         zoom_ + 1);
+            }
+            if (estimate > MapExport::kLargeMapBytes) {
+                LOG_WARN("Export: the map is large (about {} MB). Check that the disk has room for it.",
+                         estimate / (1024 * 1024));
+            }
             return true;
+        }
+
+        // " Not on the map (no zoom 5 render): A, B and 2 more." Empty when every city is on it.
+        [[nodiscard]] std::string LeftOutText_() const
+        {
+            if (leftOut_.empty()) {
+                return {};
+            }
+            constexpr size_t kNames = 5;
+            std::string text = " Not on the map (no zoom " + std::to_string(zoom_ + 1) + " render): ";
+            for (size_t i = 0; i < leftOut_.size() && i < kNames; ++i) {
+                text += (i == 0 ? "" : ", ") + leftOut_[i];
+            }
+            if (leftOut_.size() > kNames) {
+                text += " and " + std::to_string(leftOut_.size() - kNames) + " more";
+            }
+            return text + ".";
         }
 
         // ---- canvas ------------------------------------------------------------------------
@@ -239,7 +303,7 @@ namespace
         bool Layout_(MapExport::Result& result)
         {
             // The first city is the reference: the map shows the region as the game does from it.
-            projection_ = ViewMath::OrthoProjection::For(MapMath::kZoomIndex, req_.rotation);
+            projection_ = ViewMath::OrthoProjection::For(zoom_, req_.rotation);
             const CityInfo& reference = cities_.front().info;
             int64_t minX = INT32_MAX, minY = INT32_MAX, maxX = INT32_MIN, maxY = INT32_MIN;
             for (Placed& c : cities_) {
@@ -349,7 +413,7 @@ namespace
 
         const Decoded* Source_(const Placed& c, const int tx, const int ty)
         {
-            const TileKey key{c.info.key, req_.rotation, MapMath::kZoomIndex, tx, ty};
+            const TileKey key{c.info.key, req_.rotation, zoom_, tx, ty};
             if (Decoded* hit = cache_.Find(key, ++stamp_)) {
                 return hit;
             }
@@ -572,6 +636,8 @@ namespace
         const fs::path finalDir_;
 
         std::vector<Placed> cities_;
+        std::vector<std::string> leftOut_;  // rendered cities without a render at zoom_
+        int zoom_ = -1;                     // the source zoom index
         std::vector<int> order_;  // indices into cities_, back to front
         ViewMath::OrthoProjection projection_;
         int width_ = 0, height_ = 0, maxZoom_ = 0;

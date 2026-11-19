@@ -3,7 +3,8 @@
 // Export: the pure math of the region map. No game calls, header only, unit tested in
 // tests/ExportTests.cpp.
 //
-// The map canvas is one pixel plane for the whole region at zoom 4 and one rotation. Every
+// The map canvas is one pixel plane for the whole region at one source zoom (3, 4 or 5, see
+// ChooseSourceZoom) and one rotation. Every
 // city is placed on it the way the neighbor renderer places a neighbor around a reference
 // city (NeighborMath::PlaceLevel), so the map shows the region as the game shows it from that
 // city. Output tiles are kTileSize pixels, Leaflet zoom maxZoom is the canvas at 1:1 and each
@@ -21,9 +22,32 @@
 namespace MapMath
 {
     inline constexpr int kTileSize = 256;  // Leaflet default
-    inline constexpr int kZoomIndex = 3;   // zoom 4, the largest stored zoom
+    // The zoom indexes a map can be made from: zoom 3 to 5.
+    inline constexpr int kMinSourceZoom = 2, kMaxSourceZoom = 4;
     // Ground height for outlines when meta.json has none: the sea level of a new region.
     inline constexpr float kDefaultGroundHeight = 250.0f;
+
+    // The default source zoom of the map. zoomMasks has one entry per rendered city: bit z is set
+    // when the city has a level of zoom index z that the map can use. The highest zoom from
+    // kMinSourceZoom to kMaxSourceZoom that every city has. When no zoom is shared by all, the
+    // one that most cities have (the higher one on a tie). -1 when no city has one.
+    [[nodiscard]] inline int ChooseSourceZoom(const std::vector<uint32_t>& zoomMasks)
+    {
+        int best = -1;
+        size_t bestCount = 0;
+        for (int z = kMaxSourceZoom; z >= kMinSourceZoom; --z) {
+            const size_t count = static_cast<size_t>(
+                std::ranges::count_if(zoomMasks, [z](const uint32_t mask) { return ((mask >> z) & 1u) != 0; }));
+            if (count > 0 && count == zoomMasks.size()) {
+                return z;
+            }
+            if (count > bestCount) {
+                best = z;
+                bestCount = count;
+            }
+        }
+        return best;
+    }
 
     // Canvas position of the top-left corner of a city's tile (0,0), relative to the reference
     // city's base corner, in whole pixels. levelOrigin is the level's originX/originY from

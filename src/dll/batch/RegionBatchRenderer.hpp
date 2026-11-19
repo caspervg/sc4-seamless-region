@@ -89,6 +89,8 @@ private:
     bool SaveRun_();
     [[nodiscard]] std::optional<BatchQueue::Run> LoadRun_() const;
     void Log_(const std::string& line) const;
+    // No render, out of date, or a level up to Settings::maxRenderZoom is missing.
+    [[nodiscard]] bool NeedsRender_(const CityInfo& city) const;
     [[nodiscard]] const CityInfo* FindByKey_(const std::string& key) const;
 
     void DrawProgress_();

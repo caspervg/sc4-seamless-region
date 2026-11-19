@@ -1,6 +1,7 @@
 #pragma once
 
-// Capture (W2-C): renders the current city into tiles for every zoom and rotation.
+// Capture (W2-C): renders the current city into tiles for every rotation and the zooms from 1 up
+// to Settings::maxRenderZoom (3, 4 or 5).
 //
 // Copies the pattern of SC4WriteCityRegionViewThumbnail (0x005ddec0): pause, move the view
 // target, draw, read back. A state machine on the idle scheduler does one bounded unit of
@@ -43,8 +44,8 @@
 
 struct CaptureRequest
 {
-    bool allZooms = true;
-    std::vector<int> zooms;      // zoom indexes 0..3 when allZooms is false
+    // The highest zoom index to render (2..4). -1: Settings::maxRenderZoom.
+    int maxZoom = -1;
     std::vector<int> rotations;  // 0..3, empty means all
 };
 
@@ -84,6 +85,10 @@ public:
     // rotation and writes it as test_tile.webp next to the log file. Uses the same steps as
     // a full capture. False when a capture runs or no city is loaded.
     bool StartTestTile();
+
+    // The "Render up to zoom" choice of the panel (Settings::maxRenderZoom), with its help text.
+    // The batch panel shows it too.
+    static void DrawMaxZoomChoice(Settings& settings);
 
 private:
     enum class Phase
@@ -169,6 +174,7 @@ private:
     bool WriteTestTile_();
     // Writes meta.json for the tiles that are on disk now. final = the render is complete.
     bool WriteMeta_(bool final);
+    int maxZoom_ = 3;  // zoom index, the highest this render makes
 
     void SetClearColor_(uint32_t rgba);
     void RestoreClearColor_();

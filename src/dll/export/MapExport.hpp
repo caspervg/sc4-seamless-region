@@ -24,6 +24,8 @@ namespace MapExport
 {
     // Everything the export holds (cache, buffers, tile flags) stays under this.
     inline constexpr size_t kMemoryCapBytes = 64u * 1024 * 1024;
+    // A map with more files than this gets a warning in the panel, the log and the tool.
+    inline constexpr int64_t kLargeMapBytes = 1024ll * 1024 * 1024;
 
     struct Request
     {
@@ -32,6 +34,9 @@ namespace MapExport
         std::string dateText;              // shown in the page
         std::vector<CityInfo> cities;      // the region's cities, a snapshot
         int rotation = 0;                  // 0..3
+        // The zoom index of the city renders the map is made from (MapMath::kMinSourceZoom to
+        // kMaxSourceZoom). -1: MapMath::ChooseSourceZoom picks it from the cities' renders.
+        int sourceZoom = -1;
         int quality = 75;                  // WebP quality of the map tiles
         size_t cacheBytes = 32u * 1024 * 1024;  // decoded city tiles, capped by kMemoryCapBytes
         int upscaleLevels = 1;             // Leaflet zoom levels above the stored one
@@ -52,6 +57,8 @@ namespace MapExport
         std::atomic<int> zoom{0};  // the Leaflet zoom being made
         std::atomic<int64_t> done{0};
         std::atomic<int64_t> total{0};
+        std::atomic<int> sourceZoom{-1};        // zoom index, known after Reading
+        std::atomic<int64_t> estimateBytes{0};  // size of the map files, known after Reading
     };
 
     // 0 runs, 1 cancel (removes map.tmp), 2 quit (leaves map.tmp for the next export to remove,
@@ -69,6 +76,7 @@ namespace MapExport
         bool cancelled = false;
         std::string message;  // for the panel, friendly text
         int cities = 0;
+        int sourceZoom = -1;  // zoom index the map was made from
         int64_t tilesWritten = 0;
         int64_t cityTilesDecoded = 0;  // decodes of city tiles, cache misses included
         uint64_t bytesWritten = 0;

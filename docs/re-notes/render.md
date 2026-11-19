@@ -109,7 +109,8 @@ driver. Confidence in the argument: high. In-game check pending.
 ## Placement and rounding
 
 ```
-scale    = cellPixels(current zoom) / cellPixels(level zoom) * magnification   (1, or 2 at zoom 5)
+scale    = cellPixels(current zoom) / (cellPixels(level zoom) * level magnification) * magnification
+           (1 for the level of the current zoom, 2 when zoom 5 draws zoom 4 tiles)
 d        = WorldToCanvas(origin offset) + scale * level.origin - WorldToCanvas(base corner)
 origin   = floor(d + 0.5) + (WorldToCanvas(base corner) + canvasToScreen)
 tile x0  = origin.x + floor(tx * tileSize * scale + 0.5)
@@ -120,7 +121,15 @@ of pixels, so `d` has a fraction. It is rounded relative to the base corner of t
 city, which the game keeps on a whole pixel. `d` does not depend on the view target, so the
 rounding gives the same result on every frame of a pan: no jitter, and backing store strips
 line up. The seam between the current city and a neighbor is at most 0.5 px per axis.
-Zoom 5 draws the zoom 4 tiles at 2x with bilinear filtering and clamp wrapping. Tile pixels are
+Which level a view draws: `CityMeta::ChooseLevel`. Only a level with the same pitch can stand
+in (zoom 4 and 5 share 45 degrees, zooms 1 to 4 all differ), and never at a scale below 1 (no
+mipmaps, it would flicker). Of the rest, the smallest scale wins. So zoom 5 draws the zoom 5
+tiles 1:1 when the neighbor has them, else the zoom 4 tiles at 2x, and a neighbor rendered up to
+zoom 3 is not drawn at zoom 4 and 5. `level magnification` is the optional per-level field of
+`meta.json` (1 for every render now), so a later reduced detail level (zoom 4 at magnification
+0.5) draws at 2x at zoom 4 and 4x at zoom 5 with no change to this rule.
+Tiles at a scale other than 1 draw with bilinear filtering and clamp wrapping, the others with
+point sampling (the filter is set per neighbor). Tile pixels are
 premultiplied by alpha at decode time (blend one, 1 - source alpha), so colours under
 transparent pixels do not bleed into the edges.
 

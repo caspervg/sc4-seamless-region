@@ -291,7 +291,7 @@ public:
 ### capture/CityCapturer
 
 ```cpp
-struct CaptureRequest { bool allZooms = true; std::vector<int> zooms; std::vector<int> rotations; };
+struct CaptureRequest { int maxZoom = -1; /* zoom index 2..4, -1 = Settings::maxRenderZoom */ std::vector<int> rotations; };
 struct CaptureProgress { int done, total; std::string phase; bool finished, failed; std::string error; };
 class CityCapturer {
 public:
@@ -325,7 +325,7 @@ struct TileKey { std::string cityKey; int rotation, zoom, tx, ty; };
 struct CityRenderMeta {
     int formatVersion; int cellX, cellZ, sizeX, sizeZ; int tileSize;
     // Per rotation and zoom: canvas origin of tile (0,0), tile counts.
-    struct Level { int rotation, zoom; float originX, originY; int tilesX, tilesY; };
+    struct Level { int rotation, zoom; float originX, originY; int tilesX, tilesY; float magnification = 1; };
     std::vector<Level> levels;
     int64_t saveFileTime; int64_t renderTime;
 };
@@ -371,7 +371,9 @@ public:
 
 The renderer draws back neighbors at the start of PreStatic and front neighbors at the
 end of PostStatic (see "Draw order" in `docs/plan.md`), marks dirty rectangles when a
-tile arrives, and uses zoom 4 tiles scaled 2x at zoom 5.
+tile arrives. Per view it draws the level `CityMeta::ChooseLevel` picks: the level of that zoom,
+else a level with the same pitch drawn larger (zoom 5 without zoom 5 tiles shows zoom 4 at 2x),
+else nothing. See "Max render zoom" below.
 
 ### interaction/NeighborPicker
 
@@ -411,12 +413,14 @@ std::string BuildPage(const Page& page);
 }
 ```
 
-Builds one browsable map of the whole region from the zoom 4 tiles of one rotation (0 to 3,
-chosen in the panel). Output in `<Region>/RegionRenders/map/`: `index.html` and
+Builds one browsable map of the whole region from the tiles of one source zoom (3, 4 or 5) and
+one rotation (0 to 3), both chosen in the panel (`--zoom` and `--rotation` in `SC4RegionMap.exe`). Output in `<Region>/RegionRenders/map/`: `index.html` and
 `tiles/<z>/<x>/<y>.webp`.
 
-- **Source.** Every founded city whose `meta.json` has a zoom 4 level for the rotation. Cities
-  without one stay empty. The optional meta field `groundHeight` (the middle of the terrain
+- **Source.** `Request::sourceZoom`, by default (-1) `MapMath::ChooseSourceZoom`: the highest
+  zoom from 3 to 5 that every city with a render in the rotation has, else the one most cities
+  have. Cities with a render but without that zoom are left out and named in the result message.
+  Only levels drawn 1:1 count (`CityMeta::LevelScale` 1: no resampling on the canvas). The optional meta field `groundHeight` (the middle of the terrain
   height range, written by the capture) places the city outline. Older metas use 250 m.
 - **Canvas** (`export/MapMath.hpp`, pure). The first rendered city is the reference. Every
   city's tile (0,0) goes through `NeighborMath::PlaceLevel` relative to the reference base
@@ -431,7 +435,11 @@ chosen in the panel). Output in `<Region>/RegionRenders/map/`: `index.html` and
   alpha), read back from the tiles just written, down to zoom 0 (one tile). Lossy WebP with
   alpha through `WebpCodec` at MapQuality.
 - **Memory.** Everything the export holds stays under 64 MB (`MapExport::kMemoryCapBytes`):
-  the cache, a few MB of buffers and two bytes per output tile for the tile flags.
+  the cache, a few MB of buffers and two bytes per output tile for the tile flags. From zoom 5
+  the canvas has 4 times the tiles of zoom 4: a 16 km square region is about 620 x 440 base
+  tiles, under 1 MB of flags, so the cap holds. Disk and time grow 4 times. The export estimates
+  the size from the city tile files (4/3 of their bytes) once it has read the cities, shows it in
+  the panel and the tool, and warns above 1 GB (`kLargeMapBytes`).
 - **Page.** One file. Leaflet 1.9.4 from cdnjs with SRI, `L.CRS.Simple`, `maxNativeZoom` =
   `maxZoom`, MapUpscaleLevels zoom levels above it, `maxBounds` around the canvas. City outlines
   are invisible polygons with a hover highlight, a name tooltip and click to zoom. The data is
@@ -454,6 +462,33 @@ position, size, rotation and opacity set in the panel, saved per city in
 `<Region>/RegionRenders/overlays/<cityKey>.json`. Drawn draped on the terrain with a mesh
 that follows the terrain heights, rebuilt only when the overlay or the terrain changes.
 Large images are split into power-of-two tiles of at most 2048 px.
+
+### Max render zoom
+
+`MaxRenderZoom` (INI and the "Render up to" choice in the Capture and Batch panels, 3, 4 or 5,
+default 4) sets the highest zoom a render makes. Each zoom has its own pitch (30, 35, 40, 45, 45
+degrees), so only zoom 4 can stand in for zoom 5 (same pitch, exactly 2x).
+
+- **Capture** renders zoom 1 up to the max for every rotation. Higher levels of an earlier render
+  stay while the city was not saved since, else they are deleted at the end
+  (`docs/re-notes/capture.md`, "Which zooms").
+- **Batch**: a city is up to date only when its render is not stale and its `meta.json` has every
+  level up to the max (`CityMeta::NeedsRender`). Raising the max makes every city need a render.
+- **Neighbors, walls and tint** use `CityMeta::ChooseLevel` per view (rotation and zoom). The
+  camera module hides an edge wall only in the views where the neighbor across it is drawn, so
+  with max zoom 3 the walls stay at zoom 4 and 5. The hover tint uses the front style only where
+  the neighbor is drawn.
+- **meta.json** levels have an optional `magnification` (1 now, older files read as 1). The scale
+  of a level is `cellPixels(view) / (cellPixels(level) * magnification)`, so a later reduced
+  detail zoom 4 fits without a format change.
+- **Cost of zoom 5** for a large city (4096 m, about 700 m of height range): a zoom 5 level has
+  about 73 x 59 tiles in the grid, about 2,400 of them touch the city, about 9,500 for the four
+  rotations. Zooms 1 to 4 together have about 3,100. So a render up to zoom 5 takes and stores
+  about 4 times what a render up to zoom 4 does: about 800 MB instead of 200 MB. The key packing
+  (16 bits per tile column and row) and the store index cope with that.
+- **Tile cache**: unchanged at `TileCacheMB` (96 MB, 48 tiles of 512 px with the CPU copy). Zoom 5
+  tiles are drawn 1:1, so a screen needs as many of them as of zoom 4 tiles at zoom 4 (at
+  1920 x 1080 at most 5 x 4 per level). The cache works per screen, not per city.
 
 ## Waves
 
@@ -484,7 +519,7 @@ yet.** `docs/testing.md` starts with the order for the first run.
 | Switching | Complete | An unfounded target opens the region view. The modules of the new city start at the posted PostCityInit, normally inside LoadCity |
 | Camera | Complete, math unit tested | The four detours stay installed while ShowNeighbors is off and pass through. The scroll polygon is taken to hold 6 points (bounding box if not). Depth precision at zoom 1 to 3 in very large regions is open |
 | Capture | Complete, math unit tested | Needs the snapshot extension of the driver. Cars and sims of the paused game are in the tiles. A level that is rendered again is not drawn by neighbors until it is complete. A save during a render is handled but untested. SCD3D11 readback format is assumed |
-| Tile cache, Neighbors | Complete, math unit tested | Tiles must be a power of two. Each tile costs twice its size (see gaps). No neighbors at a custom magnification. Seam of at most half a pixel. Zoom 5 shows zoom 4 tiles at 2x |
+| Tile cache, Neighbors | Complete, math unit tested | Tiles must be a power of two. Each tile costs twice its size (see gaps). No neighbors at a custom magnification. Seam of at most half a pixel. Zoom 5 shows zoom 5 tiles when rendered, else zoom 4 tiles at 2x |
 | Interaction | Complete, math unit tested | The pick is on the ground at the edge height: the top of a tall neighbor building can pick the city behind it. Tint limits in `re-notes/interaction.md` |
 | Export | Complete, math, page and end to end export unit tested. Not run in the game yet | Needs the internet for Leaflet. Outlines of cities rendered before `groundHeight` existed use 250 m. One worker thread: about 10 ms per output tile, mostly WebP encode |
 | Batch | Complete, queue unit tested | Saves every city it leaves. Starts in a city or in the region view and ends there. The region view start is not tested in game yet |

@@ -1,6 +1,7 @@
 #pragma once
 
-// Export (W3-H): a browsable map of the whole region from the zoom 4 tiles of one rotation.
+// Export (W3-H): a browsable map of the whole region from the tiles of one zoom (3, 4 or 5, by
+// default the highest that every rendered city has) and one rotation.
 //
 // Start snapshots everything the export needs (renders folder, region name, cities, settings)
 // and runs MapExport::Run on a worker thread below the game's priority. The game thread only
@@ -56,6 +57,7 @@ private:
 
     // Panel state, game thread.
     int rotation_ = 0;
+    int sourceZoom_ = -1;  // zoom index, -1: the highest that every rendered city has
     std::filesystem::path rendersDir_;  // from the store at city load
     std::filesystem::path indexHtml_;   // the map to open, empty when there is none
     std::string message_;

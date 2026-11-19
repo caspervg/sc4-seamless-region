@@ -26,6 +26,7 @@
 #include "store/TileStore.hpp"
 #include "switching/CitySwitcher.hpp"
 #include "utils/Logger.h"
+#include "utils/Settings.h"
 
 namespace
 {
@@ -119,7 +120,8 @@ RegionBatchRenderer::~RegionBatchRenderer() = default;
 bool RegionBatchRenderer::Initialize(const ModuleContext& ctx)
 {
     ctx_ = ctx;
-    if (!ctx_.idle || !ctx_.messages || !ctx_.region || !ctx_.tileStore || !ctx_.switcher || !ctx_.capturer) {
+    if (!ctx_.idle || !ctx_.messages || !ctx_.region || !ctx_.tileStore || !ctx_.switcher || !ctx_.capturer ||
+        !ctx_.settings) {
         LOG_ERROR("Batch: a service or module it needs is missing");
         return false;
     }
@@ -272,7 +274,7 @@ bool RegionBatchRenderer::Start(const bool force)
     // Null in the region view: the run renders every city and ends in the region view.
     const CityInfo* start = ctx_.region->Current();
     run_ = BatchQueue::Build(
-        ctx_.region->Cities(), start, force, [this](const CityInfo& c) { return ctx_.tileStore->IsStale(c); },
+        ctx_.region->Cities(), start, force, [this](const CityInfo& c) { return NeedsRender_(c); },
         NowText("%Y%m%d-%H%M%S"), NowText("%Y-%m-%d %H:%M:%S"));
     if (run_.pending.empty()) {
         message_ = "Every city has a render that is up to date. Nothing to do.";
@@ -791,6 +793,11 @@ std::optional<BatchQueue::Run> RegionBatchRenderer::LoadRun_() const
     return run;
 }
 
+bool RegionBatchRenderer::NeedsRender_(const CityInfo& city) const
+{
+    return ctx_.tileStore->NeedsRender(city, ctx_.settings->MaxRenderZoomIndex());
+}
+
 void RegionBatchRenderer::Log_(const std::string& line) const
 {
     LOG_INFO("Batch: {}", line);
@@ -814,6 +821,7 @@ void RegionBatchRenderer::DrawPanelSection()
     }
     else {
         const char* why = WhyNotBegin_();
+        CityCapturer::DrawMaxZoomChoice(*ctx_.settings);
         ImGui::BeginDisabled(why != nullptr);
         bool open = false;
         if (ImGui::Button("Render the region")) {
@@ -821,7 +829,8 @@ void RegionBatchRenderer::DrawPanelSection()
             open = true;
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip("Renders every city that has no render or changed since its render.");
+            ImGui::SetTooltip("Renders every city that has no render, changed since its render, or has no render "
+                              "up to the zoom you chose.");
         }
         ImGui::SameLine();
         if (ImGui::Button("Render all cities again")) {
@@ -840,8 +849,8 @@ void RegionBatchRenderer::DrawPanelSection()
             confirmRegionView_ = !GameAccess::City();
             confirmCount_ = static_cast<int>(BatchQueue::Build(
                                                  ctx_.region->Cities(), ctx_.region->Current(), confirmForce_,
-                                                 [this](const CityInfo& c) { return ctx_.tileStore->IsStale(c); },
-                                                 std::string(), std::string())
+                                                 [this](const CityInfo& c) { return NeedsRender_(c); }, std::string(),
+                                                 std::string())
                                                  .pending.size());
             ImGui::OpenPopup(kConfirmPopup);
         }

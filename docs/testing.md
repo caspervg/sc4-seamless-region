@@ -151,7 +151,8 @@ fills it, so the full check needs a capture. The panel part can be checked witho
    `Store: wrote meta.json for '<key>', L levels`.
 2. In `<Region>\RegionRenders\<key>\` you find `meta.json` and one folder per rotation and
    zoom, named `r<rotation>z<zoom>` (for example `r0z3`). Each folder holds files named
-   `<tx>_<ty>.webp`. Zoom 5 has no folder. No `.tmp` files stay behind.
+   `<tx>_<ty>.webp`. With "Render up to" at zoom 4 (the default) zoom 5 has no folder. No `.tmp`
+   files stay behind.
 3. Open a `.webp` file in a browser. It shows a piece of the city with a transparent
    background. Tiles that have no city in them do not exist as files.
 4. Open `meta.json`. It has formatVersion 1, cellX, cellZ, sizeX, sizeZ, tileSize,
@@ -268,7 +269,7 @@ lines. The tools are in the panel: Tools, Camera.
      against the region view: A is minus the distance from the west edge of your city to the
      west edge of the region, B is the distance from that same city edge to the east edge of
      the region. C and D are the same for north and south.
-   - `Camera: edges with a rendered neighbor 0xN`
+   - `Camera: edges with a rendered neighbor by zoom 1 to 5 (rotation 0) 0xA 0xB 0xC 0xD 0xE`
    - with Debug: `Camera: clip planes near N, far F, eye distance E (zoom Z, rotation R)` and
      `Camera: scroll bounds mode region, 6 points` (or `city band`).
 3. The panel shows "Scroll bounds: The whole region (zoom 1 to 3)" or "The city and a band
@@ -326,7 +327,7 @@ lines. The tools are in the panel: Tools, Camera.
 ### Edge walls
 
 1. With "Automatic" on and no renders yet, every edge has its wall, as in the vanilla game.
-   Log: `Camera: edges with a rendered neighbor 0x0`.
+   Log: `Camera: edges with a rendered neighbor by zoom 1 to 5 (rotation 0) 0x0 0x0 0x0 0x0 0x0`.
 2. Untick "Automatic". Tick "Hide west (x = 0)" only. Rotate until the west edge faces the
    camera (it is one of the two front edges for two of the four rotations). The brown wall
    and the water wall on that edge are gone, the wall on the other front edge is still there.
@@ -337,8 +338,9 @@ lines. The tools are in the panel: Tools, Camera.
 4. In a city with sea at an edge: hide that edge. The blue water wall below the water line is
    gone on that edge, also when it is a back edge. The water surface itself is unchanged.
 5. Tick all four, then tick "Automatic" again. All walls are back.
-6. When a neighbor has a render (TileStore), "Automatic" hides the wall on that side only.
-   After a capture, press "Check neighbors again".
+6. When a neighbor has a render (TileStore), "Automatic" hides the wall on that side only, and
+   only at the zooms where the neighbor is drawn (see "Max render zoom" below). After a capture,
+   press "Check neighbors again".
 
 ### Clear color
 
@@ -382,7 +384,8 @@ driver, SCD3D11 and scvk. Panel: Tools, group "Neighbors".
    every neighbor (roads and rivers that cross the edge are the best guide). The seam is off by
    half a pixel at most. Neighbor pixels are crisp, not blurred (zoom 1 to 4 draws 1:1).
 3. Zoom 5 shows the zoom 4 tiles at twice the size, smooth, with no dark fringe at the edge of
-   the neighbor.
+   the neighbor. A neighbor rendered up to zoom 5 shows its zoom 5 tiles 1:1 and crisp instead
+   (see "Max render zoom").
 4. Compare the same spot on all three drivers. A neighbor that looks shifted by one pixel or
    blurred on one driver only means the pixel centre rule in `docs/re-notes/render.md` is wrong
    for that driver. Report the driver, zoom and rotation.
@@ -478,7 +481,7 @@ installed. The checks are the same for both. Tools tab, group "Capture".
 1. Press "Render this city". The progress bar counts tiles. The text shows the rotation, the
    zoom and the tile. "Time left" appears after the first tiles. The view moves over the city.
 2. Log lines:
-   - `Capture: started for city '<key>', 16 levels, N tiles of 512 px, heights A to B m`
+   - `Capture: started for city '<key>', 16 levels up to zoom 4, N tiles of 512 px, heights A to B m`
    - `Capture: rotation R zoom Z: N tiles in a grid of X x Y`, 16 times, rotation 0 to 3 and
      zoom 1 to 4 inside each rotation
    - `Capture: finished (N of N tiles, W written, E empty, T drawn twice, F frames, S s)`.
@@ -656,10 +659,59 @@ Start the game and stay in the region view. Open the panel with Ctrl+Shift+F9.
 
 
 
+## Max render zoom
+
+"Render up to" in the Capture and Batch sections (INI `MaxRenderZoom`, 3, 4 or 5, default 4).
+Changes apply to the next render. Save the settings to keep them.
+
+### A render up to zoom 5
+
+1. Choose "Zoom 5" and press "Render this city" in a large built city. Log:
+   `Capture: started for city '<key>', 20 levels up to zoom 5, ...` and 20 lines
+   `Capture: rotation R zoom Z: ...`, zoom 1 to 5 inside each rotation. The tile count is about 4
+   times that of a render up to zoom 4. Note the time and the city's Size in the Store section,
+   and compare them with a render up to zoom 4 (expect about 4 times both).
+2. The city folder has 20 level folders, `r0z4` to `r3z4` among them. `meta.json` has 20 levels,
+   each with `"magnification": 1.0`.
+3. Open a neighbor of that city at zoom 5. Neighbors section: "Render for this view" says "Yes"
+   for it (not "Zoom 4 at 2x"). The neighbor is crisp, not smooth, and its seam with your city
+   is at most half a pixel off at all four rotations. Turn on "Outline tiles": the frames are
+   512 px apart on screen (zoom 4 tiles at 2x would be 1024 px apart).
+4. A neighbor rendered up to zoom 4 next to it: "Zoom 4 at 2x" at zoom 5, smooth as before.
+5. Pan quickly at zoom 5 around a zoom 5 neighbor. Tile cache: Memory stays under the limit,
+   tiles load without long red frames, the game stays smooth.
+
+### A render up to zoom 3
+
+1. Choose "Zoom 3" and render a neighbor city. Its folder has 12 level folders (`r*z0` to
+   `r*z2`). Older `r*z3` folders of an earlier render: see "Higher levels" below.
+2. Open a city next to it. At zoom 1 to 3 the neighbor is drawn. At zoom 4 and 5 it is not
+   drawn, and the edge wall on its side is back (brown cliff and water wall), so there is no
+   hole. Log: `Camera: edges with a rendered neighbor by zoom 1 to 5 (rotation 0)` shows the bit
+   of that edge at zoom 1 to 3 only (with no other zoom 4 render on that edge).
+3. At zoom 4 and 5 the pointer over that neighbor still shows the tooltip. The tint lies on its
+   ground behind your city and never covers your city, also when the neighbor is in front.
+
+### Higher levels from an earlier render
+
+1. Render a city up to zoom 5. Without a save, choose "Zoom 4" and render it again. The `r*z4`
+   folders stay and `meta.json` still names 20 levels. Neighbors still show its zoom 5 tiles.
+2. Save the city (change something first), then render it again up to zoom 4. Log, 4 times:
+   `Capture: rotation R zoom 5 of the earlier render is out of date and is deleted`. The `r*z4`
+   folders are gone, `meta.json` names 16 levels. At zoom 5 neighbors show its zoom 4 tiles at 2x.
+
+### Batch
+
+1. All cities rendered up to zoom 4. "Render up to" zoom 4: "Render the region" says every city
+   is up to date. Choose "Zoom 5": every city needs a render (the zoom 5 levels are missing).
+2. Choose "Zoom 3" with cities rendered up to zoom 4: every city is up to date.
+3. The choice is off while the region render runs.
+
 ## Region map export
 
 Use the small test region after a batch render (Batch: Start), so every city has zoom 4
-tiles in rotation 1. The log lines start with `Export:`.
+tiles in rotation 1. The log lines start with `Export:`. "Source zoom" stays at "Best for all
+cities" unless a step says otherwise.
 
 ### Make and open the map
 
@@ -671,7 +723,7 @@ tiles in rotation 1. The log lines start with `Export:`.
    it runs (the work is on a low priority thread). Play on or scroll: nothing stops.
 3. Log (the log counts rotations from 0, the panel from 1):
    `Export: started the region map, rotation 0, N cities in the region`,
-   `Export: M cities have a render in rotation 0`,
+   `Export: M cities have a render at zoom 4 in rotation 0, the map will be about N MB`,
    `Export: canvas W x H px, zoom 0 to Z, T tiles to make, cache 32 MB`,
    `Export: full size level done, D city tiles decoded`, then
    `Export: ended after S s. The map is ready: M cities, K tiles, X MB.`
@@ -693,8 +745,8 @@ tiles in rotation 1. The log lines start with `Export:`.
 
 1. Rotation 2 when only rotation 1 is rendered for some cities: only the cities with a render
    in that rotation are on the map, seen from the other side. With no render at all in that
-   rotation the panel says "No city of the region has a render at zoom 4 in this rotation..."
-   and the old map stays.
+   rotation the panel says "No city of the region has a render at zoom 3, 4 or 5 in this
+   rotation..." and the old map stays.
 2. Start an export and click Cancel. The button shows "Stopping...", then the panel says "The
    export is cancelled. The earlier map, if any, did not change." The old `map` folder is
    unchanged and `map.tmp` is gone.
@@ -710,6 +762,23 @@ tiles in rotation 1. The log lines start with `Export:`.
    "The old map cannot be replaced..." and the old map stays.
 8. Without an internet connection the page says "The map cannot load Leaflet. Connect to the
    internet and open this page again."
+
+### Source zoom
+
+1. All cities rendered up to zoom 4: "Best for all cities" makes the map from zoom 4. The panel
+   shows "From the zoom 4 renders. The map will be about N MB." while it runs.
+2. Render one city up to zoom 5 and make the map with "Best for all cities": still zoom 4 (the
+   highest that every city has). Choose "Zoom 5": only that city is on the map. The result
+   names the other cities: "Not on the map (no zoom 5 render): ...".
+3. Render one city up to zoom 3 only (it has no zoom 4): "Best for all cities" makes the map from
+   zoom 3 and every city is on it.
+4. A map from zoom 5 of the whole region: the map has about 4 times the tiles, and its full
+   size level is twice as sharp as a zoom 4 map. When the estimate is above 1 GB the panel shows
+   "This is a large map. Make sure that the disk has room for it." and the log has
+   `Export: the map is large (about N MB)`.
+5. `SC4RegionMap.exe <region> --zoom 5` prints "From the zoom 5 renders. The map will be about N
+   MB." and the same "Not on the map" text at the end. `--zoom 3` uses zoom 3. Without `--zoom`
+   it takes the highest zoom that every city has.
 
 ### Settings
 
