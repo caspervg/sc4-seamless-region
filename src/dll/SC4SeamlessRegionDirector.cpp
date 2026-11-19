@@ -234,6 +234,7 @@ void SC4SeamlessRegionDirector::OnPostCityInit_()
     GameAccess::OnCityInit();
     if (region_) {
         region_->Refresh();
+        RefreshRegionUntilFounded_();
     }
     for (const PanelModule& m : panelModules_) {
         if (m.active) {
@@ -245,8 +246,53 @@ void SC4SeamlessRegionDirector::OnPostCityInit_()
     }
 }
 
+// PostCityInit can come inside LoadCity. Then the regional city of the new city has no save
+// path yet, so the region index names it by its cell ("cell_x_z") and not by its save file.
+// Seen in game on every batch switch. Read the region again on idle ticks until the current
+// city has its save path.
+void SC4SeamlessRegionDirector::RefreshRegionUntilFounded_()
+{
+    constexpr int kEveryTicks = 5;
+    constexpr int kMaxTicks = 600;
+    CancelRegionRefresh_();
+    const CityInfo* current = region_->Current();
+    if (!idle_ || !current || current->founded) {
+        return;
+    }
+    regionRefreshTicks_ = 0;
+    regionRefreshId_ = idle_->AddRecurring([this] {
+        if (!cityOpen_ || !region_) {
+            regionRefreshId_ = 0;
+            return false;
+        }
+        ++regionRefreshTicks_;
+        if (regionRefreshTicks_ % kEveryTicks != 1) {
+            return true;
+        }
+        region_->Refresh();
+        const CityInfo* now = region_->Current();
+        if (!now || now->founded || regionRefreshTicks_ >= kMaxTicks) {
+            if (now && !now->founded) {
+                LOG_WARN("RegionIndex: the current city still has no save file. Renders use the key '{}'.", now->key);
+            }
+            regionRefreshId_ = 0;
+            return false;
+        }
+        return true;
+    });
+}
+
+void SC4SeamlessRegionDirector::CancelRegionRefresh_()
+{
+    if (regionRefreshId_ != 0 && idle_) {
+        idle_->Cancel(regionRefreshId_);
+    }
+    regionRefreshId_ = 0;
+}
+
 void SC4SeamlessRegionDirector::OnPreCityShutdown_()
 {
+    CancelRegionRefresh_();
     for (const PanelModule& m : std::views::reverse(panelModules_)) {
         if (m.active) {
             ModuleCall(m.module->Name(), "OnCityShutdown", [&] {

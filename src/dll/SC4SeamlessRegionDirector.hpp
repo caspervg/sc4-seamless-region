@@ -48,6 +48,8 @@ private:
     void UnregisterMessages_();
     void OnPostCityInit_();
     void OnPreCityShutdown_();
+    void RefreshRegionUntilFounded_();
+    void CancelRegionRefresh_();
 
     Settings settings_;
     ModuleContext ctx_;
@@ -62,4 +64,6 @@ private:
     bool panelRegistered_ = false;
     bool hookingInitialized_ = false;
     bool cityOpen_ = false;
+    uint32_t regionRefreshId_ = 0;
+    int regionRefreshTicks_ = 0;
 };
