@@ -37,6 +37,26 @@ Not started. Considered on 2026-11-19:
   near 0,0 for tippecanoe. PMTiles for one-file hosting. MapLibre GL or Leaflet.VectorGrid.
 - **Unknowns:** culling, the terrain's visible edges, clip planes, scroll limits and the model
   loader margin at 85 degrees and yaw 0. Needs RE and tests.
+- **Closer to 90 degrees:** 85 is likely conservative. The game puts the eye at
+  `8192 / cos(pitch)` along the view, about `8192 * tan(pitch)` high, and sizes the clip planes
+  from it, so depth precision falls apart near 90 (flicker of water, decals, terrain). The view
+  is orthographic, so the eye distance does not change the picture: in the plan view capture,
+  hook `UpdateCameraZoomAndRotationParams` (`0x007cbe40`, already detoured for the clip planes)
+  to keep the eye at a fixed distance (about 10 km) with tight clip planes around the city's
+  heights. 89.5 to 89.9 degrees should then work. True 90 needs another up vector (north).
+- **Height map:** export the terrain heights per city during the batch (16 m grid,
+  `cISTETerrain` altitude per vertex, plus sea level), joined on the region grid. 16-bit, as
+  terrain-RGB or Terrarium PNG tiles or one small raw file per city (a large city is 257 x 257,
+  about 130 KB). Uses: project vector points exactly onto the slanted map and the plan view,
+  hillshade and contour layers, an elevation readout, and a 3D terrain view in MapLibre.
+- **Smooth vector curves:** network cells give a chain of cell centres and the sides each cell
+  connects to. Join the cells of one network type into polylines (walk the connections), then
+  smooth them: Chaikin corner cutting or a Catmull-Rom spline through the cell centres, kept
+  straight on straight runs, with tight turns kept at intersections (cells with three or more
+  connections end a polyline). Diagonal pieces (edge flags on the corners) give 45 degree
+  runs, and FLEX and NAM curve pieces span several cells, so smoothing a chain of centres
+  comes close to the drawn shape. Simplify afterwards (Douglas-Peucker) per zoom level to keep
+  the tiles small.
 
 ## Look of the renders
 
