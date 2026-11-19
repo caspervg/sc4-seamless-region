@@ -84,7 +84,6 @@ All paths are under `src/dll/`.
 | Batch | `batch/RegionBatchRenderer.*` | W3-G |
 | Export | `export/HtmlMapExporter.*` | W3-H |
 | Overlay | `overlay/MapOverlay.*` | W3-I |
-| Transport map | `transportmap/DirtRoadTransportColor.*`, `transportmap/DirtRoadTransportColorTables.h` (NAM DLL code style, to move there), `transportmap/Patching.*` (stand-in for the NAM DLL file). Installed by the capture | later |
 
 The foundation creates every header above with the contract below, and a `.cpp` that
 compiles. Module owners replace the stub bodies. Every module class has the same

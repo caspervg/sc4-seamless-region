@@ -30,15 +30,12 @@
 #include "capture/SnapshotReader.hpp"
 #include "core/GameAddresses.hpp"
 #include "core/Guard.hpp"
-#include "core/Hooking.hpp"
 #include "core/IdleScheduler.hpp"
 #include "core/Messages.hpp"
 #include "imgui.h"
 #include "region/RegionIndex.hpp"
 #include "render/NeighborRenderer.hpp"
 #include "switching/CitySwitcher.hpp"
-#include "transportmap/DirtRoadTransportColor.h"
-#include "transportmap/Patching.h"
 #include "utils/Logger.h"
 #include "utils/Settings.h"
 
@@ -181,31 +178,6 @@ namespace
         return static_cast<uint32_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - since).count());
     }
-
-    // ---- dirt roads (RHW) on the transport map ----
-    // The game's transport map has no entry for dirt road. transportmap/DirtRoadTransportColor
-    // (written in the style of the NAM DLL, to move there later) adds one with its own color. Also
-    // fixes the game's own region transport thumbnails. docs/re-notes/transport-view.md, section 10.
-    void RemoveDirtRoadFix()
-    {
-        Patching::RemoveAll();
-    }
-
-    void InstallDirtRoadFix()
-    {
-        if (!Hooking::IsInitialized()) {
-            return; // Not game version 641: the addresses are not valid.
-        }
-        try {
-            DirtRoadTransportColor::Install();
-            LOG_INFO("Capture: dirt roads (RHW) are drawn on the transport map");
-        }
-        catch (const std::exception& e) {
-            RemoveDirtRoadFix();
-            LOG_WARN("Capture: the transport map code is not as expected (another plugin or the NAM DLL may "
-                     "change it). Dirt roads on the transport map are left to that plugin. {}", e.what());
-        }
-    }
 }
 
 // ---- lifecycle ---------------------------------------------------------------------------------
@@ -221,7 +193,6 @@ bool CityCapturer::Initialize(const ModuleContext& ctx)
         preSaveToken_ = ctx_.messages->Subscribe(Messages::kPreSave, [this](cIGZMessage2*) { OnSaveBegin_(); });
         saveToken_ = ctx_.messages->Subscribe(Messages::kPostSave, [this](cIGZMessage2*) { OnSaved_(); });
     }
-    InstallDirtRoadFix();
     return true;
 }
 
@@ -238,7 +209,6 @@ void CityCapturer::Shutdown()
     saveToken_ = 0;
     preSaveToken_ = 0;
     onFinished_ = nullptr;
-    RemoveDirtRoadFix();
 }
 
 void CityCapturer::OnCityInit() {}
