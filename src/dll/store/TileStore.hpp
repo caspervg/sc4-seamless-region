@@ -4,7 +4,7 @@
 //
 // Layout: <Region>/RegionRenders/<cityKey>/r<rot>z<zoom>/<tx>_<ty>.webp and
 // <Region>/RegionRenders/<cityKey>/meta.json. Fully transparent tiles are not written (and an
-// older file for the same tile is deleted). One encode worker thread, bounded queue. Zoom 5 is
+// older file for the same tile is deleted). Up to 4 encode worker threads, bounded queue. Zoom 5 is
 // never stored.
 //
 // Threads: QueueWrite, WriteMeta, Flush, DeleteCity, SetRegionDirectory and the panel run on the
@@ -180,7 +180,7 @@ private:
 
     bool Enqueue(Job&& job, bool bounded);
     void WorkerMain();
-    void ProcessWrite(Job& job, std::vector<uint8_t>& encoded, std::filesystem::path& lastDir);
+    void ProcessWrite(Job& job, std::vector<uint8_t>& encoded);
     void ProcessDelete(const std::string& cityKey);
     void ProcessDeleteLevel(const TileKey& level);
     void ProcessScan();
@@ -205,10 +205,14 @@ private:
     std::condition_variable idleCv_;
     std::deque<Job> queue_;
     size_t boundedCount_ = 0;
-    bool processing_ = false;
+    int active_ = 0;          // jobs the workers process now
+    bool exclusive_ = false;  // a delete or scan runs: no other job may run beside it
     bool stop_ = false;
     bool running_ = false;
-    std::thread worker_;
+    std::vector<std::thread> workers_;
+    // A write may run beside other writes. A delete or a scan waits until nothing runs and
+    // keeps the others out, so it stays in queue order with the writes around it.
+    [[nodiscard]] bool CanTakeFront_() const;
 
     std::atomic<uint32_t> written_{0}, skipped_{0}, failed_{0}, failedTotal_{0};
     std::atomic<bool> failureLogged_{false};

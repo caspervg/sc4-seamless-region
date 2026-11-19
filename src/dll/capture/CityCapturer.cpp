@@ -22,6 +22,7 @@
 #include "cISC4View3DWin.h"
 #include "cISC4ViewManager.h"
 #include "cISTETerrain.h"
+#include "cISTETerrainView.h"
 #include "capture/CameraAdapter.hpp"
 #include "capture/CaptureAddresses.hpp"
 #include "capture/ModelLoadMonitor.hpp"
@@ -90,7 +91,7 @@ namespace
     constexpr uint32_t kUnknownLoaderLevelWaitMs = 2000;
     constexpr uint32_t kUnknownLoaderTileWaitMs = 100;
     constexpr uint32_t kStoreTimeoutMs = 60000;
-    constexpr uint32_t kStoreRetryMs = 50;
+    constexpr uint32_t kStoreRetryMs = 10;
     constexpr int kMaxLevelRetries = 5;
     constexpr int kMaxShakeTicks = 60;
     constexpr int kRenderOnSaveDelayTicks = 10;
@@ -108,6 +109,13 @@ namespace
         using Fn = cISC4LightingManager*(__thiscall*)(cISC43DRender*);
         const Fn fn = (*reinterpret_cast<Fn* const*>(renderer))[CaptureAddresses::Renderer::kGetLightingManagerSlot];
         return fn(renderer);
+    }
+
+    cISTETerrainView* TerrainView()
+    {
+        cISC4City* city = GameAccess::City();
+        cISTETerrain* terrain = city ? city->GetTerrain() : nullptr;
+        return terrain ? terrain->GetView() : nullptr;
     }
 
     struct Game
@@ -313,7 +321,10 @@ bool CityCapturer::Begin_(const bool testTile, const CaptureRequest& request)
     terrainHigh_ = high;
     // Rows of empty tiles above the city cost as much as full ones: use the real skyline.
     const float tallest = TallestOccupantTop_(citySizeX_, citySizeZ_);
-    if (std::isfinite(tallest) && tallest < high + 5000.0f) {
+    if (std::isinf(tallest) && tallest < 0.0f) {
+        maxHeight_ = high + kMinHeadroomMetres;
+    }
+    else if (std::isfinite(tallest) && tallest < high + 5000.0f) {
         maxHeight_ = std::max(high + kMinHeadroomMetres, tallest + kOccupantTopMarginMetres);
     }
     else {
@@ -484,8 +495,13 @@ float CityCapturer::TallestOccupantTop_(const float citySizeX, const float cityS
             top = std::max(top, high.fY);
         }
     }
-    LOG_INFO("Capture: {} occupants without flora, the tallest reaches {:.0f} m", found.size(), top);
-    return std::isfinite(top) ? top : std::numeric_limits<float>::quiet_NaN();
+    if (std::isfinite(top)) {
+        LOG_INFO("Capture: {} occupants without flora, the tallest reaches {:.0f} m", found.size(), top);
+    }
+    else {
+        LOG_INFO("Capture: no occupants without flora");
+    }
+    return top;  // -infinity: nothing but terrain and trees
 }
 
 bool CityCapturer::Tick_()
@@ -603,6 +619,14 @@ bool CityCapturer::StepPrepare_()
     if (properties) {
         properties->SetBoolValue(CaptureAddresses::Renderer::kRenderSnapshotProperty, true);
         saved_.snapshotPropertySet = true;
+    }
+    if (ctx_.settings && !ctx_.settings->captureWaterGlare) {
+        // Like the thumbnail writer (0x005de085, 0x005de097): the glare is laid out per city.
+        if (cISTETerrainView* terrainView = TerrainView()) {
+            saved_.glareBefore = terrainView->IsWaterGlareEnabled();
+            saved_.glareSaved = true;
+            terrainView->SetWaterGlareStatus(false);
+        }
     }
     if (ctx_.settings && ctx_.settings->captureAtNoon) {
         // Like the thumbnail writer: noon light, so every render looks the same. The clock is
@@ -1258,6 +1282,11 @@ void CityCapturer::Restore_(const bool cityClosing)
     RestoreClearColor_();
     if (saved_.timeOfDaySaved) {
         SetTimeOfDay_(saved_.timeOfDay);
+    }
+    if (saved_.glareSaved) {
+        if (cISTETerrainView* terrainView = TerrainView()) {
+            terrainView->SetWaterGlareStatus(saved_.glareBefore);
+        }
     }
     if (saved_.snapshotPropertySet && game.app) {
         if (cISC4RenderProperties* properties = game.app->GetRenderProperties()) {

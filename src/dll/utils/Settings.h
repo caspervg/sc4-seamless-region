@@ -41,6 +41,9 @@ public:
     bool renderOnSave = false;
     // Render with noon light, whatever the time of day in the game.
     bool captureAtNoon = true;
+    // Keep the sun glare on water in renders. The glare is laid out per city, so it leaves hard
+    // seams between neighbors.
+    bool captureWaterGlare = false;
     // Turn the game's kRenderSnapshot render property on during a render, like its region
     // thumbnail does. It makes water a flat plane. INI only.
     bool captureSnapshotFlag = false;

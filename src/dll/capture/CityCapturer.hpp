@@ -136,6 +136,8 @@ private:
         bool dataViewPushed = false;
         bool snapshotPropertySet = false;
         bool synchronousModels = false;
+        bool glareSaved = false;        // the render turned the water glare off
+        bool glareBefore = true;
         bool timeOfDaySaved = false;    // the render runs at noon
         float timeOfDay = 0.0f;
     };
@@ -148,7 +150,8 @@ private:
     // capture ended.
     bool Tick_();
     bool Step_();
-    // Top of the tallest building, prop or network of the city, or NaN when unknown.
+    // Top of the tallest building, prop or network of the city. -infinity when there is none,
+    // NaN when the game cannot tell.
     [[nodiscard]] static float TallestOccupantTop_(float citySizeX, float citySizeZ);
     bool StepPrepare_();
     bool StepCalibrate_(bool second);

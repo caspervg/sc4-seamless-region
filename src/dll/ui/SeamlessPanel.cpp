@@ -223,6 +223,8 @@ void SeamlessPanel::DrawSettings_()
     HelpMarker("The game saves your city first, if saving is allowed.");
     changed |= ImGui::Checkbox("Render the city after each save", &s->renderOnSave);
     changed |= ImGui::Checkbox("Render at noon", &s->captureAtNoon);
+    changed |= ImGui::Checkbox("Sun glare on water", &s->captureWaterGlare);
+    HelpMarker("The game puts the glare on each city by itself. Neighbors then show hard seams on water.");
     HelpMarker("Render cities with noon light. Then all neighbors look the same, also when you render at night.");
     changed |= ImGui::SliderInt("Scroll past the edge (metres)", &s->zoom45BandMetres, Settings::kMinBandMetres,
                                 Settings::kMaxBandMetres, "%d", ImGuiSliderFlags_AlwaysClamp);

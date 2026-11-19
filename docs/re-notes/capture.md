@@ -45,7 +45,8 @@ What the capture takes over and what not:
 | `kRenderSnapshot` (0x1c) on | **no**, unless `CaptureSnapshotFlag=true` | The first in-game renders with it on showed water as a flat opaque plane, like the region thumbnails. What reads it was not found: no `BoolValue(0x1c)` call pattern (`6A 1C`, then `CALL [reg+0x18]`) in the Windows code |
 | Background picture | `EnableBackgroundPicture(false)` (slot +0xcc, writes renderer +0x4d), restored from +0x4d | The clear color only shows without it |
 | Noon | yes, unless `CaptureAtNoon=false` | Neighbors rendered at different times of day look the same. `cISC43DRender::GetLightingManager` (slot 9, +0x24, called at `0x005ddf82`), then `GetTimeOfDay` (+0x14) and `SetTimeOfDay(12.0)` (+0x18). Put back at the end and around a save inside the render |
-| 0.25 magnification, 4 point antialiasing, water glare off, realistic filter | **no** | The tiles must look like the live view. Magnification is 1.0 |
+| Water glare off | yes, unless `CaptureWaterGlare=true` | The glare is laid out per city and left hard seams on water between neighbors in the first in-game renders. `cISTETerrainView::IsWaterGlareEnabled` (+0x2c) and `SetWaterGlareStatus` (+0x30) on `cISTETerrain::GetView()`, as the writer does at `0x005de085` and `0x005de097` |
+| 0.25 magnification, 4 point antialiasing, realistic filter | **no** | The tiles must look like the live view. Magnification is 1.0 |
 | Messages `0x4AB04CBE`/`0x4AB04CBF` | no | They bracket the writer's change of the view filter. The capture leaves the filter alone |
 | Fog | left as the live view has it | The eye stays on one plane for every view target (`UpdateCameraPositionParams`), so depth and fog are the same for every tile and for the live view |
 

@@ -411,8 +411,13 @@ bool TileStore::Initialize(const ModuleContext& ctx)
         stop_ = false;
         running_ = true;
     }
-    worker_ = std::thread([this] { WorkerMain(); });
-    LOG_INFO("Store: encode worker started, queue of {} tiles", kQueueCapacity);
+    // WebP encoding is the slowest part of a render: one worker per spare core, at most 4.
+    const unsigned cores = std::thread::hardware_concurrency();
+    const int count = std::clamp(static_cast<int>(cores) - 2, 1, 4);
+    for (int i = 0; i < count; ++i) {
+        workers_.emplace_back([this] { WorkerMain(); });
+    }
+    LOG_INFO("Store: {} encode workers started, queue of {} tiles", count, kQueueCapacity);
     return true;
 }
 
@@ -437,9 +442,12 @@ void TileStore::StopWorker()
         stop_ = true;  // the worker still writes what is queued
     }
     workCv_.notify_all();
-    if (worker_.joinable()) {
-        worker_.join();
+    for (std::thread& worker : workers_) {
+        if (worker.joinable()) {
+            worker.join();
+        }
     }
+    workers_.clear();
     {
         std::lock_guard lock(queueMutex_);
         running_ = false;
@@ -728,7 +736,7 @@ void TileStore::Flush()
 {
     {
         std::unique_lock lock(queueMutex_);
-        idleCv_.wait(lock, [this] { return queue_.empty() && !processing_; });
+        idleCv_.wait(lock, [this] { return queue_.empty() && active_ == 0; });
     }
     ReportCounters();
 }
@@ -743,27 +751,33 @@ void TileStore::ReportCounters()
     }
 }
 
+bool TileStore::CanTakeFront_() const
+{
+    return !queue_.empty() && !exclusive_ && (queue_.front().type == Job::Type::Write || active_ == 0);
+}
+
 void TileStore::WorkerMain()
 {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     std::vector<uint8_t> encoded;  // reused for every tile
-    fs::path lastDir;
 
     std::unique_lock lock(queueMutex_);
     for (;;) {
-        workCv_.wait(lock, [this] { return stop_ || !queue_.empty(); });
+        workCv_.wait(lock, [this] { return (stop_ && queue_.empty() && active_ == 0) || CanTakeFront_(); });
         if (queue_.empty()) {
             break;  // stop requested and nothing left
         }
         Job job = std::move(queue_.front());
         queue_.pop_front();
-        processing_ = true;
+        const bool exclusive = job.type != Job::Type::Write;
+        exclusive_ = exclusive;
+        ++active_;
         lock.unlock();
 
         try {
             switch (job.type) {
             case Job::Type::Write:
-                ProcessWrite(job, encoded, lastDir);
+                ProcessWrite(job, encoded);
                 break;
             case Job::Type::DeleteCity:
                 ProcessDelete(job.cityKey);
@@ -789,16 +803,20 @@ void TileStore::WorkerMain()
         if (job.type == Job::Type::Write) {
             --boundedCount_;
         }
-        processing_ = false;
-        if (queue_.empty()) {
+        --active_;
+        if (exclusive) {
+            exclusive_ = false;
+        }
+        // A job behind a delete or scan, or a stop, may wait for this one.
+        workCv_.notify_all();
+        if (queue_.empty() && active_ == 0) {
             idleCv_.notify_all();
         }
     }
-    processing_ = false;
     idleCv_.notify_all();
 }
 
-void TileStore::ProcessWrite(Job& job, std::vector<uint8_t>& encoded, fs::path& lastDir)
+void TileStore::ProcessWrite(Job& job, std::vector<uint8_t>& encoded)
 {
     const fs::path renders = RendersDirectory();
     if (renders.empty()) {
@@ -839,18 +857,14 @@ void TileStore::ProcessWrite(Job& job, std::vector<uint8_t>& encoded, fs::path& 
     const int quality = ctx_.settings ? ctx_.settings->webpQuality : kDefaultQuality;
     bool ok = WebpCodec::Encode(job.rgba.data(), job.w, job.h, quality, encoded);
     if (ok) {
-        const fs::path dir = file.parent_path();
-        if (dir != lastDir) {
-            std::error_code ec;
-            fs::create_directories(dir, ec);
-            lastDir = dir;
-        }
+        // Every time: a delete on another worker may have removed the folder since.
+        std::error_code ec;
+        fs::create_directories(file.parent_path(), ec);
         ok = AtomicWrite(file, encoded.data(), encoded.size());
     }
     if (!ok) {
         ++failed_;
         ++failedTotal_;
-        lastDir.clear();
         if (!failureLogged_.exchange(true)) {
             LOG_WARN("Store: encoding or writing '{}' failed (more failures are only counted)", ToUtf8(file));
         }
