@@ -60,7 +60,7 @@ void CitySwitcher::Shutdown()
     initialized_ = false;
 }
 
-// PostCityInit is posted: this runs after the switch task has ended, never inside it.
+// Normally inside LoadCity (it pumps the queues at its end), sometimes after the switch task.
 void CitySwitcher::OnCityInit() {}
 
 void CitySwitcher::OnCityShutdown()
@@ -87,6 +87,18 @@ std::string CitySwitcher::LastError() const { return lastError_; }
 
 bool CitySwitcher::RequestSwitch(const int cellX, const int cellZ, const bool allowWithoutSave)
 {
+    return Queue_(Kind::Switch, cellX, cellZ, allowWithoutSave);
+}
+
+bool CitySwitcher::RequestOpen(const int cellX, const int cellZ) { return Queue_(Kind::Open, cellX, cellZ, false); }
+
+bool CitySwitcher::RequestRegionView(const bool allowWithoutSave)
+{
+    return Queue_(Kind::RegionView, 0, 0, allowWithoutSave);
+}
+
+bool CitySwitcher::Queue_(const Kind kind, const int cellX, const int cellZ, const bool allowWithoutSave)
+{
     const auto reject = [this](std::string error) {
         LOG_WARN("Switching: request refused: {}", error);
         lastError_ = std::move(error);
@@ -99,30 +111,43 @@ bool CitySwitcher::RequestSwitch(const int cellX, const int cellZ, const bool al
         return reject("A switch is already in progress.");
     }
     const CityInfo* current = ctx_.region->Current();
-    if (!GameAccess::City() || !current) {
+    if (kind == Kind::Open) {
+        if (GameAccess::City()) {
+            return reject("A city is open. Go to the region view first.");
+        }
+    }
+    else if (!GameAccess::City() || !current) {
         return reject("Open a city first.");
     }
-    const CityInfo* target = ctx_.region->FindAtCell(cellX, cellZ);
-    if (!target) {
-        return reject(std::format("There is no city at cell ({}, {}).", cellX, cellZ));
+    const CityInfo* target = nullptr;
+    if (kind != Kind::RegionView) {
+        target = ctx_.region->FindAtCell(cellX, cellZ);
+        if (!target) {
+            return reject(std::format("There is no city at cell ({}, {}).", cellX, cellZ));
+        }
+        if (target == current) {
+            return reject("You already play this city.");
+        }
+        if (kind == Kind::Open && !target->founded) {
+            return reject(std::format("'{}' is not founded. Found it from the region view.", target->name));
+        }
     }
-    if (target == current) {
-        return reject("You already play this city.");
-    }
-    if (!allowWithoutSave && !CanSaveCurrentCity()) {
+    if (kind != Kind::Open && !allowWithoutSave && !CanSaveCurrentCity()) {
         return reject("This city cannot be saved. Confirm to switch without saving.");
     }
 
     busy_ = true;
+    kind_ = kind;
     targetX_ = cellX;
     targetZ_ = cellZ;
-    targetName_ = target->name;
+    targetName_ = target ? target->name : std::string("the region view");
     allowWithoutSave_ = allowWithoutSave;
     lastError_.clear();
     const uint32_t serial = ++serial_;
     ctx_.idle->Post([this, serial] { Run_(serial); });
-    LOG_INFO("Switching: queued the switch from '{}' to '{}' at cell ({}, {}){}", current->name, targetName_, cellX,
-             cellZ, allowWithoutSave ? ", without saving" : "");
+    LOG_INFO("Switching: queued the switch from '{}' to '{}' at cell ({}, {}){}",
+             current ? current->name : std::string("the region view"), targetName_, cellX, cellZ,
+             allowWithoutSave ? ", without saving" : "");
     return true;
 }
 
@@ -152,58 +177,91 @@ void CitySwitcher::Sequence_()
     auto step = start;
 
     cISC4App* app = GameAccess::App();
-    const CityInfo* current = ctx_.region->Current();
-    if (!app || !GameAccess::City() || !current) {
-        Fail_("No city is open. The switch did not start.");
+    if (!app) {
+        Fail_("The game is not ready. The switch did not start.");
         return;
     }
-    const CityInfo* target = ctx_.region->FindAtCell(targetX_, targetZ_);
-    if (!target || target == current) {
-        Fail_(std::format("The city at cell ({}, {}) is not a neighbor anymore.", targetX_, targetZ_));
-        return;
-    }
-    const std::string fromName = current->name;
-    LOG_INFO("Switching: start, from '{}' to '{}' at cell ({}, {})", fromName, targetName_, targetX_, targetZ_);
-
-    // 1. Let queued messages run while the city is still complete, like
-    //    RequestGoToRegionView does before it saves.
-    app->RunMessageServerPump(kPumpMinMessages, kPumpMaxMessages, kPumpMaxMs);
-    app->RunMessageServer2Pump(kPumpMinMessages, kPumpMaxMessages, kPumpMaxMs);
-    LOG_INFO("Switching: step 1, pumped the message queues in {:.0f} ms", MsSince(step));
-
-    // 2. Save. RequestSaveCity shows the game's own message when the save fails.
-    if (GameAccess::CanSaveCity()) {
-        if (!app->RequestSaveCity(false, false)) {
-            Fail_(std::format("Saving '{}' failed. You stay in this city.", fromName));
+    if (kind_ == Kind::Open) {
+        // From the region view: the steps after CloseCity, like
+        // cSC4WinRegionScreen::LaunchRegionalCity (0x007adc20) calls LoadCity with the region
+        // screen up.
+        if (GameAccess::City() || !ctx_.region->FindAtCell(targetX_, targetZ_)) {
+            Fail_(std::format("'{}' cannot be opened from here. The switch did not start.", targetName_));
             return;
         }
-        LOG_INFO("Switching: step 2, saved '{}' in {:.0f} ms", fromName, MsSince(step));
-    }
-    else if (!allowWithoutSave_) {
-        Fail_("This city cannot be saved. Confirm to switch without saving.");
-        return;
+        LOG_INFO("Switching: start, from the region view to '{}' at cell ({}, {})", targetName_, targetX_, targetZ_);
     }
     else {
-        LOG_INFO("Switching: step 2, '{}' cannot be saved, the switch goes on without saving as confirmed",
-                 fromName);
-    }
+        const CityInfo* current = ctx_.region->Current();
+        if (!GameAccess::City() || !current) {
+            Fail_("No city is open. The switch did not start.");
+            return;
+        }
+        if (kind_ == Kind::Switch) {
+            const CityInfo* target = ctx_.region->FindAtCell(targetX_, targetZ_);
+            if (!target || target == current) {
+                Fail_(std::format("The city at cell ({}, {}) is not a neighbor anymore.", targetX_, targetZ_));
+                return;
+            }
+        }
+        const std::string fromName = current->name;
+        LOG_INFO("Switching: start, from '{}' to '{}' at cell ({}, {})", fromName, targetName_, targetX_, targetZ_);
 
-    // 3. cIGZGraphicSystem::Draw twice (vtable +0x44, cGZGraphicSystem::Draw 0x0098e5c0), as
-    //    RequestGoToRegionView does before CloseCity: presents the last frame so the screen
-    //    does not show a half-drawn frame during the blocking close and load.
-    if (cIGZGraphicSystemPtr graphics; graphics) {
-        graphics->Draw();
-        graphics->Draw();
-    }
-    LOG_INFO("Switching: step 3, presented the last frame in {:.0f} ms", MsSince(step));
+        // 1. Let queued messages run while the city is still complete, like
+        //    RequestGoToRegionView does before it saves.
+        app->RunMessageServerPump(kPumpMinMessages, kPumpMaxMessages, kPumpMaxMs);
+        app->RunMessageServer2Pump(kPumpMinMessages, kPumpMaxMessages, kPumpMaxMs);
+        LOG_INFO("Switching: step 1, pumped the message queues in {:.0f} ms", MsSince(step));
 
-    // 4. Close. Sends PreCityShutdown (all modules' OnCityShutdown run in this call) and
-    //    reloads the touching cities, which frees their cISC4RegionalCity holders.
-    const bool closed = app->CloseCity();
-    LOG_INFO("Switching: step 4, CloseCity returned {} in {:.0f} ms", closed, MsSince(step));
-    if (GameAccess::City()) {
-        Fail_(std::format("Closing '{}' failed. You stay in this city.", fromName));
-        return;
+        // 2. Save. RequestSaveCity shows the game's own message when the save fails.
+        if (GameAccess::CanSaveCity()) {
+            if (!app->RequestSaveCity(false, false)) {
+                Fail_(std::format("Saving '{}' failed. You stay in this city.", fromName));
+                return;
+            }
+            LOG_INFO("Switching: step 2, saved '{}' in {:.0f} ms", fromName, MsSince(step));
+        }
+        else if (!allowWithoutSave_) {
+            Fail_("This city cannot be saved. Confirm to switch without saving.");
+            return;
+        }
+        else {
+            LOG_INFO("Switching: step 2, '{}' cannot be saved, the switch goes on without saving as confirmed",
+                     fromName);
+        }
+
+        if (kind_ == Kind::RegionView) {
+            // 3. With false it shows no dialog and does not save: two presents, CloseCity (sends
+            //    PreCityShutdown), then it destroys the city screen and creates the region screen.
+            const bool ok = app->RequestGoToRegionView(false);
+            LOG_INFO("Switching: step 3, RequestGoToRegionView returned {} in {:.0f} ms", ok, MsSince(step));
+            if (GameAccess::City()) {
+                Fail_(std::format("Closing '{}' failed. You stay in this city.", fromName));
+                return;
+            }
+            lastError_.clear();
+            auto total = start;
+            LOG_INFO("Switching: done, the region view is open, {:.0f} ms in total", MsSince(total));
+            return;
+        }
+
+        // 3. cIGZGraphicSystem::Draw twice (vtable +0x44, cGZGraphicSystem::Draw 0x0098e5c0), as
+        //    RequestGoToRegionView does before CloseCity: presents the last frame so the screen
+        //    does not show a half-drawn frame during the blocking close and load.
+        if (cIGZGraphicSystemPtr graphics; graphics) {
+            graphics->Draw();
+            graphics->Draw();
+        }
+        LOG_INFO("Switching: step 3, presented the last frame in {:.0f} ms", MsSince(step));
+
+        // 4. Close. Sends PreCityShutdown (all modules' OnCityShutdown run in this call) and
+        //    reloads the touching cities, which frees their cISC4RegionalCity holders.
+        const bool closed = app->CloseCity();
+        LOG_INFO("Switching: step 4, CloseCity returned {} in {:.0f} ms", closed, MsSince(step));
+        if (GameAccess::City()) {
+            Fail_(std::format("Closing '{}' failed. You stay in this city.", fromName));
+            return;
+        }
     }
 
     // From here on there is no city. Every failure must leave the city screen.
@@ -227,9 +285,9 @@ void CitySwitcher::Sequence_()
         return;
     }
 
-    // 6. Load. Destroys the old city screen and creates the new one. It sends PreCityInit and
-    //    only posts PostCityInit and PostCityInitComplete: the modules' OnCityInit runs on a
-    //    later message pump, after this task.
+    // 6. Load. Destroys the old screen (city or region) and creates the city screen. It sends
+    //    PreCityInit, posts PostCityInit and PostCityInitComplete, then pumps both queues: the
+    //    modules' OnCityInit normally runs inside this call, on a busy queue after this task.
     LOG_INFO("Switching: step 5, loading '{}'", path.ToChar());
     const SC4String savePath(path);
     const bool loaded = app->LoadCity(savePath, holder);
@@ -241,8 +299,7 @@ void CitySwitcher::Sequence_()
 
     lastError_.clear();
     auto total = start;
-    LOG_INFO("Switching: done, '{}' is loaded, {:.0f} ms in total. Its modules start at PostCityInit.", targetName_,
-             MsSince(total));
+    LOG_INFO("Switching: done, '{}' is loaded, {:.0f} ms in total", targetName_, MsSince(total));
 }
 
 void CitySwitcher::GoToRegionView_(std::string error)

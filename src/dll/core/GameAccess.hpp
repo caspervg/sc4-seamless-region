@@ -150,8 +150,9 @@ public:
     // Called once at PostAppShutdown, in reverse creation order. Removes hooks, stops threads.
     virtual void Shutdown() = 0;
     // At kPostCityInit (0x26D31EC1). RegionIndex is already refreshed. The game posts this
-    // message: it arrives on a message pump after LoadCity returned, so after a city switch
-    // (CitySwitcher) has ended. Do not take "the switch is done" as "OnCityInit has run".
+    // message and LoadCity pumps the queues at its end: it normally arrives inside LoadCity (so
+    // inside a city switch), and on a busy queue on a later pump, after the switch. Do not rely
+    // on either order. Do not take "the switch is done" as "OnCityInit has run".
     virtual void OnCityInit() = 0;
     // At kPreCityShutdown (0x26D31EC2), in reverse creation order. The game sends this
     // message: it runs inside CloseCity while the city and its view still exist. It can come
