@@ -300,12 +300,14 @@ namespace CaptureMath
             return false;
         }
         BlockSize(tileSize, viewportW, viewportH, block.w, block.h);
-        const auto waits = [&](const int tx, const int ty) { return pending[static_cast<size_t>(ty) * tilesX + tx] != 0; };
+        // A tile of row ty in the columns [x0, x1) waits.
+        const auto rowWaits = [&](const int ty, const int x0, const int x1) {
+            const auto row = pending.begin() + static_cast<ptrdiff_t>(ty) * tilesX;
+            return std::any_of(row + x0, row + x1, [](const uint8_t p) { return p != 0; });
+        };
 
         int firstRow = 0;
-        while (firstRow < tilesY && std::none_of(pending.begin() + static_cast<ptrdiff_t>(firstRow) * tilesX,
-                                                 pending.begin() + static_cast<ptrdiff_t>(firstRow + 1) * tilesX,
-                                                 [](const uint8_t p) { return p != 0; })) {
+        while (firstRow < tilesY && !rowWaits(firstRow, 0, tilesX)) {
             ++firstRow;
         }
         if (firstRow >= tilesY) {
@@ -315,7 +317,7 @@ namespace CaptureMath
         int left = tilesX;
         for (int ty = firstRow; ty < bandEnd; ++ty) {
             for (int tx = 0; tx < left; ++tx) {
-                if (waits(tx, ty)) {
+                if (pending[static_cast<size_t>(ty) * tilesX + tx] != 0) {
                     left = tx;
                     break;
                 }
@@ -323,16 +325,14 @@ namespace CaptureMath
         }
         const int right = std::min(left + block.w, tilesX);
         int top = firstRow;
-        while (top < bandEnd && std::none_of(pending.begin() + static_cast<ptrdiff_t>(top) * tilesX + left,
-                                             pending.begin() + static_cast<ptrdiff_t>(top) * tilesX + right,
-                                             [](const uint8_t p) { return p != 0; })) {
-            ++top;
+        while (!rowWaits(top, left, right)) {
+            ++top;  // stops inside the band: the leftmost waiting tile is in [left, right)
         }
         block.tx = left;
         block.ty = top;
         for (int ty = top; ty < std::min(top + block.h, tilesY); ++ty) {
             for (int tx = left; tx < right; ++tx) {
-                if (waits(tx, ty)) {
+                if (pending[static_cast<size_t>(ty) * tilesX + tx] != 0) {
                     pending[static_cast<size_t>(ty) * tilesX + tx] = 0;
                     block.tiles[block.count++] = {tx, ty, (tx - left) * tileSize, (ty - top) * tileSize};
                 }
