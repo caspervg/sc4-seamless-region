@@ -123,10 +123,12 @@ bool HtmlMapExporter::Start()
     request.quality = ctx_.settings->mapQuality;
     request.cacheBytes = static_cast<size_t>(ctx_.settings->mapCacheMB) * 1024 * 1024;
     request.upscaleLevels = ctx_.settings->mapUpscaleLevels;
+    request.transport = transport_;
 
     stop_ = MapExport::kRun;
     progress_.phase = static_cast<int>(MapExport::Phase::Reading);
     progress_.zoom = 0;
+    progress_.layer = 0;
     progress_.done = 0;
     progress_.total = 0;
     progress_.sourceZoom = -1;
@@ -183,9 +185,13 @@ void HtmlMapExporter::DrawPanelSection()
         switch (static_cast<MapExport::Phase>(progress_.phase.load())) {
         case MapExport::Phase::Reading: ImGui::TextUnformatted("Reading the city renders..."); break;
         case MapExport::Phase::Base:
-            ImGui::Text("Making the full size level (zoom %d)...", progress_.zoom.load());
+            ImGui::Text("Making the full size level (zoom %d)%s...", progress_.zoom.load(),
+                        progress_.layer.load() == 1 ? " of the transport view" : "");
             break;
-        case MapExport::Phase::Pyramid: ImGui::Text("Making the smaller level %d...", progress_.zoom.load()); break;
+        case MapExport::Phase::Pyramid:
+            ImGui::Text("Making the smaller level %d%s...", progress_.zoom.load(),
+                        progress_.layer.load() == 1 ? " of the transport view" : "");
+            break;
         default: ImGui::TextUnformatted("Writing the page..."); break;
         }
         if (const int zoom = progress_.sourceZoom.load(); zoom >= 0) {
@@ -242,6 +248,16 @@ void HtmlMapExporter::DrawPanelSection()
                                "highest zoom that every rendered city has. A map from zoom 5 has the most detail. It "
                                "is about 4 times the size of a map from zoom 4 and takes about 4 times as long. "
                                "Cities without a render at the zoom are not on the map. The panel names them.");
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+    }
+
+    ImGui::Checkbox("Transport view", &transport_);
+    if (ImGui::BeginItemTooltip()) {
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+        ImGui::TextUnformatted("Also put the transport view on the map, when the cities have it. Turn on \"Transport "
+                               "layer\" before you render the cities to make it. The map then has a switch between "
+                               "the normal view and the transport view.");
         ImGui::PopTextWrapPos();
         ImGui::EndTooltip();
     }

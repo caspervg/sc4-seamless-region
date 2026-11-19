@@ -7,7 +7,8 @@
 // and runs MapExport::Run on a worker thread below the game's priority. The game thread only
 // starts it, reads its progress and cancels it. The run does not depend on the open city, so it
 // goes on across a city switch and only stops at Cancel or at app shutdown. Output in
-// <Region>/RegionRenders/map/ (index.html and tiles/<z>/<x>/<y>.webp).
+// <Region>/RegionRenders/map/ (index.html, tiles/<z>/<x>/<y>.webp and, when the cities have
+// the transport layer, tiles-transport/<z>/<x>/<y>.webp).
 
 #include <atomic>
 #include <chrono>
@@ -58,6 +59,7 @@ private:
     // Panel state, game thread.
     int rotation_ = 0;
     int sourceZoom_ = -1;  // zoom index, -1: the highest that every rendered city has
+    bool transport_ = true;  // the transport view too, when the cities have it
     std::filesystem::path rendersDir_;  // from the store at city load
     std::filesystem::path indexHtml_;   // the map to open, empty when there is none
     std::string message_;

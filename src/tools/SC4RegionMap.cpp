@@ -2,8 +2,10 @@
 // plugin stored. The same export as the "Region map" section of the in-game panel.
 //
 //   SC4RegionMap.exe <region folder> [--rotation 1..4] [--zoom 3..5] [--quality 0..100] [--upscale 0..3]
+//                    [--transport | --no-transport] [--open]
 //
-// Without --zoom the map uses the highest zoom that every rendered city has.
+// Without --zoom the map uses the highest zoom that every rendered city has. The transport view is
+// on the map when the cities have it, unless --no-transport.
 //
 // The region folder is the one with the .sc4 save files, for example
 // "Documents\SimCity 4\Regions\Fairview". The map goes to <region>\RegionRenders\map\index.html.
@@ -115,9 +117,11 @@ namespace
         std::fprintf(stderr,
                      "Makes the browsable map of a region from the renders of SC4 Seamless Region.\n\n"
                      "  SC4RegionMap.exe <region folder> [--rotation 1..4] [--zoom 3..5] [--quality 0..100] "
-                     "[--upscale 0..3] [--open]\n\n"
+                     "[--upscale 0..3] [--transport | --no-transport] [--open]\n\n"
                      "--zoom: the zoom of the city renders that the map uses. Zoom 5 gives the most detail. The\n"
                      "map is then about 4 times the size of zoom 4. Without --zoom: the highest zoom of all cities.\n\n"
+                     "--transport (the default): also put the transport view on the map, when the cities have it.\n"
+                     "--no-transport: only the normal view.\n\n"
                      "Example: SC4RegionMap.exe \"%%USERPROFILE%%\\Documents\\SimCity 4\\Regions\\Fairview\"\n");
         return 2;
     }
@@ -148,6 +152,9 @@ int wmain(const int argc, wchar_t** argv)
         }
         else if (arg == L"--open") {
             open = true;
+        }
+        else if (arg == L"--transport" || arg == L"--no-transport") {
+            request.transport = arg == L"--transport";
         }
         else {
             return Usage();
@@ -197,8 +204,9 @@ int wmain(const int argc, wchar_t** argv)
         }
         const int64_t total = progress.total.load();
         if (total > 0) {
-            std::printf("\r  zoom %d: %lld of %lld tiles   ", progress.zoom.load(),
-                        static_cast<long long>(progress.done.load()), static_cast<long long>(total));
+            std::printf("\r  %s zoom %d: %lld of %lld tiles   ", progress.layer.load() == 1 ? "transport" : "normal",
+                        progress.zoom.load(), static_cast<long long>(progress.done.load()),
+                        static_cast<long long>(total));
             std::fflush(stdout);
         }
     }
