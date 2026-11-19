@@ -41,6 +41,9 @@ public:
     bool renderOnSave = false;
     // Render with noon light, whatever the time of day in the game.
     bool captureAtNoon = true;
+    // Turn the game's kRenderSnapshot render property on during a render, like its region
+    // thumbnail does. It makes water a flat plane. INI only.
+    bool captureSnapshotFlag = false;
     // GPU tile cache limit in megabytes.
     int tileCacheMB = 96;
     // Texture uploads per frame: at most this many tiles...

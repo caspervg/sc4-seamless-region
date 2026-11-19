@@ -516,8 +516,11 @@ bool CityCapturer::StepPrepare_()
         viewManager->PushView(CaptureAddresses::kPlainDataView);
         saved_.dataViewPushed = true;
     }
-    if (cISC4RenderProperties* properties = game.app->GetRenderProperties()) {
-        // The thumbnail writer turns kRenderSnapshot on and puts it back to off.
+    // The thumbnail writer turns kRenderSnapshot on and puts it back to off. It draws water as a
+    // flat opaque plane (seen in the first in-game renders), so it is off unless the INI asks.
+    cISC4RenderProperties* properties =
+        ctx_.settings && ctx_.settings->captureSnapshotFlag ? game.app->GetRenderProperties() : nullptr;
+    if (properties) {
         properties->SetBoolValue(CaptureAddresses::Renderer::kRenderSnapshotProperty, true);
         saved_.snapshotPropertySet = true;
     }

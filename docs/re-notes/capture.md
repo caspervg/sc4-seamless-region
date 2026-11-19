@@ -42,7 +42,7 @@ What the capture takes over and what not:
 | Pause | animation, simulation and clock, **not** draw | The window must repaint between idle ticks |
 | Pump | after Prepare, after every zoom, rotation and view move, at restore | Same as the writer |
 | `PushView(0)` and view level 1 | yes | A data view or an underground view must not be in the tiles |
-| `kRenderSnapshot` (0x1c) on | yes, back to off at the end like the writer | What reads it was not found (low confidence on its effect) |
+| `kRenderSnapshot` (0x1c) on | **no**, unless `CaptureSnapshotFlag=true` | The first in-game renders with it on showed water as a flat opaque plane, like the region thumbnails. What reads it was not found: no `BoolValue(0x1c)` call pattern (`6A 1C`, then `CALL [reg+0x18]`) in the Windows code |
 | Background picture | `EnableBackgroundPicture(false)` (slot +0xcc, writes renderer +0x4d), restored from +0x4d | The clear color only shows without it |
 | Noon | yes, unless `CaptureAtNoon=false` | Neighbors rendered at different times of day look the same. `cISC43DRender::GetLightingManager` (slot 9, +0x24, called at `0x005ddf82`), then `GetTimeOfDay` (+0x14) and `SetTimeOfDay(12.0)` (+0x18). Put back at the end and around a save inside the render |
 | 0.25 magnification, 4 point antialiasing, water glare off, realistic filter | **no** | The tiles must look like the live view. Magnification is 1.0 |
