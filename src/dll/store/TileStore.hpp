@@ -5,7 +5,7 @@
 // Layout: <Region>/RegionRenders/<cityKey>/r<rot>z<zoom>/<tx>_<ty>.webp and
 // <Region>/RegionRenders/<cityKey>/meta.json. Fully transparent tiles are not written (and an
 // older file for the same tile is deleted). Up to 4 encode worker threads, bounded queue. Zoom 5 is
-// never stored.
+// stored only when the player renders up to zoom 5 (Settings::maxRenderZoom).
 //
 // Threads: QueueWrite, WriteMeta, Flush, DeleteCity, SetRegionDirectory and the panel run on the
 // game thread (capture side). HasTile, ReadTile and TilePath are safe from any thread, for
@@ -34,7 +34,7 @@ struct TileKey
 {
     std::string cityKey;  // CityInfo::key
     int rotation = 0;     // 0..3
-    int zoom = 0;         // zoom index 0..3
+    int zoom = 0;         // zoom index 0..4
     int tx = 0;           // ViewMath::TileGrid tile column
     int ty = 0;           // tile row
 };
@@ -51,6 +51,10 @@ struct CityRenderMeta
         int rotation = 0, zoom = 0;
         float originX = 0.0f, originY = 0.0f;
         int tilesX = 0, tilesY = 0;
+        // The camera magnification of the render. 1 for every render now. A level rendered at
+        // less than 1 has fewer pixels and is drawn larger (CityMeta::LevelScale). Metas written
+        // before the field existed read as 1.
+        float magnification = 1.0f;
     };
     std::vector<Level> levels;
     // Both are Windows FILETIME ticks (100 ns since 1601), see TileStore::FileTime. saveFileTime
@@ -79,6 +83,27 @@ namespace CityMeta
     [[nodiscard]] std::vector<CityRenderMeta::Level> MergeLevels(const std::vector<CityRenderMeta::Level>& earlier,
                                                                  const std::vector<CityRenderMeta::Level>& rendered,
                                                                  const std::vector<CityRenderMeta::Level>& dropped);
+
+    // Screen pixels per stored pixel when `level` is drawn at view zoom viewZoom (zoom index):
+    // cellPixels(viewZoom) / (cellPixels(level.zoom) * level.magnification). 0 when the level
+    // cannot stand in for that zoom: the pitch differs (only zoom 4 and 5 share one), or the zoom
+    // or magnification is not valid.
+    [[nodiscard]] double LevelScale(const CityRenderMeta::Level& level, int viewZoom);
+    // The level of one rotation to draw at viewZoom. Of the levels with tiles and a scale of at
+    // least 1, the one with the smallest scale: the most detail, never shrunk. So zoom 5 takes
+    // its own level, else zoom 4 at twice the size. nullptr when no level fits.
+    [[nodiscard]] const CityRenderMeta::Level* ChooseLevel(const std::vector<CityRenderMeta::Level>& levels,
+                                                           int rotation, int viewZoom);
+    // Every rotation has every zoom index from 0 to maxZoom.
+    [[nodiscard]] bool HasLevelsUpTo(const CityRenderMeta& meta, int maxZoom);
+    // The batch rule: a city needs a render when its render is stale (IsStale) or a level up to
+    // maxZoom (zoom index) is missing.
+    [[nodiscard]] bool NeedsRender(const std::optional<CityRenderMeta>& meta, int64_t saveFileTime, int maxZoom);
+    // The levels above maxZoom (zoom index) of an earlier render that a new render up to maxZoom
+    // must delete: all of them when the city was saved after that render (its saveFileTime
+    // differs from saveFileTime), else none. They stay while they still show the city as it is.
+    [[nodiscard]] std::vector<CityRenderMeta::Level> HigherLevelsToDrop(const CityRenderMeta& earlier, int maxZoom,
+                                                                        int64_t saveFileTime);
 }
 
 class TileStore final : public Module
@@ -110,6 +135,9 @@ public:
     [[nodiscard]] std::optional<CityRenderMeta> LoadMeta(const std::string& cityKey) const;
     // True when the city has no render or its save file differs from the rendered one.
     [[nodiscard]] bool IsStale(const CityInfo& city) const;
+    // CityMeta::NeedsRender for the city's save file: stale, or a level up to maxZoom (zoom
+    // index) is missing.
+    [[nodiscard]] bool NeedsRender(const CityInfo& city, int maxZoom) const;
     // Cached directory index, no disk hit and no allocation per call once a city is indexed.
     // The first call for a city that the background scan has not reached yet scans that city.
     [[nodiscard]] bool HasTile(const TileKey& key) const;

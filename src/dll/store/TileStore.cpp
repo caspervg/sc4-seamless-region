@@ -14,6 +14,7 @@
 #include "store/WebpCodec.hpp"
 #include "utils/Logger.h"
 #include "utils/Settings.h"
+#include "view/ViewMath.hpp"
 
 namespace fs = std::filesystem;
 
@@ -182,7 +183,8 @@ namespace CityMeta
                               {"originX", l.originX},
                               {"originY", l.originY},
                               {"tilesX", l.tilesX},
-                              {"tilesY", l.tilesY}});
+                              {"tilesY", l.tilesY},
+                              {"magnification", l.magnification}});
         }
         json j = {{"formatVersion", kFormatVersion},
                         {"cellX", meta.cellX},
@@ -279,7 +281,11 @@ namespace CityMeta
                 !Int(entry, "tilesX", l.tilesX) || !Int(entry, "tilesY", l.tilesY)) {
                 return fail("a level is incomplete");
             }
-            if (l.rotation < 0 || l.rotation > 3 || l.zoom < 0 || l.zoom > 4 || l.tilesX < 0 || l.tilesY < 0) {
+            if (entry.contains("magnification") && !Float(entry, "magnification", l.magnification)) {
+                return fail("a level is incomplete");
+            }
+            if (l.rotation < 0 || l.rotation > 3 || l.zoom < 0 || l.zoom > 4 || l.tilesX < 0 || l.tilesY < 0 ||
+                !std::isfinite(l.magnification) || l.magnification <= 0.0f) {
                 return fail("a level is out of range");
             }
             m.levels.push_back(l);
@@ -311,6 +317,69 @@ namespace CityMeta
             }
         }
         return merged;
+    }
+
+    double LevelScale(const CityRenderMeta::Level& level, const int viewZoom)
+    {
+        if (!ViewMath::IsValidZoom(level.zoom) || !ViewMath::IsValidZoom(viewZoom) ||
+            !std::isfinite(level.magnification) || level.magnification <= 0.0f ||
+            ViewMath::Zoom(level.zoom).pitchDeg != ViewMath::Zoom(viewZoom).pitchDeg) {
+            return 0.0;
+        }
+        return static_cast<double>(ViewMath::Zoom(viewZoom).cellPixels) /
+               (static_cast<double>(ViewMath::Zoom(level.zoom).cellPixels) * level.magnification);
+    }
+
+    const CityRenderMeta::Level* ChooseLevel(const std::vector<CityRenderMeta::Level>& levels, const int rotation,
+                                             const int viewZoom)
+    {
+        // Shrinking has no mipmaps and would flicker, so a scale below 1 never stands in.
+        constexpr double kMinScale = 1.0 - 1e-6;
+        const CityRenderMeta::Level* best = nullptr;
+        double bestScale = 0.0;
+        for (const CityRenderMeta::Level& level : levels) {
+            if (level.rotation != rotation || level.tilesX <= 0 || level.tilesY <= 0) {
+                continue;
+            }
+            const double scale = LevelScale(level, viewZoom);
+            if (scale >= kMinScale && (!best || scale < bestScale)) {
+                best = &level;
+                bestScale = scale;
+            }
+        }
+        return best;
+    }
+
+    bool HasLevelsUpTo(const CityRenderMeta& meta, const int maxZoom)
+    {
+        for (int r = 0; r < ViewMath::kRotationCount; ++r) {
+            for (int z = 0; z <= maxZoom; ++z) {
+                if (std::ranges::none_of(
+                        meta.levels, [&](const CityRenderMeta::Level& l) { return l.rotation == r && l.zoom == z; })) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    bool NeedsRender(const std::optional<CityRenderMeta>& meta, const int64_t saveFileTime, const int maxZoom)
+    {
+        return IsStale(meta, saveFileTime) || !HasLevelsUpTo(*meta, maxZoom);
+    }
+
+    std::vector<CityRenderMeta::Level> HigherLevelsToDrop(const CityRenderMeta& earlier, const int maxZoom,
+                                                          const int64_t saveFileTime)
+    {
+        std::vector<CityRenderMeta::Level> drop;
+        if (earlier.saveFileTime != saveFileTime) {
+            for (const CityRenderMeta::Level& level : earlier.levels) {
+                if (level.zoom > maxZoom) {
+                    drop.push_back(level);
+                }
+            }
+        }
+        return drop;
     }
 }
 
@@ -543,6 +612,11 @@ std::optional<CityRenderMeta> TileStore::LoadMeta(const std::string& cityKey) co
 bool TileStore::IsStale(const CityInfo& city) const
 {
     return CityMeta::IsStale(LoadMeta(city.key), city.savePath.empty() ? 0 : FileTime(city.savePath));
+}
+
+bool TileStore::NeedsRender(const CityInfo& city, const int maxZoom) const
+{
+    return CityMeta::NeedsRender(LoadMeta(city.key), city.savePath.empty() ? 0 : FileTime(city.savePath), maxZoom);
 }
 
 bool TileStore::WriteMeta(const std::string& cityKey, const CityRenderMeta& meta)
