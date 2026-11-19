@@ -372,10 +372,55 @@ resumes after a restart. Cancel at any point. Ends in the city it started from.
 
 ### export/HtmlMapExporter
 
-Builds a browsable map of the whole region from the zoom 4 rotation 0 tiles: a tile
-pyramid (downscaled levels on the encode worker) and a single `index.html` using a pinned
-Leaflet from cdnjs with `L.CRS.Simple`, city name labels and click to zoom. Output in
-`<Region>/RegionRenders/map/`. Runs in the background with progress.
+```cpp
+class HtmlMapExporter {
+public:
+    bool Start();           // false when an export, a city render or a region render runs
+    void Cancel();
+    bool IsRunning() const;
+    float Progress() const; // 0..1
+};
+namespace MapExport {       // export/MapExport.hpp, no game calls, tested end to end
+Result Run(const Request& request, Progress& progress, const std::atomic<int>& stop);
+std::string BuildPage(const Page& page);
+}
+```
+
+Builds one browsable map of the whole region from the zoom 4 tiles of one rotation (0 to 3,
+chosen in the panel). Output in `<Region>/RegionRenders/map/`: `index.html` and
+`tiles/<z>/<x>/<y>.webp`.
+
+- **Source.** Every founded city whose `meta.json` has a zoom 4 level for the rotation. Cities
+  without one stay empty. The optional meta field `groundHeight` (the middle of the terrain
+  height range, written by the capture) places the city outline. Older metas use 250 m.
+- **Canvas** (`export/MapMath.hpp`, pure). The first rendered city is the reference. Every
+  city's tile (0,0) goes through `NeighborMath::PlaceLevel` relative to the reference base
+  corner, so the map shows the region exactly as the game draws the neighbors around the
+  reference city. Unit tested against the neighbor renderer's math.
+- **Base level.** 256 px output tiles (Leaflet zoom `maxZoom`, the canvas at 1:1). Each tile
+  composites the overlapping city tiles back to front between cities
+  (`NeighborMath::SortBackToFront` around the reference) with alpha, premultiplied. Fully
+  transparent tiles are not written. Decoded city tiles go through a `TileLru` (MapCacheMB).
+  Tiles are made row by row in strips 8 tiles wide, so a city tile is decoded about 1.2 times.
+- **Pyramid.** Each lower zoom halves the zoom above it (2x2 box filter on premultiplied
+  alpha), read back from the tiles just written, down to zoom 0 (one tile). Lossy WebP with
+  alpha through `WebpCodec` at MapQuality.
+- **Memory.** Everything the export holds stays under 64 MB (`MapExport::kMemoryCapBytes`):
+  the cache, a few MB of buffers and two bytes per output tile for the tile flags.
+- **Page.** One file. Leaflet 1.9.4 from cdnjs with SRI, `L.CRS.Simple`, `maxNativeZoom` =
+  `maxZoom`, MapUpscaleLevels zoom levels above it, `maxBounds` around the canvas. City outlines
+  are invisible polygons with a hover highlight, a name tooltip and click to zoom. The data is
+  an inline JSON block, so the page works from `file://`. It needs the internet for Leaflet.
+- **Threading.** `Start` snapshots the renders folder, region name, cities and settings on the
+  game thread and starts one worker thread below normal priority. The game thread only reads
+  progress (atomics) and cancels. The export does not read the city, so it goes on across a
+  city switch. It stops at Cancel and at app shutdown (joined in `Shutdown`).
+- **Output swap.** Everything is written to `map.tmp`. At the end `map` becomes `map.old`,
+  `map.tmp` becomes `map`, `map.old` is deleted. A cancel or a failure deletes `map.tmp` and
+  leaves the old map. At app shutdown `map.tmp` stays and the next export deletes it.
+- **Refused** while a city render or a region render runs (the panel says why). A render that
+  is started during an export can replace tiles the export reads: the map then mixes the old
+  and the new render of that city. Nothing breaks.
 
 ### overlay/MapOverlay
 
@@ -417,7 +462,7 @@ yet.** `docs/testing.md` starts with the order for the first run.
 | Tile cache, Neighbors | Complete, math unit tested | Tiles must be a power of two. Each tile costs twice its size (see gaps). No neighbors at a custom magnification. Seam of at most half a pixel. Zoom 5 shows zoom 4 tiles at 2x |
 | Interaction | Complete, math unit tested | The pick is on the ground at the edge height: the top of a tall neighbor building can pick the city behind it. Tint limits in `re-notes/interaction.md` |
 | Batch | Complete, queue unit tested | Saves every city it leaves. A load that ends in the region view interrupts the run until a city is opened |
-| Export | **Not built.** Stub, never active | Deferred |
+| Export | Complete, math, page and end to end export unit tested. Not run in the game yet | Needs the internet for Leaflet. Outlines of cities rendered before `groundHeight` existed use 250 m. One worker thread: about 10 ms per output tile, mostly WebP encode |
 | Overlay | Complete, math unit tested | No mipmaps (grainy at zoom 1). 64 MB texture limit. The two-point pick also sends the click to the game |
 
 What the review changed is in the git log of `feat/review` (one commit per defect).

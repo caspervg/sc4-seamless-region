@@ -237,6 +237,17 @@ void SeamlessPanel::DrawSettings_()
                                 Settings::kMaxWebpQuality, "%d", ImGuiSliderFlags_AlwaysClamp);
     HelpMarker("Quality of new renders. Higher quality uses more disk space.");
 
+    ImGui::SeparatorText("Region map");
+    changed |= ImGui::SliderInt("Map picture quality", &s->mapQuality, Settings::kMinWebpQuality,
+                                Settings::kMaxWebpQuality, "%d", ImGuiSliderFlags_AlwaysClamp);
+    HelpMarker("Quality of the region map. Higher quality uses more disk space.");
+    changed |= ImGui::SliderInt("Map memory (MB)", &s->mapCacheMB, Settings::kMinMapCacheMB, Settings::kMaxMapCacheMB,
+                                "%d", ImGuiSliderFlags_AlwaysClamp);
+    HelpMarker("Memory for city pictures while the map is made. More memory makes the map a little faster.");
+    changed |= ImGui::SliderInt("Extra zoom levels", &s->mapUpscaleLevels, Settings::kMinMapUpscale,
+                                Settings::kMaxMapUpscale, "%d", ImGuiSliderFlags_AlwaysClamp);
+    HelpMarker("Zoom in this many steps past full size in the map. The browser shows the pictures larger.");
+
     ImGui::SeparatorText("General");
     changed |= ImGui::Checkbox("Enabled", &s->enabled);
     HelpMarker("Turns the whole plugin on or off. Save and start the game again to apply.");

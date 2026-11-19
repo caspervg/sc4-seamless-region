@@ -57,6 +57,9 @@ struct CityRenderMeta
     // is the last write time of the save file when rendered.
     int64_t saveFileTime = 0;
     int64_t renderTime = 0;
+    // Typical ground height of the city in metres, for outlines on the region map. Optional:
+    // metas written before it was added have none.
+    std::optional<float> groundHeight;
 };
 
 // meta.json text, pure and unit tested.
@@ -149,6 +152,10 @@ public:
     [[nodiscard]] static int64_t NowFileTime();
     // Encode jobs that failed since Initialize.
     [[nodiscard]] uint32_t FailedWrites() const { return failedTotal_.load(); }
+    // The folder of a city and the file of a tile under a renders folder. Pure, any thread.
+    [[nodiscard]] static std::filesystem::path CityDirectory(const std::filesystem::path& renders,
+                                                             const std::string& cityKey);
+    [[nodiscard]] static std::filesystem::path TilePathIn(const std::filesystem::path& renders, const TileKey& key);
 
 private:
     struct Job
@@ -169,8 +176,6 @@ private:
 
     static uint64_t PackKey(const TileKey& key, bool& valid);
     static bool SafeName(std::string_view name);
-    static std::filesystem::path CityDirectory(const std::filesystem::path& renders, const std::string& cityKey);
-    static std::filesystem::path TilePathIn(const std::filesystem::path& renders, const TileKey& key);
     static CityIndex ScanCity(const std::filesystem::path& cityDir);
 
     bool Enqueue(Job&& job, bool bounded);

@@ -1,0 +1,212 @@
+#pragma once
+
+// Export: the pure math of the region map. No game calls, header only, unit tested in
+// tests/ExportTests.cpp.
+//
+// The map canvas is one pixel plane for the whole region at zoom 4 and one rotation. Every
+// city is placed on it the way the neighbor renderer places a neighbor around a reference
+// city (NeighborMath::PlaceLevel), so the map shows the region as the game shows it from that
+// city. Output tiles are kTileSize pixels, Leaflet zoom maxZoom is the canvas at 1:1 and each
+// lower zoom halves it.
+
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <vector>
+
+#include "region/RegionLayout.hpp"
+#include "render/NeighborMath.hpp"
+#include "view/ViewMath.hpp"
+
+namespace MapMath
+{
+    inline constexpr int kTileSize = 256;  // Leaflet default
+    inline constexpr int kZoomIndex = 3;   // zoom 4, the largest stored zoom
+    // Ground height for outlines when meta.json has none: the sea level of a new region.
+    inline constexpr float kDefaultGroundHeight = 250.0f;
+
+    // Canvas position of the top-left corner of a city's tile (0,0), relative to the reference
+    // city's base corner, in whole pixels. levelOrigin is the level's originX/originY from
+    // meta.json. Same rounding as a neighbor drawn around the reference city.
+    struct Point
+    {
+        int x = 0, y = 0;
+    };
+
+    [[nodiscard]] inline Point PlaceCity(const ViewMath::OrthoProjection& projection, const CityInfo& reference,
+                                         const CityInfo& city, const float levelOriginX, const float levelOriginY)
+    {
+        const cS3DVector2 neighbor = projection.WorldToCanvas(RegionLayout::OriginOffset(reference, city));
+        const cS3DVector2 base = projection.WorldToCanvas(
+            ViewMath::BaseCorner(projection.rotation, static_cast<float>(reference.sizeX) * ViewMath::kRegionUnitMetres,
+                                 static_cast<float>(reference.sizeZ) * ViewMath::kRegionUnitMetres));
+        const NeighborMath::LevelPlacement p = NeighborMath::PlaceLevel(
+            neighbor.fX, neighbor.fY, levelOriginX, levelOriginY, 1, 1.0, base.fX, base.fY, 0.0, 0.0);
+        return {static_cast<int>(p.originX), static_cast<int>(p.originY)};
+    }
+
+    // The ground outline of a city on the map: its four corners at groundHeight, in map pixels.
+    // place is where the city's tile (0,0) is on the map.
+    [[nodiscard]] inline std::array<cS3DVector2, 4> Outline(const ViewMath::OrthoProjection& projection,
+                                                            const CityInfo& city, const float levelOriginX,
+                                                            const float levelOriginY, const Point place,
+                                                            const float groundHeight)
+    {
+        const float sx = static_cast<float>(city.sizeX) * ViewMath::kRegionUnitMetres;
+        const float sz = static_cast<float>(city.sizeZ) * ViewMath::kRegionUnitMetres;
+        const cS3DVector3 corners[4] = {
+            {0.0f, groundHeight, 0.0f}, {sx, groundHeight, 0.0f}, {sx, groundHeight, sz}, {0.0f, groundHeight, sz}};
+        std::array<cS3DVector2, 4> out;
+        for (int i = 0; i < 4; ++i) {
+            const cS3DVector2 c = projection.WorldToCanvas(corners[i]);
+            out[i] = {static_cast<float>(place.x + (static_cast<double>(c.fX) - levelOriginX)),
+                      static_cast<float>(place.y + (static_cast<double>(c.fY) - levelOriginY))};
+        }
+        return out;
+    }
+
+    // One city level on the canvas: tile (0,0) at (x, y), tilesX by tilesY tiles of tileSize.
+    struct Source
+    {
+        int x = 0, y = 0;
+        int tilesX = 0, tilesY = 0;
+        int tileSize = 512;
+    };
+
+    [[nodiscard]] inline int FloorDiv(const int a, const int b) { return a >= 0 ? a / b : -((-a + b - 1) / b); }
+
+    // The source tiles that overlap the canvas square [x, x + size) x [y, y + size), clamped to
+    // the grid. tx1 and ty1 are exclusive. False when none overlaps.
+    inline bool SourceRange(const Source& s, const int x, const int y, const int size, int& tx0, int& ty0, int& tx1,
+                            int& ty1)
+    {
+        tx0 = std::max(0, FloorDiv(x - s.x, s.tileSize));
+        ty0 = std::max(0, FloorDiv(y - s.y, s.tileSize));
+        tx1 = std::min(s.tilesX, FloorDiv(x + size - 1 - s.x, s.tileSize) + 1);
+        ty1 = std::min(s.tilesY, FloorDiv(y + size - 1 - s.y, s.tileSize) + 1);
+        return tx0 < tx1 && ty0 < ty1;
+    }
+
+    // The Leaflet zoom of the canvas at 1:1: the smallest z where the canvas fits in 2^z by 2^z
+    // tiles. Zoom 0 is then one tile for the whole region.
+    [[nodiscard]] inline int MaxZoom(const int width, const int height)
+    {
+        const int tiles = std::max(1, (std::max(width, height) + kTileSize - 1) / kTileSize);
+        int zoom = 0;
+        while ((1 << zoom) < tiles) {
+            ++zoom;
+        }
+        return zoom;
+    }
+
+    // Tiles along one side of the canvas at a zoom.
+    [[nodiscard]] inline int TilesAt(const int canvasSize, const int maxZoom, const int zoom)
+    {
+        const int64_t span = static_cast<int64_t>(kTileSize) << (maxZoom - zoom);
+        return static_cast<int>((canvasSize + span - 1) / span);
+    }
+
+    // ---- pixels ------------------------------------------------------------------------------
+    // Buffers are RGBA, 4 bytes per pixel, top row first. "Premultiplied" means the colors are
+    // multiplied by alpha / 255.
+
+    [[nodiscard]] inline uint8_t Mul255(const unsigned a, const unsigned b)
+    {
+        const unsigned t = a * b + 128;
+        return static_cast<uint8_t>((t + (t >> 8)) >> 8);
+    }
+
+    inline void Premultiply(uint8_t* rgba, const size_t pixels)
+    {
+        for (size_t i = 0; i < pixels; ++i, rgba += 4) {
+            const unsigned a = rgba[3];
+            if (a != 255) {
+                rgba[0] = Mul255(rgba[0], a);
+                rgba[1] = Mul255(rgba[1], a);
+                rgba[2] = Mul255(rgba[2], a);
+            }
+        }
+    }
+
+    inline void Unpremultiply(uint8_t* rgba, const size_t pixels)
+    {
+        for (size_t i = 0; i < pixels; ++i, rgba += 4) {
+            const unsigned a = rgba[3];
+            if (a == 0) {
+                rgba[0] = rgba[1] = rgba[2] = 0;
+            }
+            else if (a != 255) {
+                for (int c = 0; c < 3; ++c) {
+                    rgba[c] = static_cast<uint8_t>(std::min(255u, (rgba[c] * 255u + a / 2) / a));
+                }
+            }
+        }
+    }
+
+    [[nodiscard]] inline bool IsTransparent(const uint8_t* rgba, const size_t pixels)
+    {
+        for (size_t i = 0; i < pixels; ++i) {
+            if (rgba[i * 4 + 3] != 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Draws a straight-alpha source over a premultiplied square of size by size pixels. The
+    // source's top-left lands at (dx, dy) in dst, parts outside dst are cut off.
+    inline void BlendOver(uint8_t* dst, const int size, const uint8_t* src, const int srcW, const int srcH,
+                          const int dx, const int dy)
+    {
+        const int x0 = std::max(0, dx), y0 = std::max(0, dy);
+        const int x1 = std::min(size, dx + srcW), y1 = std::min(size, dy + srcH);
+        for (int y = y0; y < y1; ++y) {
+            const uint8_t* s = src + (static_cast<size_t>(y - dy) * srcW + (x0 - dx)) * 4;
+            uint8_t* d = dst + (static_cast<size_t>(y) * size + x0) * 4;
+            for (int x = x0; x < x1; ++x, s += 4, d += 4) {
+                const unsigned a = s[3];
+                if (a == 0) {
+                    continue;
+                }
+                if (a == 255) {
+                    d[0] = s[0];
+                    d[1] = s[1];
+                    d[2] = s[2];
+                    d[3] = 255;
+                    continue;
+                }
+                const unsigned keep = 255 - a;
+                d[0] = static_cast<uint8_t>(Mul255(s[0], a) + Mul255(d[0], keep));
+                d[1] = static_cast<uint8_t>(Mul255(s[1], a) + Mul255(d[1], keep));
+                d[2] = static_cast<uint8_t>(Mul255(s[2], a) + Mul255(d[2], keep));
+                d[3] = static_cast<uint8_t>(a + Mul255(d[3], keep));
+            }
+        }
+    }
+
+    // Halves four premultiplied size by size children into one size by size tile with a 2x2
+    // box filter. children: top-left, top-right, bottom-left, bottom-right. nullptr is a
+    // transparent child. size must be even.
+    inline void Downscale2x(const std::array<const uint8_t*, 4>& children, const int size, uint8_t* out)
+    {
+        const int half = size / 2;
+        for (int q = 0; q < 4; ++q) {
+            const uint8_t* child = children[q];
+            const int ox = (q & 1) * half, oy = (q >> 1) * half;
+            for (int y = 0; y < half; ++y) {
+                uint8_t* d = out + (static_cast<size_t>(oy + y) * size + ox) * 4;
+                if (!child) {
+                    std::fill(d, d + static_cast<size_t>(half) * 4, uint8_t{0});
+                    continue;
+                }
+                const uint8_t* r0 = child + static_cast<size_t>(2 * y) * size * 4;
+                const uint8_t* r1 = r0 + static_cast<size_t>(size) * 4;
+                for (int x = 0; x < half; ++x, d += 4, r0 += 8, r1 += 8) {
+                    for (int c = 0; c < 4; ++c) {
+                        d[c] = static_cast<uint8_t>((r0[c] + r0[c + 4] + r1[c] + r1[c + 4] + 2) / 4);
+                    }
+                }
+            }
+        }
+    }
+}

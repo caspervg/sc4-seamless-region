@@ -14,6 +14,7 @@ set(SC4SR_TEST_SOURCES
     "${SC4SR_DLL_DIR}/utils/Logger.cpp"
     "${SC4SR_DLL_DIR}/switching/NeighborDirection.cpp"
     "${SC4SR_DLL_DIR}/camera/CameraBounds.cpp"
+    "${SC4SR_DLL_DIR}/export/MapExport.cpp"
 )
 
 add_executable(SC4SeamlessRegionTests

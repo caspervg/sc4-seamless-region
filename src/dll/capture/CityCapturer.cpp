@@ -954,6 +954,7 @@ bool CityCapturer::WriteMeta_(const bool final)
     meta.sizeX = sizeX_;
     meta.sizeZ = sizeZ_;
     meta.tileSize = tileSize_;
+    meta.groundHeight = 0.5f * (minHeight_ + maxHeight_ - kBuildingHeadroomMetres);  // terrain middle
     const std::optional<CityRenderMeta> earlier = ctx_.tileStore->LoadMeta(cityKey_);
     const bool usable = earlier && earlier->tileSize == meta.tileSize && earlier->formatVersion == meta.formatVersion;
 

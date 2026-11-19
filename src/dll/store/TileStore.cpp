@@ -6,6 +6,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <nlohmann/json.hpp>
@@ -183,7 +184,7 @@ namespace CityMeta
                               {"tilesX", l.tilesX},
                               {"tilesY", l.tilesY}});
         }
-        const json j = {{"formatVersion", kFormatVersion},
+        json j = {{"formatVersion", kFormatVersion},
                         {"cellX", meta.cellX},
                         {"cellZ", meta.cellZ},
                         {"sizeX", meta.sizeX},
@@ -192,6 +193,9 @@ namespace CityMeta
                         {"saveFileTime", meta.saveFileTime},
                         {"renderTime", meta.renderTime},
                         {"levels", levels}};
+        if (meta.groundHeight) {
+            j["groundHeight"] = *meta.groundHeight;
+        }
         return j.dump(2);
     }
 
@@ -260,6 +264,9 @@ namespace CityMeta
         }
         if (m.sizeX < 1 || m.sizeZ < 1 || m.tileSize < 1) {
             return fail("a size is not positive");
+        }
+        if (float ground = 0.0f; Float(j, "groundHeight", ground) && std::isfinite(ground)) {
+            m.groundHeight = ground;
         }
         const auto levels = j.find("levels");
         if (levels == j.end() || !levels->is_array()) {

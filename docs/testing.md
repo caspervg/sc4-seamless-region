@@ -41,7 +41,7 @@ Stop at the first step that fails and send the log. A later step needs the steps
 
 | # | Test | What it proves | Details |
 |---|---|---|---|
-| 1 | Start the game. Read the log up to `Registered the Seamless Region panel` | Version check, services, hooks, 11 of 12 modules active (Export is not built yet) | Foundation: Start |
+| 1 | Start the game. Read the log up to `Registered the Seamless Region panel` | Version check, services, hooks, 12 of 12 modules active | Foundation: Start |
 | 2 | Open a city. The panel shows. Ctrl+Shift+F9 hides and shows it. Status tab lists the region | Posted city messages reach the modules, region index | Foundation: Panel, Region list |
 | 3 | Diagnostics tab: every difference is green at each zoom and rotation | The plugin's camera math is the game's. Everything else builds on it | Foundation: Camera cross-check |
 | 4 | Tools, Camera: tick "Free roam", scroll far past the edge, untick it | The camera hooks and offsets are right. This is the first code that writes into the game | Camera: Free roam, Scroll bounds |
@@ -54,7 +54,8 @@ Stop at the first step that fails and send the log. A later step needs the steps
 | 11 | Tools, Overlay: choose an image, move it, save and reload the city | WIC decode, world draw layer, terrain mesh | Map overlay |
 | 12 | Save the city (Ctrl+S) while step 7 runs and look at the region view afterwards | The region picture has no magenta, no neighbors, no tint and its walls | Capture: Cancel, close and failure |
 | 13 | Repeat steps 6 to 9 on SCD3D11 | Readback format and pixel centres of that driver | Capture, Neighbor rendering |
-| 14 | Quit from inside a city | Hooks removed, threads stopped | Foundation: Shutdown |
+| 14 | Tools, Export: "Make the region map" after step 10, then "Open map" | Region canvas, compositing, pyramid, page | Region map export |
+| 15 | Quit from inside a city | Hooks removed, threads stopped | Foundation: Shutdown |
 
 What to send back when something is wrong: the log file, the step number, the graphics driver,
 the window size, and a screenshot. For a crash also the zoom and rotation.
@@ -72,8 +73,8 @@ SC4RenderServices.
    - `Seamless Region <version> starting, game version 641`
    - `Acquired the ImGui service`, `... draw service`, `... world draw service`, `... camera service`
    - `Hooking: initialized`
-   - one line per module: `<Name>: initialized`, and `Export: not active` (not built yet)
-   - `11 of 12 modules are active`
+   - one line per module: `<Name>: initialized`
+   - `12 of 12 modules are active`
    - `Registered the Seamless Region panel`
 3. On another game version: `Game version N is not supported (only 641). Seamless Region installs nothing and stays off.` and nothing else.
 
@@ -85,7 +86,7 @@ SC4RenderServices.
    bring it back. With StartWindowVisible=false it starts hidden and the keys show it.
 3. Status in the region view: "Open a city to see the region."
 4. Tools: one section per module. A module that could not start shows "This part is not
-   active." (Export always does).
+   active."
 
 ### Region list
 
@@ -620,6 +621,74 @@ the batch saves every city. The log lines start with `Batch:` in the plugin log.
   closed ...`. The offer comes at the next city load.
 
 
+
+## Region map export
+
+Use the small test region after a batch render (Batch: Start), so every city has zoom 4
+tiles in rotation 1. The log lines start with `Export:`.
+
+### Make and open the map
+
+1. Open a city. Tools, Export: a short text, the Rotation box (1 to 4) and the button
+   "Make the region map". When the region has an older map, "Open map" shows too.
+2. Click "Make the region map". The panel shows the phase ("Reading the city renders",
+   "Making the full size level (zoom N)", "Making the smaller level N", "Writing the page"), a
+   bar with "X of Y tiles" and, after some seconds, the time left. The game stays smooth while
+   it runs (the work is on a low priority thread). Play on or scroll: nothing stops.
+3. Log (the log counts rotations from 0, the panel from 1):
+   `Export: started the region map, rotation 0, N cities in the region`,
+   `Export: M cities have a render in rotation 0`,
+   `Export: canvas W x H px, zoom 0 to Z, T tiles to make, cache 32 MB`,
+   `Export: full size level done, D city tiles decoded`, then
+   `Export: ended after S s. The map is ready: M cities, K tiles, X MB.`
+4. The panel says "The map is ready: ..." and shows "Open map". Click it. The browser opens
+   `<Region>\RegionRenders\map\index.html` from disk.
+5. In the browser: a dark page, the region name and the date at the top, the whole region in
+   the middle. Each city is where the game shows it as a neighbor: compare with the view from
+   the first city of the region (the reference, the first rendered city in the Status list).
+   Cities without a render are empty. Tall buildings of a city in front cover the city behind
+   it, as in the game.
+6. Zoom in with the wheel to full size and one more step (enlarged). The map does not drift
+   far past the region when you drag it. Put the pointer on a city: a yellow outline on its
+   ground edge and a tooltip with its name. Click it: the map zooms to the city.
+7. "Made with SC4 Seamless Region" is in the lower right corner.
+8. Files: `map\index.html` and `map\tiles\<z>\<x>\<y>.webp`. No `map.tmp` and no
+   `map.old` folder stays. Empty areas have no tile files.
+
+### Rotation, cancel and refusal
+
+1. Rotation 2 when only rotation 1 is rendered for some cities: only the cities with a render
+   in that rotation are on the map, seen from the other side. With no render at all in that
+   rotation the panel says "No city of the region has a render at zoom 4 in this rotation..."
+   and the old map stays.
+2. Start an export and click Cancel. The button shows "Stopping...", then the panel says "The
+   export is cancelled. The earlier map, if any, did not change." The old `map` folder is
+   unchanged and `map.tmp` is gone.
+3. While "Render this city" or a region render runs, the button is off and the panel says "A
+   city render runs. Make the map when it ends." (or "A region render runs...").
+4. Start an export and switch to a neighbor city (click it). The export goes on and ends
+   normally in the new city.
+5. Start an export and quit the game. The game exits without a long wait. Log:
+   `Export: the map worker stopped`. A `map.tmp` folder can stay. The next export deletes it.
+6. Region folder with non-ASCII letters: the export and "Open map" work.
+7. Keep `index.html` open in the browser and export again: the new map replaces the old one.
+   When Windows refuses (a file of the map folder is open in another program), the panel says
+   "The old map cannot be replaced..." and the old map stays.
+8. Without an internet connection the page says "The map cannot load Leaflet. Connect to the
+   internet and open this page again."
+
+### Settings
+
+Settings tab, "Region map": "Map picture quality" (MapQuality, default 75), "Map memory (MB)"
+(MapCacheMB, 8 to 48, default 32) and "Extra zoom levels" (MapUpscaleLevels, 0 to 3, default
+1). They apply to the next export. A lower quality gives smaller files. With 0 extra zoom
+levels the browser stops at full size.
+
+### Without the game
+
+`SC4SeamlessRegionTests MapExportEndToEnd` writes synthetic city tiles and metas into a
+temporary folder and runs the whole export. Set `SC4SR_KEEP_EXPORT_TEST=1` to keep the folder
+(`%TEMP%\sc4sr_export_test_...`) and open its `RegionRenders\map\index.html`.
 
 ## Map overlay
 
