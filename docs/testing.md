@@ -726,7 +726,7 @@ temporary folder and runs the whole export. Set `SC4SR_KEEP_EXPORT_TEST=1` to ke
 
 ### Outside the game
 
-`SC4RegionMap.exe` (in `cmake-build-release-visual-studio\src	ools\Release`) makes the same
+`SC4RegionMap.exe` (in `cmake-build-release-visual-studio\src\tools\Release`) makes the same
 map without the game:
 
 ```
