@@ -58,6 +58,9 @@ private:
         bool stale = false;
         int64_t renderTime = 0;
         uint8_t frontMask = 0; // bit r: drawn in front of the current city at rotation r
+        // Bit rotation * ViewMath::kZoomCount + zoom index: the render module draws the neighbor in
+        // that view (CityMeta::ChooseLevel). With max render zoom 3 no bit is set at zoom 4 and 5.
+        uint32_t drawnViews = 0;
     };
 
     struct Press

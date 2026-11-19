@@ -134,7 +134,8 @@ namespace NeighborMath
     // neighborCanvas: WorldToCanvas(origin offset of the neighbor) in the current canvas.
     // levelOrigin: canvas origin of tile (0,0) from meta.json, in the neighbor's own canvas
     //   at the level's zoom.
-    // scale: current pixels per level pixel (1, or 2 when zoom 5 shows zoom 4 tiles).
+    // scale: current pixels per level pixel (CityMeta::LevelScale times the view's magnification:
+    //   1 for the level of the view's zoom, 2 when zoom 5 shows zoom 4 tiles).
     // baseCanvas: WorldToCanvas(base corner of the current city).
     // baseScreen: baseCanvas + canvasToScreen. The game snaps it to a whole pixel.
     //

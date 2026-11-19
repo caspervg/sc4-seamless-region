@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <format>
+#include <optional>
+#include <string>
 
 #include "cISC43DRender.h"
 #include "camera/CameraAddresses.hpp"
@@ -42,8 +45,11 @@ namespace
     Hooking::Detour<TerrainDrawFn> sDrawWaterBox;
 
     CameraExtender* sInstance = nullptr;
-    // Bit i hides the terrain view's edge i. Read by the two draw hooks.
-    uint32_t sHiddenGameEdges = 0;
+    constexpr int kViews = 4 * ViewMath::kZoomCount;
+    // Per view (rotation * kZoomCount + zoom index), bit i hides the terrain view's edge i. Read
+    // by the two draw hooks.
+    std::array<uint32_t, kViews> sHiddenGameEdges{};
+    bool sAnyHidden = false;
     // Per edge, a copy of the water wall vertices with no height, so nothing is drawn.
     float sFlatWaterEdge[4][CA::kMaxEdgeVertices * 2 * (CA::kWaterBoxVertexSize / sizeof(float))];
 
@@ -58,11 +64,19 @@ namespace
     // the border masks it saves into the city file must keep their walls.
     uint32_t HiddenEdgesForThisDraw()
     {
-        if (sHiddenGameEdges == 0) {
+        if (!sAnyHidden) {
             return 0;
         }
         const void* camera = GameAccess::CameraControl();
-        return camera && ReadField<float>(camera, CC::kMagnification) == 1.0f ? sHiddenGameEdges : 0;
+        if (!camera || ReadField<float>(camera, CC::kMagnification) != 1.0f) {
+            return 0;
+        }
+        const int zoom = ReadField<int32_t>(camera, CC::kZoom, -1);
+        const int rotation = ReadField<int32_t>(camera, CC::kRotation, -1);
+        if (!ViewMath::IsValidZoom(zoom) || !ViewMath::IsValidRotation(rotation)) {
+            return 0;
+        }
+        return sHiddenGameEdges[rotation * ViewMath::kZoomCount + zoom];
     }
 
     void __fastcall UpdateScrollBoundsHook(void* camera, void* edx)
@@ -143,6 +157,16 @@ namespace
         sDrawSideCliffs.Remove();
         sZoomParams.Remove();
         sUpdateScrollBounds.Remove();
+    }
+
+    // "0xF 0xF 0xF 0x0 0x0": the masks of rotation 0 for zoom 1 to 5, for the log.
+    std::string ZoomMasksText(const std::array<uint32_t, kViews>& masks)
+    {
+        std::string text;
+        for (int z = 0; z < ViewMath::kZoomCount; ++z) {
+            text += std::format("{}0x{:X}", z == 0 ? "" : " ", masks[z]);
+        }
+        return text;
     }
 
     void RectCorners(const CameraBounds::RectXZ& rect, cS3DVector2* out)
@@ -233,10 +257,11 @@ void CameraExtender::OnCityShutdown()
     clampFlagSaved_ = false;
     panelFreeRoam_ = false;
     panelClearColor_ = false;
-    autoWalls_ = 0;
+    autoWalls_.fill(0);
     forcedWalls_ = 0;
-    effectiveWalls_ = 0;
-    sHiddenGameEdges = 0;
+    effectiveWalls_.fill(0);
+    sHiddenGameEdges.fill(0);
+    sAnyHidden = false;
     boundsMode_ = BoundsMode::Game;
     customClip_ = false;
 }
@@ -520,27 +545,55 @@ uint32_t CameraExtender::SetEdgeWallsHidden(const uint32_t edgeMask)
 
 void CameraExtender::UpdateWallMask_()
 {
-    const uint32_t chosen = panelWallsAuto_ ? (PolicyOn_() ? autoWalls_ : 0u) : panelWalls_;
-    const uint32_t mask = cityOpen_ ? (chosen | forcedWalls_) & CameraBounds::kAllEdges : 0u;
-    if (mask == effectiveWalls_) {
+    std::array<uint32_t, kViews> masks{};
+    for (int v = 0; v < kViews; ++v) {
+        const uint32_t chosen = panelWallsAuto_ ? (PolicyOn_() ? autoWalls_[v] : 0u) : panelWalls_;
+        masks[v] = cityOpen_ ? (chosen | forcedWalls_) & CameraBounds::kAllEdges : 0u;
+    }
+    if (masks == effectiveWalls_) {
         return;
     }
-    effectiveWalls_ = mask;
-    sHiddenGameEdges = CameraBounds::ToGameEdgeMask(mask);
-    LOG_INFO("Camera: hidden edge walls 0x{:X} (1 west x=0, 2 east, 4 north z=0, 8 south)", mask);
+    effectiveWalls_ = masks;
+    sAnyHidden = false;
+    for (int v = 0; v < kViews; ++v) {
+        sHiddenGameEdges[v] = CameraBounds::ToGameEdgeMask(masks[v]);
+        sAnyHidden |= masks[v] != 0;
+    }
+    if (std::ranges::all_of(masks, [&](const uint32_t m) { return m == masks[0]; })) {
+        LOG_INFO("Camera: hidden edge walls 0x{:X} (1 west x=0, 2 east, 4 north z=0, 8 south)", masks[0]);
+    }
+    else {
+        LOG_INFO("Camera: hidden edge walls by zoom 1 to 5 (rotation 0) {} (1 west x=0, 2 east, 4 north z=0, 8 south)",
+                 ZoomMasksText(masks));
+    }
     ForceRedraw_();
+}
+
+uint32_t CameraExtender::CurrentWalls_() const
+{
+    const int zoom = GameAccess::Zoom();
+    const int rotation = GameAccess::Rotation();
+    if (!ViewMath::IsValidZoom(zoom) || !ViewMath::IsValidRotation(rotation)) {
+        return 0;
+    }
+    return effectiveWalls_[rotation * ViewMath::kZoomCount + zoom];
 }
 
 void CameraExtender::RefreshNeighborWalls()
 {
-    autoWalls_ = 0;
+    autoWalls_.fill(0);
     const CityInfo* current = ctx_.region->Current();
     if (cityOpen_ && current && ctx_.tileStore) {
-        autoWalls_ = CameraBounds::NeighborEdgeMask(ctx_.region->Cities(), *current, [this](const CityInfo& city) {
-            return ctx_.tileStore->LoadMeta(city.key).has_value();
-        });
+        for (int v = 0; v < kViews; ++v) {
+            const int rotation = v / ViewMath::kZoomCount;
+            const int zoom = v % ViewMath::kZoomCount;
+            autoWalls_[v] = CameraBounds::NeighborEdgeMask(ctx_.region->Cities(), *current, [&](const CityInfo& city) {
+                const std::optional<CityRenderMeta> meta = ctx_.tileStore->LoadMeta(city.key);
+                return meta && CityMeta::ChooseLevel(meta->levels, rotation, zoom) != nullptr;
+            });
+        }
     }
-    LOG_INFO("Camera: edges with a rendered neighbor 0x{:X}", autoWalls_);
+    LOG_INFO("Camera: edges with a rendered neighbor by zoom 1 to 5 (rotation 0) {}", ZoomMasksText(autoWalls_));
     UpdateWallMask_();
 }
 
@@ -646,9 +699,9 @@ void CameraExtender::DrawPanelSection()
     if (ImGui::Checkbox("Automatic", &panelWallsAuto_)) {
         UpdateWallMask_();
     }
-    ImGui::SetItemTooltip("Hides the wall of an edge when the neighbor across it has a render.");
+    ImGui::SetItemTooltip("Hides the wall of an edge when the neighbor across it is drawn at this zoom.");
     ImGui::BeginDisabled(panelWallsAuto_);
-    uint32_t shown = panelWallsAuto_ ? effectiveWalls_ : panelWalls_;
+    uint32_t shown = panelWallsAuto_ ? CurrentWalls_() : panelWalls_;
     bool changed = ImGui::CheckboxFlags("Hide west (x = 0)", &shown, CameraBounds::kEdgeXMin);
     ImGui::SameLine();
     changed |= ImGui::CheckboxFlags("Hide east (x = max)", &shown, CameraBounds::kEdgeXMax);
