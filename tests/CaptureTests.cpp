@@ -384,3 +384,23 @@ TEST_CASE(CaptureLevelOrderPerMaxZoom)
     CHECK(CaptureMath::LevelOrder(9, {1}).size() == 5);
     CHECK(CaptureMath::LevelOrder(0, {1}).size() == 1);
 }
+
+TEST_CASE(CaptureTransportTypeFlagsPutDirtRoadOnAVisibleColor)
+{
+    constexpr uint32_t kDirtRoad = 1u << 11;
+    // Game colors: highway 0xFE9F3E41 is visible, dirt road goes with highway.
+    const auto game = CaptureMath::TransportTypeFlags(0xFE9F3E41u, 0xFFA5A2A0u);
+    CHECK(game[2] == (0x4u | kDirtRoad));
+    CHECK(game[0] == 0x1u);
+    CHECK(game[11] == kDirtRoad);
+    CHECK(game[12] == 0x1000u);
+    // NAM colors: highway 0 (not drawn), dirt road goes with road.
+    const auto nam = CaptureMath::TransportTypeFlags(0u, 0xFFA5A2A0u);
+    CHECK(nam[2] == 0x4u);
+    CHECK(nam[0] == (0x1u | kDirtRoad));
+    // Both hidden: no change at all.
+    const auto none = CaptureMath::TransportTypeFlags(0x00FFFFFFu, 0u);
+    for (uint32_t type = 0; type < none.size(); ++type) {
+        CHECK(none[type] == (1u << type));
+    }
+}
