@@ -53,8 +53,11 @@ The game is a 32-bit process with a 2 to 4 GB address space and a single game th
 - **Bounded memory.** The GPU tile cache has a hard cap from settings (default 96 MB). The
   decode queue and the encode queue are bounded. Back-pressure, never unbounded growth.
 - **Bounded main-thread work.** Texture uploads per frame have a budget (default 4 tiles
-  or 3 ms, whichever comes first). Capture readback is one tile per frame at most when the
-  game runs interactively.
+  or 3 ms, whichever comes first). Capture readback is one block per frame at most: one
+  draw and one read of the block of tiles that fits in the game window. Cutting the tiles
+  out and handing them to the store can spread over the next ticks when the store queue is
+  full. The capture runs with the game paused behind its progress, and the window still
+  repaints between ticks.
 - **Worker threads.** One decode worker and one encode worker. Lower priority than the
   game thread. They stop cleanly at shutdown and at city shutdown.
 - **No blocking the game thread** on IO, decode or encode. The exception is the batch
@@ -285,6 +288,17 @@ public:
 Writes through `TileStore`. Restores the game state (zoom, rotation, camera target,
 magnification, lighting, view filters, background, pause state) whether it succeeds, fails
 or is cancelled.
+
+One frame gives a block of tiles: as many whole 512 px tiles as the game window holds, at
+least 1 x 1 and at most 4 x 4 (`CaptureMath::NextTileBlock`, unit tested). Per block: one view
+move that puts the top left of the block on a whole screen pixel in the middle of the window
+(`CaptureMath::TargetForCanvasAt`), one model wait, one draw and one read of the whole block.
+The second pass over the other key color runs only when a tile of the block shows the first
+key color, and only those tiles are composed. Tiles that do not touch the city outline are
+never planned, so a block at the city edge can be part empty. A window smaller than a tile
+gives blocks of one tile, read in parts. When the window size changes during a block, the
+block is planned again for the new size. Progress, the time left and the store keep counting
+tiles. Details: `docs/re-notes/capture.md`, Blocks.
 
 ### store/TileStore and store/WebpCodec
 

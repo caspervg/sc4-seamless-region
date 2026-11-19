@@ -128,10 +128,10 @@ How it works:
 
 So the capture sets +0xc0 (`ModelLoadMonitor::SetSynchronous`), waits for +0xa4 == 0 after a
 zoom or rotation change (60 s timeout, then a warning), and checks +0xa4 again before every
-tile (5 s timeout, 250 ms after the first one). The game clears +0xc0 itself at the end of a
+block (5 s timeout, 250 ms after the first one). The game clears +0xc0 itself at the end of a
 save. Then the next view move loads in the background and the capture waits for +0xa4.
 When the model maker is not the expected object the capture waits a fixed time instead (2 s
-per level, 100 ms per tile).
+per level, 100 ms per block).
 
 ## Renderer
 
@@ -156,14 +156,16 @@ buffer changes the color, and a city pixel can have the key color. The capture:
    reads the block. Those two colors, as the screen gives them back, are the keys. The block
    must have one color and the keys must differ by at least 128 on one channel, else the
    capture stops with a clear error.
-2. Draws every tile over key A. No pixel with key A: the tile is opaque, done. All pixels key
-   A: the tile is empty, left out. Else it draws the tile again over key B.
+2. Draws every block over key A. Per tile of the block: no pixel with key A, the tile is
+   opaque. All pixels key A, the tile is empty and left out. When at least one tile of the
+   block is in between, it draws the block again over key B and reads it again.
 3. `CaptureMath::ComposeTwoPasses`: a pixel that is the same in both passes is opaque (also
    when it has the key color). A pixel that follows the clear color is transparent. In between,
    alpha = 1 - (b - a) / (keyB - keyA) on the channel with the most contrast, and the color is
    taken back out of the blend. Differences below 6 percent count as opaque.
 
-Only tiles on the edge of the city pay for the second draw.
+Only blocks with a tile on the edge of the city pay for the second draw, and only their edge
+tiles pay for the compose. The opaque tiles of such a block are taken from the first pass.
 
 **Tiles.** `ViewMath::TileGrid::ForCity` with tile size 512 (`CityRenderMeta::tileSize`),
 heights from `cISTETerrain::MinHeight()` to `max(MaxHeight(), GetSeaLevel()) + 600 m`. 600 m is
@@ -176,6 +178,35 @@ of the pixel grid on a chosen screen pixel. It aims at the middle of the pixel t
 to. After the move the capture reads the camera (`CameraReader`) and uses the place the game
 really gave. It stops when the tile is not inside the viewport and warns once when the view is
 more than 0.05 px off the grid. It waits up to 60 ticks for a screen shake to end.
+
+**Blocks.** One drawn frame gives every tile that fits in the game window, not one tile.
+`CaptureMath::NextTileBlock` takes `viewportW / 512` by `viewportH / 512` tiles (at least 1,
+at most 4 per side) from the tiles of the level that touch the outline and wait for their
+render. The block starts at the first row with a waiting tile, at the leftmost waiting tile
+of the rows it covers. The read area is always the full block, also when only some of its
+tiles touch the city: the driver then reuses its read buffer of the same size (a reused DX7
+buffer of another size grows the rectangle, so `SnapshotReader` only reuses an equal size).
+Per block: one view move that puts the top left of the block on a whole screen pixel, in the
+middle of the window, one model wait, one draw and one read of the whole block per pass. The
+tiles are then cut out of the block buffer and handed to the store one by one. A window
+smaller than one tile gives blocks of one tile read in parts, as before.
+
+No margin at the window edge. The read comes right after `cISC43DRender::Draw`, before the
+game draws its UI and presents, so no UI is in the back buffer there. `ForceFullRedraw`
+makes the draw clear and fill the whole viewport. The calibration already reads the top left
+corner (0, 0), and a window smaller than a tile was always read to its edges. Models: the
+load rectangle of the model maker is the visible ground area plus a margin in cells
+(`UpdateModelLoadRect` `0x0048f660`: a per-zoom margin at model maker +0x78, or with the
+background loader `0x0048ca40`: at least a per-zoom table at loader +0x164, more with more
+system memory). So the models at the window edge are
+loaded like in the live view. Confidence: medium (the margin values were not read).
+
+At 1920 x 1080 a block is 3 x 2 tiles, at 1280 x 720 2 x 1. The edge of the city leaves some
+blocks part empty, so the frames per level drop by a bit less than the block size.
+
+When the window size changes during a block, the tiles of the block go back to the waiting
+tiles and the next block is planned for the new size. Nothing of the block is handed to the
+store before both passes are read, so no tile is lost or written twice.
 
 **Older tiles and meta.json.** The tile grid of a level starts at the projected city bounds,
 which move with the lowest and highest terrain. And a tile that held a building can be empty in
@@ -207,7 +238,10 @@ only puts back what outlives the city view: the camera module's state (walls, fr
 color), the neighbor drawing, the render property, the model loading flag and the pause. It
 does not move the camera or change the view level of a city that shuts down.
 
-**Buffers.** Two tile buffers and one read buffer are allocated at Start and freed at the end.
+**Buffers.** Two block buffers (one per pass, up to 16 MB each at 4 x 4 tiles, 6 MB at
+1920 x 1080), one tile buffer for the second pass of the compose and one read buffer for
+windows smaller than a block. They grow on the first block and when the window grows, and
+are freed at the end.
 `TileStore::QueueWrite` keeps the buffer it gets, so each written tile costs one allocation and
 one copy of 1 MB. The store does not hand buffers back, so there is no pool. Empty tiles cost
 nothing.
