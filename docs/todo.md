@@ -54,6 +54,18 @@ The RE is done: `docs/re-notes/seasons.md`. Build it:
 3. Night-lit and time-of-day props at noon through the same `SetState` path.
 4. A month and day picker in the capture and batch panels.
 
+## Render after a save
+
+`RenderOnSave` exists (Settings tab, off by default): a Ctrl+S or menu save renders the whole
+city a few ticks later. Saves that leave the city (switch, region view, quit) do not.
+
+1. **Render only what changed.** Collect the changed areas between saves (terrain message
+   `0x278E6003` with its cell rectangle, occupant insert and remove, network changes) and
+   render only the tiles over those areas, at every zoom and rotation. Fall back to a full
+   render when too much changed or the list was lost.
+2. **Ignore saves from other plugins** (autosave or quick-save DLLs), if the user has one.
+   Needs RE of how such a save is called compared with Ctrl+S.
+
 ## Speed
 
 1. Batch overhead: about 5 s of each city's 9 s is the switch and settle time. Look at what
