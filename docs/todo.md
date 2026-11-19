@@ -66,6 +66,29 @@ city a few ticks later. Saves that leave the city (switch, region view, quit) do
 2. **Ignore saves from other plugins** (autosave or quick-save DLLs), if the user has one.
    Needs RE of how such a save is called compared with Ctrl+S.
 
+## Transport layer
+
+The RE is done: `docs/re-notes/transport-view.md`. The region view's transport picture is the
+game's data view `0xF3` pushed on the normal view (`PushView(0xF3)` ... `PopView(0xF3)`), same
+camera, so the tiles line up. To build:
+
+1. `CaptureTransportLayer` option, off by default.
+2. Per level, after the normal blocks: push `0xF3`, pump, check the view manager's current view
+   (+0x9cc == `0x4A0B68F3`), draw the non-empty tiles again (no model wait), pop, pump. One
+   push and pop per level: a switch walks every occupant.
+3. Tiles in `t<rot>z<zoom>/`, transport levels in `meta.json`. The store scan and the neighbor
+   renderer must ignore them.
+4. Pop at pre-save and at city shutdown, push again after the save.
+5. A second base layer on the Leaflet map. In game later, if wanted.
+
+Limits: RHW (dirt road), pipes, power lines and subway are not drawn, the same as in the game.
+
+## Fancier region map page
+
+Fit the region to the window on open, city name labels when zoomed in, a small overview map,
+full screen, the position in the link, a city search, a layer switch for rotations and the
+transport layer, clearer hover and click. Leaflet plus at most one or two small pinned plugins.
+
 ## Reduced detail zoom 4
 
 Render the zoom 4 level with the camera's custom magnification below 1.0 (0.5 or 0.25, as the
