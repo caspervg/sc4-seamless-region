@@ -427,8 +427,17 @@ std::string BuildPage(const Page& page);
 ```
 
 Builds one browsable map of the whole region from the tiles of one source zoom (3, 4 or 5) and
-one rotation (0 to 3), both chosen in the panel (`--zoom` and `--rotation` in `SC4RegionMap.exe`). Output in `<Region>/RegionRenders/map/`: `index.html` and
-`tiles/<z>/<x>/<y>.webp`.
+one rotation (0 to 3), both chosen in the panel (`--zoom` and `--rotation` in `SC4RegionMap.exe`).
+One rotation per export. Output in `<Region>/RegionRenders/map/`: `index.html`,
+`tiles/<z>/<x>/<y>.webp` and, when cities have transport levels at the source zoom and rotation,
+`tiles-transport/<z>/<x>/<y>.webp`.
+
+- **Transport layer.** `Request::transport` (the "Transport view" check box, on by default,
+  `--transport`/`--no-transport` in the tool). A transport level counts only on the grid of the
+  normal level it belongs to. The second pyramid uses the same canvas, placement, order and
+  compositing as the first. Cities without transport tiles are empty in it. The tile flags are
+  made again per layer, so memory stays the same. `Result::transportCities` tells how many
+  cities it has.
 
 - **Source.** `Request::sourceZoom`, by default (-1) `MapMath::ChooseSourceZoom`: the highest
   zoom from 3 to 5 that every city with a render in the rotation has, else the one most cities
@@ -453,10 +462,19 @@ one rotation (0 to 3), both chosen in the panel (`--zoom` and `--rotation` in `S
   tiles, under 1 MB of flags, so the cap holds. Disk and time grow 4 times. The export estimates
   the size from the city tile files (4/3 of their bytes) once it has read the cities, shows it in
   the panel and the tool, and warns above 1 GB (`kLargeMapBytes`).
-- **Page.** One file. Leaflet 1.9.4 from cdnjs with SRI, `L.CRS.Simple`, `maxNativeZoom` =
-  `maxZoom`, MapUpscaleLevels zoom levels above it, `maxBounds` around the canvas. City outlines
-  are invisible polygons with a hover highlight, a name tooltip and click to zoom. The data is
-  an inline JSON block, so the page works from `file://`. It needs the internet for Leaflet.
+- **Page.** One file. Leaflet 1.9.4 from cdnjs with SRI (sha384 of `leaflet.js` and
+  `leaflet.css`, checked against the downloaded files, whose sha512 matches the cdnjs API), no
+  plugin. `L.CRS.Simple`, `maxNativeZoom` = `maxZoom`, MapUpscaleLevels zoom levels above it,
+  `maxBounds` around the canvas, zoom steps of 0.25. Opens exactly fitted to the ground of the
+  cities (their outlines) with a 16 px margin. City outlines are invisible polygons with a hover highlight and click to zoom. City
+  names show as labels when the city is at least 180 px wide on the screen, else as a hover
+  tooltip. Own small controls: city search (input with a datalist), full screen (Fullscreen API
+  on the map box), an overview map (a second `L.map` with the same tiles and a frame of the view,
+  click to move). The position is in the address (`#zoom/x/y` in map pixels, `/transport` for the
+  transport view, `history.replaceState`), and a changed address moves the map. With transport
+  tiles a layer switch (`L.control.layers`, two base layers). Names go in with `textContent` and
+  option values, the inline JSON has `<` escaped. Relative URLs only, so the page works from
+  `file://` and from any web folder. It needs the internet for Leaflet.
 - **Threading.** `Start` snapshots the renders folder, region name, cities and settings on the
   game thread and starts one worker thread below normal priority. The game thread only reads
   progress (atomics) and cancels. The export does not read the city, so it goes on across a

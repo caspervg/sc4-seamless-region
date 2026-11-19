@@ -771,17 +771,34 @@ cities" unless a step says otherwise.
    `Export: ended after S s. The map is ready: M cities, K tiles, X MB.`
 4. The panel says "The map is ready: ..." and shows "Open map". Click it. The browser opens
    `<Region>\RegionRenders\map\index.html` from disk.
-5. In the browser: a dark page, the region name and the date at the top, the whole region in
-   the middle. Each city is where the game shows it as a neighbor: compare with the view from
-   the first city of the region (the reference, the first rendered city in the Status list).
-   Cities without a render are empty. Tall buildings of a city in front cover the city behind
-   it, as in the game.
+5. In the browser: a dark page, the region name, the date, the rotation and the source zoom at
+   the top. The region fills the window with a small margin (not small in the middle). Each
+   city is where the game shows it as a neighbor: compare with the view from the first city of
+   the region (the reference, the first rendered city in the Status list). Cities without a
+   render are empty. Tall buildings of a city in front cover the city behind it, as in the game.
 6. Zoom in with the wheel to full size and one more step (enlarged). The map does not drift
-   far past the region when you drag it. Put the pointer on a city: a yellow outline on its
-   ground edge and a tooltip with its name. Click it: the map zooms to the city.
-7. "Made with SC4 Seamless Region" is in the lower right corner.
-8. Files: `map\index.html` and `map\tiles\<z>\<x>\<y>.webp`. No `map.tmp` and no
-   `map.old` folder stays. Empty areas have no tile files.
+   far past the region when you drag it. City names show on the map once a city is large
+   enough on the screen, and go away when you zoom out. Put the pointer on a city: a yellow
+   outline on its ground edge (and its name, when the name is not on the map yet). Click it:
+   the map zooms to the city.
+7. "Made with SC4 Seamless Region" is in the lower right corner. Above it, the overview map
+   shows the whole region with a yellow frame on the part the big map shows. The frame follows
+   when you drag or zoom. Click the overview map: the big map moves there.
+8. "Find a city" (top right): type a part of a name, pick a name from the list or press Enter.
+   The map zooms to the city and its outline shows for a moment. A name that no city has
+   shows "No city has this name."
+9. The full screen button (below the zoom buttons) shows the map on the whole screen and back.
+   Esc also leaves the full screen.
+10. The address of the page ends in `#zoom/x/y`. It changes when you move the map. Copy the
+    address, close the page and open the address: the same place and zoom. Edit the numbers in
+    the address bar: the map moves there.
+11. With transport tiles (see Capture, Transport layer): "Normal view" and "Transport view" in
+    the top right corner. The transport view lines up with the normal view, also in the overview
+    map, and the address ends in `/transport`. Without transport tiles the switch is not there.
+12. Files: `map\index.html`, `map\tiles\<z>\<x>\<y>.webp` and, with the transport layer,
+    `map\tiles-transport\<z>\<x>\<y>.webp`. No `map.tmp` and no `map.old` folder stays. Empty
+    areas have no tile files.
+13. Put the `map` folder on a web server (for example GitHub Pages): the page works the same.
 
 ### Rotation, cancel and refusal
 
@@ -804,6 +821,17 @@ cities" unless a step says otherwise.
    "The old map cannot be replaced..." and the old map stays.
 8. Without an internet connection the page says "The map cannot load Leaflet. Connect to the
    internet and open this page again."
+
+### Transport view
+
+1. Render some cities with "Transport layer" on. Export with "Transport view" on (the default):
+   the result says "The transport view shows N of them." The log has `Export: M cities have a
+   render at zoom 4 in rotation 0, N of them with the transport layer` and `full size level of
+   the transport layer done`. The panel shows "of the transport view" while it makes that layer.
+2. Cities without transport tiles are empty in the transport view.
+3. Turn "Transport view" off and export again: no `tiles-transport` folder, no switch on the
+   page. `SC4RegionMap.exe <region> --no-transport` does the same, `--transport` (the default)
+   makes the layer when the cities have it.
 
 ### Source zoom
 

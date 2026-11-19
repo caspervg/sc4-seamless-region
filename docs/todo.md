@@ -40,8 +40,7 @@ age) and click to switch (`interaction/NeighborPicker`). Check those first. Not 
    tooltip (switches and renders).
 5. **Region minimap.** A small ImGui map of the region from the zoom 1 tiles, with the current
    city and the view rectangle. Click to switch.
-6. **Region map page.** Show which city was played last, and highlight a city on hover (the
-   outlines are there, the style can be clearer).
+6. **Region map page.** Show which city was played last.
 
 ## Capture at date (seasons)
 
@@ -82,12 +81,6 @@ the game yet (`docs/testing.md`, Capture, Transport layer). Left:
 
 Limits: pipes, power lines and subway are not drawn, the same as in the game.
 
-## Fancier region map page
-
-Fit the region to the window on open, city name labels when zoomed in, a small overview map,
-full screen, the position in the link, a city search, a layer switch for rotations and the
-transport layer, clearer hover and click. Leaflet plus at most one or two small pinned plugins.
-
 ## Reduced detail zoom 4
 
 Render the zoom 4 level with the camera's custom magnification below 1.0 (0.5 or 0.25, as the
@@ -109,13 +102,15 @@ pixels. The meta stores a magnification per level for this. To do:
 
 ## Region map
 
-1. Fit the region to the window when the page opens (it starts small).
-2. City names come from the save file name in `SC4RegionMap.exe` ("New City (5)"), not from
+1. City names come from the save file name in `SC4RegionMap.exe` ("New City (5)"), not from
    the city itself.
-3. The first export of Fairview failed once on a tile write in Documents. A retry was added.
+2. The first export of Fairview failed once on a tile write in Documents. A retry was added.
    Find the cause if it comes back.
-4. Option: export the map at the end of a batch run.
-5. Optional: fill small terrain cracks on the map (see Look 2).
+3. Option: export the map at the end of a batch run.
+4. Optional: fill small terrain cracks on the map (see Look 2).
+5. Several rotations in one export (one canvas and pyramid per rotation, a rotation switch on
+   the page). One rotation per export now.
+6. The page was checked in headless Edge only. Check it in Firefox and on a phone.
 
 ## Not checked in the game yet
 
