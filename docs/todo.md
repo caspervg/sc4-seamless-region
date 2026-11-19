@@ -66,6 +66,18 @@ city a few ticks later. Saves that leave the city (switch, region view, quit) do
 2. **Ignore saves from other plugins** (autosave or quick-save DLLs), if the user has one.
    Needs RE of how such a save is called compared with Ctrl+S.
 
+## Reduced detail zoom 4
+
+Render the zoom 4 level with the camera's custom magnification below 1.0 (0.5 or 0.25, as the
+game's region thumbnail writer does at 0.25) and draw those tiles scaled up at zoom 4 and 5.
+Right pitch (45 degrees), so the neighbors line up, at about a quarter or a sixteenth of the
+pixels. The meta stores a magnification per level for this. To do:
+
+1. A capture level option per zoom: full, half or quarter.
+2. The edge wall detours hide nothing at a magnification other than 1.0 (that is how they
+   leave the thumbnail writer alone). Give the capture its own flag instead.
+3. Check the model LOD the game picks at 0.25, and the pixel alignment at magnification < 1.
+
 ## Speed
 
 1. Batch overhead: about 5 s of each city's 9 s is the switch and settle time. Look at what
