@@ -1,5 +1,7 @@
 // Offline tests for the pure parts of the capture module (capture/CaptureMath.hpp).
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <utility>
@@ -165,32 +167,175 @@ TEST_CASE(CaptureOutlineHoldsTheCityAndRejectsFarTiles)
     }
 }
 
-TEST_CASE(CapturePlanCoversTheTileOnce)
+TEST_CASE(CapturePlanCoversTheBlockOnce)
 {
     std::vector<CaptureMath::TileRead> reads;
-    CaptureMath::PlanTileReads(512, 1920, 1080, reads);
+    CaptureMath::PlanReads(512, 512, 1920, 1080, reads);
     CHECK(reads.size() == 1);
     CHECK(reads[0].x == 0 && reads[0].y == 0 && reads[0].w == 512 && reads[0].h == 512);
 
-    CaptureMath::PlanTileReads(512, 400, 300, reads);
-    CHECK(reads.size() == 4);
-    std::vector<int> covered(512 * 512, 0);
-    for (const CaptureMath::TileRead& r : reads) {
-        CHECK(r.w <= 400 && r.h <= 300 && r.w > 0 && r.h > 0);
-        for (int y = r.y; y < r.y + r.h; ++y) {
-            for (int x = r.x; x < r.x + r.w; ++x) {
-                ++covered[y * 512 + x];
+    CaptureMath::PlanReads(1536, 1024, 1920, 1080, reads);
+    CHECK(reads.size() == 1);
+    CHECK(reads[0].w == 1536 && reads[0].h == 1024);
+
+    // A window smaller than a tile, and a wide window lower than a tile.
+    for (const auto& [bw, bh, vw, vh] : {std::array{512, 512, 400, 300}, std::array{1536, 512, 1920, 400}}) {
+        CaptureMath::PlanReads(bw, bh, vw, vh, reads);
+        CHECK(reads.size() > 1);
+        std::vector<int> covered(static_cast<size_t>(bw) * bh, 0);
+        for (const CaptureMath::TileRead& r : reads) {
+            CHECK(r.w <= vw && r.h <= vh && r.w > 0 && r.h > 0);
+            for (int y = r.y; y < r.y + r.h; ++y) {
+                for (int x = r.x; x < r.x + r.w; ++x) {
+                    ++covered[static_cast<size_t>(y) * bw + x];
+                }
+            }
+        }
+        CHECK(std::ranges::all_of(covered, [](const int c) { return c == 1; }));
+    }
+
+    CaptureMath::PlanReads(512, 512, 0, 300, reads);
+    CHECK(reads.empty());
+}
+
+TEST_CASE(CaptureBlockSizeIsTheWholeTilesOfTheWindow)
+{
+    int w = 0, h = 0;
+    CaptureMath::BlockSize(512, 1920, 1080, w, h);
+    CHECK(w == 3 && h == 2);
+    CaptureMath::BlockSize(512, 1280, 720, w, h);
+    CHECK(w == 2 && h == 1);
+    CaptureMath::BlockSize(512, 512, 512, w, h);
+    CHECK(w == 1 && h == 1);
+    CaptureMath::BlockSize(512, 1023, 1025, w, h);
+    CHECK(w == 1 && h == 2);
+    CaptureMath::BlockSize(512, 400, 300, w, h);  // smaller than a tile: one tile in parts
+    CHECK(w == 1 && h == 1);
+    CaptureMath::BlockSize(512, 0, 0, w, h);
+    CHECK(w == 1 && h == 1);
+    CaptureMath::BlockSize(512, 7680, 4320, w, h);
+    CHECK(w == CaptureMath::kMaxBlockSide && h == CaptureMath::kMaxBlockSide);
+}
+
+namespace
+{
+    // Plans every block of a grid. Checks that each waiting tile is in exactly one block, that
+    // each block tile lies inside the grid and inside the read area of its block at the right
+    // pixel offset, and that the read area fits the window. Returns the block count.
+    int PlanAll(std::vector<uint8_t> pending, const int tilesX, const int tilesY, const int vw, const int vh)
+    {
+        constexpr int kTile = 512;
+        const std::vector<uint8_t> wanted = pending;
+        std::vector<int> seen(pending.size(), 0);
+        CaptureMath::TileBlock block;
+        int blocks = 0;
+        while (CaptureMath::NextTileBlock(pending, tilesX, tilesY, kTile, vw, vh, block)) {
+            ++blocks;
+            CHECK(block.count > 0);
+            CHECK(block.count <= block.w * block.h);
+            if (vw >= kTile && vh >= kTile) {
+                CHECK(block.w * kTile <= vw && block.h * kTile <= vh);
+            }
+            for (int i = 0; i < block.count; ++i) {
+                const CaptureMath::BlockTile& t = block.tiles[i];
+                CHECK(t.tx >= 0 && t.tx < tilesX && t.ty >= 0 && t.ty < tilesY);
+                CHECK(t.tx >= block.tx && t.tx < block.tx + block.w && t.ty >= block.ty && t.ty < block.ty + block.h);
+                CHECK(t.x == (t.tx - block.tx) * kTile && t.y == (t.ty - block.ty) * kTile);
+                ++seen[static_cast<size_t>(t.ty) * tilesX + t.tx];
+            }
+            if (blocks > tilesX * tilesY) {
+                CHECK(false);  // no progress
+                break;
+            }
+        }
+        for (size_t i = 0; i < wanted.size(); ++i) {
+            CHECK(seen[i] == (wanted[i] ? 1 : 0));
+        }
+        return blocks;
+    }
+}
+
+TEST_CASE(CaptureBlocksCoverEveryWaitingTileOnce)
+{
+    // A full 7 x 5 grid (odd sizes: the last column and row are partial blocks).
+    CHECK(PlanAll(std::vector<uint8_t>(35, 1), 7, 5, 1920, 1080) == 9);  // 3 x 3 blocks of 3 x 2
+    CHECK(PlanAll(std::vector<uint8_t>(35, 1), 7, 5, 512, 512) == 35);   // exactly one tile
+    CHECK(PlanAll(std::vector<uint8_t>(35, 1), 7, 5, 400, 300) == 35);   // smaller than a tile
+    CHECK(PlanAll(std::vector<uint8_t>(35, 1), 7, 5, 1280, 720) == 20);  // 2 x 1
+    CHECK(PlanAll(std::vector<uint8_t>(1, 1), 1, 1, 1920, 1080) == 1);
+
+    // A diamond like a projected city: only the tiles that touch the outline wait.
+    const int n = 11;
+    std::vector<uint8_t> diamond(static_cast<size_t>(n) * n, 0);
+    int waiting = 0;
+    for (int ty = 0; ty < n; ++ty) {
+        for (int tx = 0; tx < n; ++tx) {
+            if (std::abs(tx - n / 2) + std::abs(ty - n / 2) <= n / 2) {
+                diamond[static_cast<size_t>(ty) * n + tx] = 1;
+                ++waiting;
             }
         }
     }
-    bool once = true;
-    for (const int c : covered) {
-        once = once && c == 1;
-    }
-    CHECK(once);
+    const int blocks = PlanAll(diamond, n, n, 1920, 1080);
+    CHECK(blocks < waiting / 3);
+    CHECK(PlanAll(diamond, n, n, 512, 512) == waiting);
 
-    CaptureMath::PlanTileReads(512, 0, 300, reads);
-    CHECK(reads.empty());
+    // Nothing waits.
+    std::vector<uint8_t> none(35, 0);
+    CaptureMath::TileBlock block;
+    CHECK(!CaptureMath::NextTileBlock(none, 7, 5, 512, 1920, 1080, block));
+    CHECK(block.count == 0);
+}
+
+TEST_CASE(CaptureBlockStartsAtItsFirstWaitingRow)
+{
+    // Row 0 waits only at column 5, rows 1 and 2 at columns 0..2: the block of 3 x 2 starts at
+    // column 0 and moves down to row 1, so it holds the six tiles of rows 1 and 2.
+    std::vector<uint8_t> pending(8 * 3, 0);
+    pending[5] = 1;
+    for (int tx = 0; tx < 3; ++tx) {
+        pending[8 + tx] = 1;
+        pending[16 + tx] = 1;
+    }
+    CaptureMath::TileBlock block;
+    CHECK(CaptureMath::NextTileBlock(pending, 8, 3, 512, 1920, 1080, block));
+    CHECK(block.tx == 0 && block.ty == 1 && block.w == 3 && block.h == 2);
+    CHECK(block.count == 6);
+    CHECK(pending[5] == 1);
+    CHECK(CaptureMath::NextTileBlock(pending, 8, 3, 512, 1920, 1080, block));
+    CHECK(block.tx == 5 && block.ty == 0 && block.count == 1);
+    CHECK(!CaptureMath::NextTileBlock(pending, 8, 3, 512, 1920, 1080, block));
+}
+
+TEST_CASE(CaptureReturnedBlockIsPlannedAgainForANewWindow)
+{
+    std::vector<uint8_t> pending(6 * 4, 1);
+    CaptureMath::TileBlock block;
+    CHECK(CaptureMath::NextTileBlock(pending, 6, 4, 512, 1920, 1080, block));
+    CHECK(block.count == 6);
+    CaptureMath::ReturnTileBlock(pending, 6, block);
+    CHECK(block.count == 0);
+    CHECK(std::ranges::all_of(pending, [](const uint8_t p) { return p == 1; }));
+    // The window got smaller: the same tiles in blocks of 2 x 1.
+    CHECK(CaptureMath::NextTileBlock(pending, 6, 4, 512, 1280, 720, block));
+    CHECK(block.tx == 0 && block.ty == 0 && block.w == 2 && block.h == 1 && block.count == 2);
+}
+
+TEST_CASE(CaptureCropAndCountInsideABlock)
+{
+    // A 4 x 2 image, the right 2 x 2 half holds the key in one pixel.
+    std::vector<uint8_t> image(4 * 2 * 4, 9);
+    Put(image, 3, 255, 0, 255);
+    CHECK(CaptureMath::CountKeyPixelsIn(image.data(), 4, 2, 0, 2, 2, Rgb{255, 0, 255}) == 1);
+    CHECK(CaptureMath::CountKeyPixelsIn(image.data(), 4, 0, 0, 2, 2, Rgb{255, 0, 255}) == 0);
+    std::vector<uint8_t> tile(2 * 2 * 4, 0);
+    CaptureMath::CropRgba(image.data(), 4, 2, 0, 2, 2, tile.data());
+    CHECK(tile[4] == 255 && tile[5] == 0 && tile[6] == 255);
+    CHECK(tile[0] == 9 && tile[8] == 9 && tile[12] == 9);
+    // Crop is the inverse of Blit.
+    std::vector<uint8_t> back(4 * 2 * 4, 0);
+    CaptureMath::BlitRgba(tile.data(), 2, 2, back.data(), 4, 2, 0);
+    CHECK(std::equal(back.begin() + 8, back.begin() + 16, image.begin() + 8));
 }
 
 TEST_CASE(CaptureTargetPutsTheTileOnWholeScreenPixels)

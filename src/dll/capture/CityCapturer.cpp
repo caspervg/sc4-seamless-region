@@ -943,7 +943,7 @@ void CityCapturer::BeginTile_()
     ctx_.cameraReader->Update();
     viewportW_ = ctx_.cameraReader->Frame().viewportWidth;
     viewportH_ = ctx_.cameraReader->Frame().viewportHeight;
-    CaptureMath::PlanTileReads(tileSize_, viewportW_, viewportH_, reads_);
+    CaptureMath::PlanReads(tileSize_, tileSize_, viewportW_, viewportH_, reads_);
 }
 
 void CityCapturer::TileDone_()
