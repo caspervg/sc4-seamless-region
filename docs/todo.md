@@ -49,7 +49,17 @@ Not started. Considered on 2026-11-19:
   terrain-RGB or Terrarium PNG tiles or one small raw file per city (a large city is 257 x 257,
   about 130 KB). Uses: project vector points exactly onto the slanted map and the plan view,
   hillshade and contour layers, an elevation readout, and a 3D terrain view in MapLibre.
-- **Smooth vector curves:** network cells give a chain of cell centres and the sides each cell
+- **Network shapes from SC4Path (preferred):** each network tile's SC4Path file holds the real
+  car, train and pedestrian paths as curves in tile coordinates (curves, FLEX ramps,
+  roundabouts, diagonals, heights for elevated pieces). Per network cell: take the tile's path
+  info (the occupant's texture or model ID with rotation and flip; the game already parses the
+  paths, see the `own-network-paths-re` notes and the Path tool in sc4-plop-and-paint), apply
+  rotation, flip and the cell's world position, and keep the paths of the network's own type.
+  For one centreline per road, average the opposite directions or offset one direction by half
+  a lane. Paths end at fixed points on the tile edges, so neighbour cells chain cleanly. Fall
+  back to the cell connection method below for pieces without paths. The dbpf tools
+  (`read_sc4paths`) can check path files offline.
+- **Smooth vector curves (fallback):** network cells give a chain of cell centres and the sides each cell
   connects to. Join the cells of one network type into polylines (walk the connections), then
   smooth them: Chaikin corner cutting or a Catmull-Rom spline through the cell centres, kept
   straight on straight runs, with tight turns kept at intersections (cells with three or more
