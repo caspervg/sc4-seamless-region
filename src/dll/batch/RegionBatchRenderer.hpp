@@ -3,7 +3,9 @@
 // Batch (W3-G): renders every founded city of the region, unattended.
 //
 // Start renders the open city first (no switch), then the others as a nearest-first walk, and
-// switches back to the start city at the end. Per city: CitySwitcher::RequestSwitch, wait for
+// switches back to the start city at the end. Started in the region view (no city), it opens the
+// first city from there (CitySwitcher::RequestOpen), renders every city and goes back to the
+// region view at the end (CitySwitcher::RequestRegionView). Per city: CitySwitcher::RequestSwitch, wait for
 // kPostCityInitComplete (0xEA8AE29A), let the city settle some ticks, CityCapturer::Start for
 // every level, wait for its OnFinished. Every step has a timeout: a city that fails is recorded
 // with the reason and the run goes on.
@@ -41,11 +43,11 @@ public:
     void OnCityShutdown() override;
     void DrawPanelSection() override;
 
-    // Starts rendering the region. force renders cities whose render is up to date too.
-    // False (the panel shows why) when no city is open, a render or a switch runs, the city
-    // cannot be saved, or nothing needs a render.
+    // Starts rendering the region, in a city or in the region view. force renders cities whose
+    // render is up to date too. False (the panel shows why) when the city or the region is not
+    // ready, a render or a switch runs, the city cannot be saved, or nothing needs a render.
     bool Start(bool force);
-    // Stops after the current step and goes back to the start city.
+    // Stops after the current step and goes back to the start city or the region view.
     void Cancel();
     [[nodiscard]] bool IsRunning() const;
 
@@ -59,7 +61,7 @@ private:
         Switching,  // a switch to current_ runs, wait for the city
         Settle,     // in current_, a few ticks before the render
         Capture,    // the render of current_ runs
-        Return,     // the switch back to the start city runs
+        Return,     // the switch back to the start city or the region view runs
     };
     using Clock = std::chrono::steady_clock;
 
@@ -69,7 +71,10 @@ private:
     void Next_();
     void GoBack_();
     void StepSwitch_();
+    void StepRegionView_();
     void Arrived_();
+    bool Open_(const CityInfo& city);
+    [[nodiscard]] static std::string StartName_(const BatchQueue::Run& run);
     void StepSettle_();
     void StepCapture_();
     void Finish_(BatchQueue::State state, const std::string& message);
@@ -77,6 +82,8 @@ private:
     void Resume_();
     void Restamp_();
     void OnInitComplete_();
+    void OnRegionView_();
+    void LoadOffer_();
     void OnCaptureFinished_(bool ok);
 
     bool SaveRun_();
@@ -91,6 +98,7 @@ private:
     ModuleContext ctx_;
     bool initialized_ = false;
     uint32_t initToken_ = 0;
+    uint32_t regionToken_ = 0;
     std::unique_ptr<ImGuiPanel> window_;
     bool windowRegistered_ = false;
 
@@ -136,6 +144,7 @@ private:
     std::optional<BatchQueue::Run> lastRun_;  // from batch.json, for the summary and the offer
     bool offerResume_ = false;
     bool confirmForce_ = false;
+    bool confirmRegionView_ = false;  // the popup opened in the region view
     int confirmCount_ = 0;
     std::string message_;
 };

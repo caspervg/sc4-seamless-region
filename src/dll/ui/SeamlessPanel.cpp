@@ -178,6 +178,10 @@ void SeamlessPanel::DrawTools_()
         ImGui::TextWrapped("No tools are loaded.");
         return;
     }
+    if (!GameAccess::City()) {
+        ImGui::TextWrapped("No city is open. Open a city to use the tools for a city. The region render in Batch "
+                           "works in the region view too.");
+    }
     const char* openGroup = nullptr;
     bool groupOpen = false;
     for (const PanelModule& entry : *modules_) {

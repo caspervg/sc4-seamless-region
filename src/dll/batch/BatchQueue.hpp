@@ -51,7 +51,8 @@ namespace BatchQueue
         std::string runId;
         State state = State::Running;
         bool force = false;
-        Entry start;                 // the city the run started in, and ends in
+        Entry start;                 // the city the run started in, and ends in. Empty when regionView
+        bool regionView = false;     // started in the region view: it ends there and renders every city
         std::vector<Entry> pending;  // in render order, the first is the next
         std::vector<Result> done;
         std::vector<Result> skipped;
@@ -107,14 +108,19 @@ namespace BatchQueue
 
     // A new run from the region's cities. Unfounded cities and cities whose render is up to
     // date (isStale false, unless force) go to skipped. The rest is ordered from the start city.
-    inline Run Build(const std::vector<CityInfo>& cities, const CityInfo& start, const bool force,
+    // Without a start city (nullptr: the region view) the walk starts at the first city to render
+    // in the order of `cities`, and the run ends in the region view.
+    inline Run Build(const std::vector<CityInfo>& cities, const CityInfo* start, const bool force,
                      const std::function<bool(const CityInfo&)>& isStale, std::string runId, std::string startedAt)
     {
         Run run;
         run.runId = std::move(runId);
         run.startedAt = std::move(startedAt);
         run.force = force;
-        run.start = ToEntry(start);
+        run.regionView = !start;
+        if (start) {
+            run.start = ToEntry(*start);
+        }
         for (const CityInfo& city : cities) {
             if (!city.founded) {
                 run.skipped.push_back({city.key, city.name, "Not founded", 0.0});
@@ -126,7 +132,13 @@ namespace BatchQueue
                 run.pending.push_back(ToEntry(city));
             }
         }
-        Order(run.pending, run.start);
+        if (start) {
+            Order(run.pending, run.start);
+        }
+        else if (!run.pending.empty()) {
+            const Entry first = run.pending.front();  // RegionIndex::Cities is sorted by (cellZ, cellX)
+            Order(run.pending, first);
+        }
         return run;
     }
 
@@ -151,8 +163,9 @@ namespace BatchQueue
     }
 
     // Before a run continues after a restart: cities that were started kMaxAttempts times
-    // without an end fail, and the rest is ordered again from the city now open.
-    inline void PrepareResume(Run& run, const Entry& current)
+    // without an end fail, and the rest is ordered again from the city now open. Without an open
+    // city (nullptr: the region view) the saved order stays.
+    inline void PrepareResume(Run& run, const Entry* current)
     {
         std::vector<Entry> crashed;
         for (const Entry& e : run.pending) {
@@ -164,7 +177,9 @@ namespace BatchQueue
         for (const Entry& e : crashed) {
             Fail(run, e, "The game stopped twice while it rendered this city.");
         }
-        Order(run.pending, current);
+        if (current) {
+            Order(run.pending, *current);
+        }
     }
 
     // Cities handled so far plus the ones left.
@@ -210,6 +225,7 @@ namespace BatchQueue
             {"state", StateName(run.state)},
             {"force", run.force},
             {"start", EntryJson(run.start)},
+            {"regionView", run.regionView},
             {"pending", std::move(pending)},
             {"done", ResultsJson(run.done)},
             {"skipped", ResultsJson(run.skipped)},
@@ -267,6 +283,7 @@ namespace BatchQueue
             }
             run.force = j.at("force").get<bool>();
             run.start = entry(j.at("start"));
+            run.regionView = j.value("regionView", false);  // not in files of older versions
             for (const nlohmann::json& e : j.at("pending")) {
                 run.pending.push_back(entry(e));
             }

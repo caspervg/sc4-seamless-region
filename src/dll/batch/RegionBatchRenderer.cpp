@@ -103,6 +103,12 @@ namespace
     }
 
     int Minutes(const double seconds) { return static_cast<int>(seconds / 60.0 + 0.5); }
+
+    // Where the run started and ends, for the panel and the window. No allocation per frame.
+    const char* Place(const BatchQueue::Run& run)
+    {
+        return run.regionView ? "the region view" : run.start.name.c_str();
+    }
 }
 
 RegionBatchRenderer::RegionBatchRenderer() = default;
@@ -118,6 +124,7 @@ bool RegionBatchRenderer::Initialize(const ModuleContext& ctx)
         return false;
     }
     initToken_ = ctx_.messages->Subscribe(Messages::kPostCityInitComplete, [this](cIGZMessage2*) { OnInitComplete_(); });
+    regionToken_ = ctx_.messages->Subscribe(Messages::kPostRegionInit, [this](cIGZMessage2*) { OnRegionView_(); });
     ctx_.capturer->SetOnFinished([this](const bool ok) { OnCaptureFinished_(ok); });
     if (ctx_.imgui) {
         window_ = std::make_unique<BatchWindow>(this);
@@ -141,17 +148,22 @@ void RegionBatchRenderer::Shutdown()
         ctx_.imgui->UnregisterPanel(kWindowId);
     }
     windowRegistered_ = false;
-    if (initToken_ && ctx_.messages) {
-        ctx_.messages->Unsubscribe(initToken_);
+    if (ctx_.messages) {
+        for (const uint32_t token : {initToken_, regionToken_}) {
+            if (token) {
+                ctx_.messages->Unsubscribe(token);
+            }
+        }
     }
     initToken_ = 0;
+    regionToken_ = 0;
     if (ctx_.capturer) {
         ctx_.capturer->SetOnFinished(nullptr);
     }
     initialized_ = false;
 }
 
-// PostCityInit is posted: this runs on a message pump after the switch task has ended.
+// PostCityInit is posted: this runs on the pump at the end of LoadCity, or later.
 void RegionBatchRenderer::OnCityInit()
 {
     if (running_) {
@@ -170,7 +182,8 @@ void RegionBatchRenderer::OnCityShutdown()
     cityReady_ = false;
     if (running_ && phase_ != Phase::Switching && phase_ != Phase::Return) {
         // Not our switch: the player went to the region view, quit or switched city.
-        Interrupt_("The city closed while the region render ran. Open a city of this region to continue.");
+        Interrupt_("The city closed while the region render ran. You can continue it in the region view or in a "
+                   "city of this region.");
     }
 }
 
@@ -181,6 +194,19 @@ void RegionBatchRenderer::OnInitComplete_()
         // Step_ sees the city on the next tick.
         return;
     }
+    LoadOffer_();
+}
+
+// The director read the region again before this (kPostRegionInit, no city open).
+void RegionBatchRenderer::OnRegionView_()
+{
+    if (!running_ && !GameAccess::City()) {
+        LoadOffer_();
+    }
+}
+
+void RegionBatchRenderer::LoadOffer_()
+{
     lastRun_ = LoadRun_();
     offerResume_ = lastRun_ && lastRun_->state == State::Running && !lastRun_->pending.empty();
     if (offerResume_) {
@@ -210,8 +236,15 @@ const char* RegionBatchRenderer::WhyNotBegin_() const
     if (running_) {
         return "The region render runs already.";
     }
-    if (!GameAccess::City() || !GameAccess::View3D() || !ctx_.region->Current() || !cityReady_) {
-        return "Open a city first.";
+    const bool regionView = !GameAccess::City();
+    if (regionView) {
+        // Read at kPostRegionInit (director).
+        if (!GameAccess::Region() || ctx_.region->Cities().empty() || ctx_.tileStore->RendersDirectory().empty()) {
+            return "Open a city or the region view first.";
+        }
+    }
+    else if (!GameAccess::View3D() || !ctx_.region->Current() || !cityReady_) {
+        return "Wait until the city is ready.";
     }
     if (ctx_.capturer->IsRunning()) {
         return "A render runs. Wait until it is done.";
@@ -219,7 +252,7 @@ const char* RegionBatchRenderer::WhyNotBegin_() const
     if (ctx_.switcher->IsBusy()) {
         return "A city switch runs. Wait until it is done.";
     }
-    if (!ctx_.switcher->CanSaveCurrentCity()) {
+    if (!regionView && !ctx_.switcher->CanSaveCurrentCity()) {
         return "This city cannot be saved. The region render saves this city before it opens the next one, so it "
                "cannot start here.";
     }
@@ -236,7 +269,8 @@ bool RegionBatchRenderer::Start(const bool force)
         LOG_WARN("Batch: not started. {}", why);
         return false;
     }
-    const CityInfo& start = *ctx_.region->Current();
+    // Null in the region view: the run renders every city and ends in the region view.
+    const CityInfo* start = ctx_.region->Current();
     run_ = BatchQueue::Build(
         ctx_.region->Cities(), start, force, [this](const CityInfo& c) { return ctx_.tileStore->IsStale(c); },
         NowText("%Y%m%d-%H%M%S"), NowText("%Y-%m-%d %H:%M:%S"));
@@ -250,13 +284,15 @@ bool RegionBatchRenderer::Start(const bool force)
         LOG_ERROR("Batch: {}", message_);
         return false;
     }
-    openedByBatch_ = false;  // the player's city: it may have changes, the switch saves it
-    if (cISC4SimulatorPtr simulator; simulator) {
+    // In a city it is the player's city: it may have changes, the switch saves it. In the region
+    // view every city is opened by the run.
+    openedByBatch_ = !start;
+    if (cISC4SimulatorPtr simulator; simulator && start) {
         speed_ = simulator->GetSimSpeed();
         userPaused_ = simulator->IsPaused();
         speedSaved_ = true;
     }
-    Log_(std::format("Run {} started in '{}'{}: {} cities to render, {} skipped", run_.runId, start.name,
+    Log_(std::format("Run {} started in {}{}: {} cities to render, {} skipped", run_.runId, StartName_(run_),
                      force ? ", all cities again" : "", run_.pending.size(), run_.skipped.size()));
     Begin_();
     return true;
@@ -274,7 +310,9 @@ void RegionBatchRenderer::Resume_()
     }
     run_ = *lastRun_;
     const size_t failedBefore = run_.failed.size();
-    BatchQueue::PrepareResume(run_, BatchQueue::ToEntry(*ctx_.region->Current()));
+    const CityInfo* open = ctx_.region->Current();  // null in the region view: the order stays
+    const BatchQueue::Entry openEntry = open ? BatchQueue::ToEntry(*open) : BatchQueue::Entry();
+    BatchQueue::PrepareResume(run_, open ? &openEntry : nullptr);
     for (size_t i = failedBefore; i < run_.failed.size(); ++i) {
         Log_(std::format("Skipped '{}': {}", run_.failed[i].name, run_.failed[i].reason));
     }
@@ -284,10 +322,10 @@ void RegionBatchRenderer::Resume_()
         return;
     }
     offerResume_ = false;
-    openedByBatch_ = false;  // opened by the player
+    openedByBatch_ = !open;  // a city open now was opened by the player
     speedSaved_ = false;     // the speed before the first start is gone with the old game session
-    Log_(std::format("Run {} continues in '{}': {} cities left", run_.runId, ctx_.region->Current()->name,
-                     run_.pending.size()));
+    Log_(std::format("Run {} continues in {}: {} cities left", run_.runId,
+                     open ? std::format("'{}'", open->name) : std::string("the region view"), run_.pending.size()));
     Begin_();
 }
 
@@ -301,7 +339,9 @@ void RegionBatchRenderer::Begin_()
     restampKey_.clear();
     message_.clear();
     lastRun_ = run_;
-    pause_.emplace(false, true, true, true);
+    if (GameAccess::City()) {
+        pause_.emplace(false, true, true, true);
+    }
     stepId_ = ctx_.idle->AddRecurring([this] { return Step_(); });
 }
 
@@ -314,7 +354,8 @@ void RegionBatchRenderer::Cancel()
     // Marked at once: if the game stops on the way back, a restart does not offer to continue.
     run_.state = State::Cancelled;
     SaveRun_();
-    Log_("Cancel requested. The render stops after the current step and goes back to the start city.");
+    Log_(std::format("Cancel requested. The render stops after the current step and goes back to {}.",
+                     StartName_(run_)));
 }
 
 // ---- steps -------------------------------------------------------------------------------------
@@ -375,7 +416,7 @@ void RegionBatchRenderer::Next_()
         }
         // A city this run opened has no changes of the player: switching without a save loses
         // nothing. The player's own city must be saved, the switcher refuses otherwise.
-        if (!ctx_.switcher->RequestSwitch(city->cellX, city->cellZ, openedByBatch_)) {
+        if (!Open_(*city)) {
             BatchQueue::Fail(run_, current_, "It could not be opened: " + ctx_.switcher->LastError());
             Log_(std::format("Failed '{}': {}", current_.name, run_.failed.back().reason));
             SaveRun_();
@@ -388,28 +429,57 @@ void RegionBatchRenderer::Next_()
     GoBack_();
 }
 
+bool RegionBatchRenderer::Open_(const CityInfo& city)
+{
+    // Without a city (the region view) the city opens without a save and a close.
+    return GameAccess::City() ? ctx_.switcher->RequestSwitch(city.cellX, city.cellZ, openedByBatch_)
+                              : ctx_.switcher->RequestOpen(city.cellX, city.cellZ);
+}
+
+std::string RegionBatchRenderer::StartName_(const BatchQueue::Run& run)
+{
+    return run.regionView ? std::string("the region view") : std::format("'{}'", run.start.name);
+}
+
 void RegionBatchRenderer::GoBack_()
 {
     const State end = cancelRequested_ ? State::Cancelled : State::Done;
+    phaseStart_ = Clock::now();
+    if (run_.regionView) {
+        if (!GameAccess::City()) {
+            Finish_(end, std::string());
+        }
+        else if (!ctx_.switcher->RequestRegionView(openedByBatch_)) {
+            Finish_(end, "The game could not go to the region view: " + ctx_.switcher->LastError());
+        }
+        else {
+            Log_("Going back to the region view");
+            phase_ = Phase::Return;
+        }
+        return;
+    }
     const CityInfo* open = ctx_.region->Current();
     if (open && open->key == run_.start.key) {
         Finish_(end, std::string());
         return;
     }
     const CityInfo* start = FindByKey_(run_.start.key);
-    if (!start || !ctx_.switcher->RequestSwitch(start->cellX, start->cellZ, openedByBatch_)) {
+    if (!start || !Open_(*start)) {
         Finish_(end, std::format("The game could not go back to '{}': {}", run_.start.name,
                                  start ? ctx_.switcher->LastError() : "it is not in the region anymore."));
         return;
     }
     Log_(std::format("Going back to '{}'", run_.start.name));
     phase_ = Phase::Return;
-    phaseStart_ = Clock::now();
 }
 
 void RegionBatchRenderer::StepSwitch_()
 {
     const bool back = phase_ == Phase::Return;
+    if (back && run_.regionView) {
+        StepRegionView_();
+        return;
+    }
     const std::string& wanted = back ? run_.start.key : current_.key;
     const CityInfo* open = ctx_.region->Current();
     if (cityReady_ && open && open->key == wanted) {
@@ -427,13 +497,11 @@ void RegionBatchRenderer::StepSwitch_()
                                     ctx_.switcher->LastError()));
                 return;
             }
-            // Without a city the batch cannot go on: a city of the region opened later offers
-            // to continue.
+            // The next city opens from the region view.
             BatchQueue::Fail(run_, current_, "It could not be loaded: " + ctx_.switcher->LastError());
             Log_(std::format("Failed '{}': {}", current_.name, run_.failed.back().reason));
             SaveRun_();
-            Interrupt_("A city could not be loaded and the game is in the region view. Open a city of this region "
-                       "to continue.");
+            phase_ = Phase::Next;
             return;
         }
         if (cityReady_) {
@@ -510,6 +578,23 @@ void RegionBatchRenderer::Arrived_()
     phase_ = Phase::Settle;
     phaseStart_ = Clock::now();
     settleTicks_ = 0;
+}
+
+void RegionBatchRenderer::StepRegionView_()
+{
+    const State end = cancelRequested_ ? State::Cancelled : State::Done;
+    if (ctx_.switcher->IsBusy()) {
+        if (Clock::now() - phaseStart_ > kSwitchTimeout) {
+            Finish_(end, "The game did not go to the region view in 5 minutes.");
+        }
+        return;
+    }
+    if (GameAccess::City()) {
+        const std::string error = ctx_.switcher->LastError();
+        Finish_(end, "The game could not go to the region view: " + (error.empty() ? "no reason given." : error));
+        return;
+    }
+    Finish_(end, std::string());
 }
 
 void RegionBatchRenderer::StepSettle_()
@@ -619,6 +704,7 @@ void RegionBatchRenderer::Restamp_()
 
 void RegionBatchRenderer::Finish_(const State state, const std::string& message)
 {
+    Restamp_();  // the last rendered city, saved when the run left it for the region view
     running_ = false;
     if (stepId_ != 0) {
         ctx_.idle->Cancel(stepId_);
@@ -751,23 +837,25 @@ void RegionBatchRenderer::DrawPanelSection()
         }
         if (open) {
             // Counted once when the popup opens, not every frame.
-            const CityInfo* current = ctx_.region->Current();
-            confirmCount_ = current ? static_cast<int>(BatchQueue::Build(
-                                                           ctx_.region->Cities(), *current, confirmForce_,
-                                                           [this](const CityInfo& c) { return ctx_.tileStore->IsStale(c); },
-                                                           std::string(), std::string())
-                                                           .pending.size())
-                                    : 0;
+            confirmRegionView_ = !GameAccess::City();
+            confirmCount_ = static_cast<int>(BatchQueue::Build(
+                                                 ctx_.region->Cities(), ctx_.region->Current(), confirmForce_,
+                                                 [this](const CityInfo& c) { return ctx_.tileStore->IsStale(c); },
+                                                 std::string(), std::string())
+                                                 .pending.size());
             ImGui::OpenPopup(kConfirmPopup);
         }
     }
 
     if (ImGui::BeginPopupModal(kConfirmPopup, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::Text("%d cities need a render.", confirmCount_);
-        ImGui::BulletText("The game saves this city, then opens, renders and saves each city in turn.");
+        ImGui::BulletText(confirmRegionView_ ? "The game opens, renders and saves each city in turn."
+                                             : "The game saves this city, then opens, renders and saves each city "
+                                               "in turn.");
         ImGui::BulletText("This can take a long time: some minutes for each city.");
         ImGui::BulletText("The game is paused in each city while the render runs.");
-        ImGui::BulletText("At the end the game opens this city again.");
+        ImGui::BulletText(confirmRegionView_ ? "At the end the game goes back to the region view."
+                                             : "At the end the game opens this city again.");
         ImGui::BulletText("You can cancel at any time.");
         ImGui::BeginDisabled(confirmCount_ == 0);
         if (ImGui::Button("Start")) {
@@ -776,7 +864,8 @@ void RegionBatchRenderer::DrawPanelSection()
         }
         ImGui::EndDisabled();
         ImGui::SameLine();
-        if (ImGui::Button("Cancel") || running_ || !GameAccess::City()) {
+        // Also closes when a city opens or closes while the popup is open.
+        if (ImGui::Button("Cancel") || running_ || !GameAccess::City() != confirmRegionView_) {
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
@@ -808,7 +897,7 @@ void RegionBatchRenderer::DrawPanelSection()
 void RegionBatchRenderer::DrawSummary_(const BatchQueue::Run& run) const
 {
     ImGui::SeparatorText("Last region render");
-    ImGui::Text("Started %s in %s, %s.", run.startedAt.c_str(), run.start.name.c_str(),
+    ImGui::Text("Started %s in %s, %s.", run.startedAt.c_str(), Place(run),
                 BatchQueue::StateName(running_ ? State::Running : run.state));
     ImGui::Text("%zu rendered, %zu skipped, %zu failed, %zu left.", run.done.size(), run.skipped.size(),
                 run.failed.size(), run.pending.size());
@@ -860,14 +949,17 @@ void RegionBatchRenderer::DrawProgress_()
                        text);
 
     if (phase_ == Phase::Return) {
-        ImGui::Text("Going back to %s", run_.start.name.c_str());
+        ImGui::Text("Going back to %s", Place(run_));
     }
     else if (phase_ != Phase::Next) {
         ImGui::Text("City %d of %d: %s", std::min(handled + 1, total), total, current_.name.c_str());
     }
     switch (phase_) {
     case Phase::Next: ImGui::TextUnformatted("Choosing the next city"); break;
-    case Phase::Switching: ImGui::TextUnformatted("Saving and opening the city"); break;
+    case Phase::Switching:
+        ImGui::TextUnformatted(ctx_.switcher->IsBusy() && !GameAccess::City() ? "Opening the city"
+                                                                              : "Saving and opening the city");
+        break;
     case Phase::Settle: ImGui::TextUnformatted("Waiting for the city to be ready"); break;
     case Phase::Capture:
         std::snprintf(text, sizeof(text), "%d of %d tiles", captureProgress_.done, captureProgress_.total);
@@ -877,7 +969,10 @@ void RegionBatchRenderer::DrawProgress_()
                            ImVec2(360.0f, 0.0f), text);
         ImGui::TextUnformatted(captureProgress_.phase.c_str());
         break;
-    case Phase::Return: ImGui::TextUnformatted("Saving and opening the start city"); break;
+    case Phase::Return:
+        ImGui::TextUnformatted(run_.regionView ? "Saving the city and going to the region view"
+                                               : "Saving and opening the start city");
+        break;
     }
 
     if (secondsCount_ > 0 && !run_.pending.empty() && phase_ != Phase::Return) {
@@ -912,7 +1007,7 @@ void RegionBatchRenderer::DrawOffer_()
     }
     const BatchQueue::Run& run = *lastRun_;
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 380.0f);
-    ImGui::Text("A region render did not finish. It started %s in %s.", run.startedAt.c_str(), run.start.name.c_str());
+    ImGui::Text("A region render did not finish. It started %s in %s.", run.startedAt.c_str(), Place(run));
     ImGui::Text("%zu cities are rendered, %zu failed, %zu are left.", run.done.size(), run.failed.size(),
                 run.pending.size());
     ImGui::TextWrapped("If the game stopped during a render, that city gets one more try. A city that stopped "
