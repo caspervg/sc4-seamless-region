@@ -407,27 +407,4 @@ namespace CaptureMath
                                        canvasTopLeft.fY + static_cast<float>(viewportH) * 0.5f - 0.5f - static_cast<float>(screenY)};
         return projection.CanvasToGround(targetCanvas, 0.0f);
     }
-
-    // The network type flags the transport map (cSC4NetworkLayoutView::RebuildMap) tests a cell
-    // against, one per network type 0..12 (1 << type in the game). Dirt road (type 11, the RHW)
-    // has no entry of its own: it is added to the highway entry (type 2, drawn with the highway
-    // color) when that color is visible, else to the road entry (type 0). A plugin can set a color
-    // to 0 (the NAM sets highway to 0): dirt roads must not take an invisible color. Colors ARGB.
-    // docs/re-notes/transport-view.md, section 9.
-    [[nodiscard]] inline std::array<uint32_t, 13> TransportTypeFlags(const uint32_t highwayColor,
-                                                                     const uint32_t roadColor)
-    {
-        constexpr uint32_t kDirtRoad = 1u << 11;
-        std::array<uint32_t, 13> flags{};
-        for (uint32_t type = 0; type < flags.size(); ++type) {
-            flags[type] = 1u << type;
-        }
-        if ((highwayColor >> 24) != 0) {
-            flags[2] |= kDirtRoad;
-        }
-        else if ((roadColor >> 24) != 0) {
-            flags[0] |= kDirtRoad;
-        }
-        return flags;
-    }
 }
