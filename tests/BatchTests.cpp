@@ -36,7 +36,7 @@ namespace
 
 TEST_CASE(BatchBuildFiltersUnfoundedAndUpToDate)
 {
-    const auto run = BatchQueue::Build(kRegion, kRegion[0], false, [](const CityInfo& c) { return c.key != "b"; },
+    const auto run = BatchQueue::Build(kRegion, &kRegion[0], false, [](const CityInfo& c) { return c.key != "b"; },
                                        "id", "now");
     CHECK(run.pending.size() == 4);
     CHECK(run.skipped.size() == 2);
@@ -48,7 +48,7 @@ TEST_CASE(BatchBuildFiltersUnfoundedAndUpToDate)
 
 TEST_CASE(BatchBuildForceRendersUpToDate)
 {
-    const auto run = BatchQueue::Build(kRegion, kRegion[0], true, [](const CityInfo&) { return false; }, "id", "now");
+    const auto run = BatchQueue::Build(kRegion, &kRegion[0], true, [](const CityInfo&) { return false; }, "id", "now");
     CHECK(run.pending.size() == 5);
     CHECK(run.skipped.size() == 1);
     CHECK(run.force);
@@ -56,7 +56,7 @@ TEST_CASE(BatchBuildForceRendersUpToDate)
 
 TEST_CASE(BatchOrderStartsWithStartCityThenNearest)
 {
-    const auto run = BatchQueue::Build(kRegion, kRegion[0], true, [](const CityInfo&) { return true; }, "id", "now");
+    const auto run = BatchQueue::Build(kRegion, &kRegion[0], true, [](const CityInfo&) { return true; }, "id", "now");
     // Distances in doubled cell centres. From a: b and d tie (4), b has the smaller cellZ.
     // From b: d 8, e 34, c 36. From d: e 34, c 68. Then c.
     CHECK((Keys(run.pending) == std::vector<std::string>{"a", "b", "d", "e", "c"}));
@@ -65,7 +65,7 @@ TEST_CASE(BatchOrderStartsWithStartCityThenNearest)
 TEST_CASE(BatchOrderWithoutStartCityInQueue)
 {
     // The start city is up to date: it is not in the queue, the walk starts next to it.
-    const auto run = BatchQueue::Build(kRegion, kRegion[2], false, [](const CityInfo& c) { return c.key != "c"; },
+    const auto run = BatchQueue::Build(kRegion, &kRegion[2], false, [](const CityInfo& c) { return c.key != "c"; },
                                        "id", "now");
     CHECK(run.pending.front().key == "e");
     CHECK(run.pending.size() == 4);
@@ -73,7 +73,7 @@ TEST_CASE(BatchOrderWithoutStartCityInQueue)
 
 TEST_CASE(BatchCompleteAndFailMoveOutOfPending)
 {
-    auto run = BatchQueue::Build(kRegion, kRegion[0], true, [](const CityInfo&) { return true; }, "id", "now");
+    auto run = BatchQueue::Build(kRegion, &kRegion[0], true, [](const CityInfo&) { return true; }, "id", "now");
     const auto first = run.pending[0];
     const auto second = run.pending[1];
     BatchQueue::Complete(run, first, 12.5);
@@ -86,12 +86,13 @@ TEST_CASE(BatchCompleteAndFailMoveOutOfPending)
 
 TEST_CASE(BatchResumeSkipsCityThatCrashedTwice)
 {
-    auto run = BatchQueue::Build(kRegion, kRegion[0], true, [](const CityInfo&) { return true; }, "id", "now");
+    auto run = BatchQueue::Build(kRegion, &kRegion[0], true, [](const CityInfo&) { return true; }, "id", "now");
     CHECK(BatchQueue::BeginAttempt(run, "b") == 1);
     CHECK(BatchQueue::BeginAttempt(run, "b") == 2);
     BatchQueue::BeginAttempt(run, "c");
     // Resumed in d: b failed, c (one attempt) stays, d comes first.
-    BatchQueue::PrepareResume(run, BatchQueue::ToEntry(kRegion[3]));
+    const auto d = BatchQueue::ToEntry(kRegion[3]);
+    BatchQueue::PrepareResume(run, &d);
     CHECK(run.failed.size() == 1 && run.failed[0].key == "b");
     CHECK(run.pending.front().key == "d");
     CHECK(run.pending.size() == 4);
@@ -100,7 +101,7 @@ TEST_CASE(BatchResumeSkipsCityThatCrashedTwice)
 
 TEST_CASE(BatchJsonRoundTrip)
 {
-    auto run = BatchQueue::Build(kRegion, kRegion[1], false, [](const CityInfo& c) { return c.key != "a"; },
+    auto run = BatchQueue::Build(kRegion, &kRegion[1], false, [](const CityInfo& c) { return c.key != "a"; },
                                  "20261118-120000", "2026-11-18 12:00:00");
     BatchQueue::BeginAttempt(run, run.pending[0].key);
     BatchQueue::Complete(run, run.pending[0], 61.0);
@@ -118,6 +119,7 @@ TEST_CASE(BatchJsonRoundTrip)
     CHECK(back->state == BatchQueue::State::Cancelled);
     CHECK(back->force == run.force);
     CHECK(back->start.key == "b" && back->start.cellX == 1);
+    CHECK(!back->regionView);
     CHECK(Keys(back->pending) == Keys(run.pending));
     CHECK(back->pending[0].sizeX == run.pending[0].sizeX);
     CHECK(back->done.size() == 1 && back->done[0].seconds == 61.0);
@@ -133,10 +135,56 @@ TEST_CASE(BatchJsonRejectsBadInput)
     CHECK(!BatchQueue::Parse("not json", &error));
     CHECK(!error.empty());
     CHECK(!BatchQueue::Parse(R"({"formatVersion": 99})"));
-    auto run = BatchQueue::Build(kRegion, kRegion[0], false, [](const CityInfo&) { return true; }, "id", "now");
+    auto run = BatchQueue::Build(kRegion, &kRegion[0], false, [](const CityInfo&) { return true; }, "id", "now");
     std::string text = BatchQueue::ToJson(run);
     const auto at = text.find("\"running\"");
     CHECK(at != std::string::npos);
     text.replace(at, 9, "\"weird\"");
     CHECK(!BatchQueue::Parse(text));
+}
+
+TEST_CASE(BatchRegionViewRendersEveryCityFromTheFirst)
+{
+    // No start city: every founded city that needs a render, the walk starts at the first one.
+    const auto run =
+        BatchQueue::Build(kRegion, nullptr, false, [](const CityInfo& c) { return c.key != "b"; }, "id", "now");
+    CHECK(run.regionView);
+    CHECK(run.start.key.empty());
+    // From a: d 4, then e 34 from d, then c.
+    CHECK((Keys(run.pending) == std::vector<std::string>{"a", "d", "e", "c"}));
+    CHECK(run.skipped.size() == 2);
+}
+
+TEST_CASE(BatchRegionViewResumeKeepsTheOrder)
+{
+    auto run = BatchQueue::Build(kRegion, nullptr, true, [](const CityInfo&) { return true; }, "id", "now");
+    BatchQueue::BeginAttempt(run, "b");
+    BatchQueue::BeginAttempt(run, "b");
+    const auto before = Keys(run.pending);
+    BatchQueue::PrepareResume(run, nullptr);
+    CHECK(run.failed.size() == 1 && run.failed[0].key == "b");
+    std::vector<std::string> expected;
+    for (const auto& key : before) {
+        if (key != "b") {
+            expected.push_back(key);
+        }
+    }
+    CHECK(Keys(run.pending) == expected);
+}
+
+TEST_CASE(BatchJsonRegionViewRoundTripAndOldFiles)
+{
+    const auto run = BatchQueue::Build(kRegion, nullptr, true, [](const CityInfo&) { return true; }, "id", "now");
+    std::string text = BatchQueue::ToJson(run);
+    const auto back = BatchQueue::Parse(text);
+    CHECK(back && back->regionView && back->start.key.empty());
+
+    // A batch.json of an older version has no regionView: it started in a city.
+    const auto at = text.find("\"regionView\": true,");
+    CHECK(at != std::string::npos);
+    if (at != std::string::npos) {
+        text.erase(at, std::string("\"regionView\": true,").size());
+    }
+    const auto old = BatchQueue::Parse(text);
+    CHECK(old && !old->regionView);
 }

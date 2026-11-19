@@ -50,6 +50,7 @@ private:
     void OnPreCityShutdown_();
     void RefreshRegionUntilFounded_();
     void CancelRegionRefresh_();
+    void OnPostRegionInit_();
 
     Settings settings_;
     ModuleContext ctx_;

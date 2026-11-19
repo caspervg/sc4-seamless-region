@@ -22,6 +22,13 @@ It calls everything through the gzcom-dll headers, so it needs no new raw addres
 | LoadCity stores the holder pointer it gets at cSC4App +0x4c (interface-relative) and keeps using it, so the holder must be the region's own entry (`GetCity(x,z)`), fetched after CloseCity | decompile `0x004555f0` and CloseCity (`**(this+0x4c)` deref) | high |
 | `cSC4WinRegionScreen::LaunchRegionalCity` (`0x007adc20`) is the region view's own launch: reads the save path (+0x7c); non-empty: `LoadCity(path, holder)`; empty or failed: clears NewCitySpecification +0x200 and calls `RequestNewCity(holder)` | decompile | high |
 | `RequestLoadCity` (`0x00456910`) loads a city from a city screen: RequestCloseCity, a file choice, then LoadCity. So the game itself runs LoadCity with the old city screen still up and no city | decompile `0x00456910`, `0x00454c10` | medium (may be unused in retail) |
+| **LoadCity pumps both queues at its end**, on every path: `spSC4` (`0x00b43c94`) `RunMessageServerPump(100, 500, 5000)` (+0x10) and `RunMessageServer2Pump(100, 500, 5000)` (+0x14). So the posted PostCityInit and PostCityInitComplete normally run inside LoadCity. The first in-game test showed this (module OnCityInit lines before "LoadCity returned") | `ghx dis 0x004555f0` at `0x00455964` .. `0x0045599f` | high |
+| `cSC4WinRegionScreen::LaunchRegionalCity` runs from the region screen's own mouse handlers (`0x007af4b0`, `0x007afaa0`). It AddRefs the screen (it is on the call stack while LoadCity destroys it), saves the region scroll position (`SetUserPreferencesToCurrentPosition` `0x007ac2d0`), calls `GetRegion()` (result unused), reads the save path and calls `LoadCity(path, holder)` with the region screen up and no city | decompile `0x007adc20`, Mac `0x001a1808` same sequence | high |
+| `cSC4App::GetRegion` (`0x0044b4a0`) = nation (`this+0x48`) `GetActiveRegion` (+0x20). `GetRegionalCity` (`0x0044b620`) returns `*(this+0x4c)` or null. `GetCity` (`0x0081f910`) returns `this+0x50` | `ghx dec`, vtable `0x00a86af0` +0x8c, +0x90, +0x94 | high |
+| CloseCity passes `&(this+0x4c)` to `ReloadCity` for the closed city and never clears it. So `GetRegionalCity()` is not null in the region view after a city closed: it names that city's new holder | decompile `0x00455330` | medium (ReloadCity not read) |
+| `RequestGoToRegionView(false)` (`0x004543b0`) skips the dialog and the save. It draws twice, calls CloseCity, and when the city is gone, `DestroyCurrentScreen` and the region screen. It does not pump | decompile | high |
+| Region screen messages, all **posted** (MessagePost, slot +0x10): `cSC4WinRegionScreen::Init` (`0x007b1900`) posts PreRegionInit `0xABB5BB44` at its start (through `0x007abb00`, PostRegionScreenMessage) and PostRegionInit `0xCBB5BB45` at its end (`0x007b22ee`). Its Shutdown (`0x007b0f60`) posts PreRegionShutdown `0x8BB5BB46` (`0x007b0f7a`) and PostRegionShutdown `0x8BB5BB4B` (`0x007b11e7`) | `ghx dis` of each, the same IDs in Mac `Init` `0x001a671f`, `0x001a73c0` and `Shutdown` `0x001a2f0d`, `0x001a31ac` | high |
+| A region change in the region view recreates the region screen: Mac `cSC4WinRegionScreen::LoadRegion` (`0x001a0eb4`) calls `SetActiveRegion` then `RequestGoToRegionView(false)`. So PostRegionInit comes for every region shown | Mac decompile. Windows not read | medium |
 | `cSC4View3DWin` reacts to PreCityShutdown (`DoMessage` `0x007f53c0` -> `0x007e9780`): releases a member at +0x14c and calls two of its own virtuals | decompile | medium |
 
 ## Can the old city screen repaint with a null city?
@@ -46,20 +53,21 @@ message of RequestSaveCity, and it comes before CloseCity, while the city is com
 ## Our DLL: ordering
 
 PreCityShutdown is sent, so it reaches the director inside CloseCity: every module's
-OnCityShutdown runs inside the switch task. PostCityInit and PostCityInitComplete are posted, so
-the modules' OnCityInit runs on a later message pump, **after** the switch task has ended and
-`IsBusy()` is false again. An earlier version of this note said that both run inside the task.
-That was wrong (the review in wave 4 checked the disassembly, the batch module had found it
-first).
+OnCityShutdown runs inside the switch task. PostCityInit and PostCityInitComplete are posted, but
+LoadCity pumps both queues at its end. So the modules' OnCityInit **normally runs inside
+LoadCity**, inside the switch task, while `IsBusy()` is true. When the pump stops early (500
+messages or 5 s) they come on a later pump, after the switch task. The wave 4 review read only
+the PostCityMessage calls and concluded "after", the first in-game test showed "inside", and the
+pump at `0x00455964` explains it. Code must work with both orders.
 
-What holds in the gap between the end of the switch task and PostCityInit:
+What holds until PostCityInit arrives (inside LoadCity, or in the gap after the switch task):
 
 | | Value |
 |---|---|
 | `GameAccess::City()` | the new city |
 | `GameAccess::View3D()`, `Renderer()`, `CameraControl()` | nullptr (the director opens them at PostCityInit) |
 | `RegionIndex::Current()` | nullptr (the director clears it at PreCityShutdown and refreshes at PostCityInit) |
-| `CitySwitcher::IsBusy()` | false |
+| `CitySwitcher::IsBusy()` | true inside LoadCity, false in the gap |
 | every module | in its "no city" state |
 
 Rules that follow:
@@ -85,6 +93,22 @@ CitySwitcher:
 
 Other modules must not pump the message queues or draw from OnCityShutdown, because the old
 screen then would draw while the city shuts down.
+
+## From and to the region view
+
+- `RequestOpen` loads a city from the region view: the steps of a switch after CloseCity
+  (`GetCity(x, z)`, the save path, `LoadCity`). It is the call `LaunchRegionalCity` makes, run from
+  an idle task, so the region screen is not on the call stack and needs no AddRef. It does not
+  save the region scroll position as the region screen does.
+- `RequestRegionView` pumps and saves like a switch (same save rule), then calls
+  `RequestGoToRegionView(false)`, which closes the city and builds the region screen.
+- The director listens to PostRegionInit. When no city is open it reads the region with
+  `RegionIndex::RefreshWithoutCity` (no current city, because `GetRegionalCity()` still names the
+  closed city) and sets the store's renders folder. The region folder then comes from the app's
+  regions directory and `cISC4Region::GetDirectoryName`.
+- SC4RenderServices draws ImGui at the present of `cGZGraphicSystem::Draw` (`0x0098e769`), the
+  present of every screen, so the panel and the batch window work in the region view. Its own
+  notes (`vendor/sc4-render-services/docs/generic-backend-re.md`) confirm it in game on scvk.
 
 ## Unfounded cities
 

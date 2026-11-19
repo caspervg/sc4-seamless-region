@@ -210,6 +210,9 @@ bool SC4SeamlessRegionDirector::DoMessage(cIGZMessage2* pMsg)
     if (id == Messages::kPostCityInit) {
         OnPostCityInit_();
     }
+    else if (id == Messages::kPostRegionInit) {
+        OnPostRegionInit_();
+    }
     else if (id == Messages::kPreCityShutdown) {
         // Subscribers first, while the modules still have their city state.
         dispatch();
@@ -222,10 +225,10 @@ bool SC4SeamlessRegionDirector::DoMessage(cIGZMessage2* pMsg)
 
 void SC4SeamlessRegionDirector::OnPostCityInit_()
 {
-    // kPostCityInit is posted, not sent: it arrives on a later message pump, after LoadCity
-    // (and a switch task) returned. PartialCloseCity pumps the queues before it sends
-    // kPreCityShutdown, so the message normally comes while its city is still open. If the
-    // city is gone anyway, the modules must not start on it.
+    // kPostCityInit is posted, not sent: it arrives on the pump at the end of LoadCity or on a
+    // later one, after LoadCity (and a switch task) returned. PartialCloseCity pumps the queues
+    // before it sends kPreCityShutdown, so the message normally comes while its city is still
+    // open. If the city is gone anyway, the modules must not start on it.
     if (!GameAccess::City()) {
         LOG_WARN("PostCityInit came without a city. The modules stay off until the next city load.");
         return;
@@ -307,6 +310,19 @@ void SC4SeamlessRegionDirector::OnPreCityShutdown_()
         region_->ClearCurrent();
     }
     cityOpen_ = false;
+}
+
+// The region view: the region index and the renders folder follow the region shown, so the batch
+// can start there. Current() stays null.
+void SC4SeamlessRegionDirector::OnPostRegionInit_()
+{
+    if (GameAccess::City() || !region_) {
+        return;  // a city opened before this posted message came
+    }
+    region_->RefreshWithoutCity();
+    if (ctx_.tileStore) {
+        ctx_.tileStore->SetRegionDirectory(region_->RegionDirectory());
+    }
 }
 
 void SC4SeamlessRegionDirector::AcquireServices_()

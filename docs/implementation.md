@@ -95,19 +95,30 @@ bool Initialize(const ModuleContext& ctx);
 // Called once at PostAppShutdown. Removes hooks, stops threads.
 void Shutdown();
 // City lifecycle, from the director's message handler.
-void OnCityInit();      // at kPostCityInit (0x26D31EC1). Posted: arrives after LoadCity returned
+void OnCityInit();      // at kPostCityInit (0x26D31EC1). Posted: normally inside LoadCity, see below
 void OnCityShutdown();  // at kPreCityShutdown (0x26D31EC2). Sent: runs inside CloseCity
 // Draws this module's section of the panel. Called from ImGui, game thread.
 void DrawPanelSection();
 ```
 
 **Message timing.** The game sends PreCityShutdown (it runs inside CloseCity, while the city
-and its view still exist) and posts PostCityInit and PostCityInitComplete (they arrive on a
-later message pump, after LoadCity and after a city switch task returned). So "the switch is
-done" never means "OnCityInit has run". Between the two, `GameAccess::City()` is the new city,
-but `GameAccess::View3D()` and `RegionIndex::Current()` are null and every module is in its
-"no city" state. Work that belongs to one city is dropped in OnCityShutdown. Evidence:
+and its view still exist) and posts PostCityInit and PostCityInitComplete. LoadCity pumps both
+message queues at its end (`0x00455964`, 100 to 500 messages, at most 5 s), so the two posted
+messages normally arrive **inside** LoadCity, inside a city switch task. On a busy queue the pump
+stops early and they arrive on a later pump, after the switch task returned. The first in-game
+test saw the first order. Code must work with both orders and rely on neither: "the switch is
+done" does not mean "OnCityInit has run", and OnCityInit can run while `CitySwitcher::IsBusy()`
+is true. Until PostCityInit arrives, `GameAccess::City()` is the new city, but
+`GameAccess::View3D()` and `RegionIndex::Current()` are null and every module is in its "no
+city" state. Work that belongs to one city is dropped in OnCityShutdown. Evidence:
 `docs/re-notes/switching.md`.
+
+**Region view.** The region screen posts PostRegionInit (`0xCBB5BB45`) when it is created: at
+game start, when the player leaves a city, and when the region changes. The director then reads
+the region again without a current city (`RegionIndex::RefreshWithoutCity`) and points the store
+at its renders folder, so the batch can start there. No module gets OnCityInit for it. The panel
+and the batch window draw in the region view too (SC4RenderServices draws ImGui at every present
+of `cGZGraphicSystem::Draw`).
 
 **Exceptions.** No exception may leave a function that the game or SC4RenderServices calls
 (draw pass callbacks, ImGui callbacks, input controls, message handlers, detours, thread
@@ -192,6 +203,7 @@ struct CityInfo {
 class RegionIndex {
 public:
     void Refresh();                         // from cISC4Region::GetAllCities
+    void RefreshWithoutCity();              // the same in the region view: Current() stays null
     const std::vector<CityInfo>& Cities() const;
     const CityInfo* Current() const;
     const CityInfo* FindAtCell(int cellX, int cellZ) const;
@@ -237,13 +249,19 @@ the game to within half a pixel, and the canvas-to-screen offset for the current
 ```cpp
 class CitySwitcher {
 public:
-    bool RequestSwitch(int cellX, int cellZ);   // queues it on the idle scheduler
+    bool RequestSwitch(int cellX, int cellZ, bool allowWithoutSave = false); // queues it on the idle scheduler
+    bool RequestOpen(int cellX, int cellZ);           // from the region view: load only
+    bool RequestRegionView(bool allowWithoutSave = false); // save, then the region view
     bool IsBusy() const;
     std::string LastError() const;
+    bool CanSaveCurrentCity() const;
 };
 ```
 
-The sequence and its traps are in `docs/plan.md` ("Switching"). Diagnostics in the panel:
+The sequence and its traps are in `docs/plan.md` ("Switching"). RequestOpen runs the steps after
+CloseCity (the target holder from `GetCity(x, z)`, its save path, `LoadCity`), the same call the
+region screen makes (`cSC4WinRegionScreen::LaunchRegionalCity`). RequestRegionView runs the pump
+and the save of a switch with the same save rule, then `RequestGoToRegionView(false)`. Diagnostics in the panel:
 switch to the neighbor north, south, east or west of the current city.
 
 ### camera/CameraExtender
@@ -368,7 +386,14 @@ city cannot be saved.
 Renders every founded city in the region: switch, wait for `PostCityInitComplete`
 (`0xEA8AE29A`) and model loading, capture, next. Skips cities whose render is newer than
 their save unless forced. Keeps its queue in `<Region>/RegionRenders/batch.json` so it
-resumes after a restart. Cancel at any point. Ends in the city it started from.
+resumes after a restart. Cancel at any point. Ends where it started.
+
+It starts in a city or in the region view. In a city it renders that city first and ends there.
+In the region view (`"regionView": true` in batch.json, absent in older files means false) it
+opens the first city with `RequestOpen`, renders every city that needs it, and at the end (also
+after a cancel) saves the last city and goes back with `RequestRegionView`. A city that does not
+load sends the game to the region view: that city fails and the next one opens from there. The
+offer to continue a run comes at the next city load or region view.
 
 ### export/HtmlMapExporter
 
@@ -452,17 +477,17 @@ yet.** `docs/testing.md` starts with the order for the first run.
 | Module | State | Known limits |
 |---|---|---|
 | Core (addresses, hooking, game access, idle scheduler, messages, `core/Guard.hpp`) | Complete | Windows 1.1.641 only. City view objects and `RegionIndex::Current()` are null from CloseCity until the posted PostCityInit arrives |
-| Region | Complete, unit tested | Read once per city load. A city that is founded or renamed shows after the next city load |
+| Region | Complete, unit tested | Read once per city load and once per region view. A city that is founded or renamed shows after the next city load or region view |
 | View math, CameraReader | Complete, unit tested | The Diagnostics tab must be green in game before anything else is trusted |
 | UI shell | Complete | Ctrl+Shift+F9 shows and hides the panel (fixed key). No panel on an unsupported game version, only the log line |
 | Store | Complete, unit tested | A city shutdown waits for the encode queue and the folder scan on the game thread. Folders of cities that left the region stay on disk and count in the size |
-| Switching | Complete | An unfounded target opens the region view. The modules of the new city start after the switch task (posted PostCityInit) |
+| Switching | Complete | An unfounded target opens the region view. The modules of the new city start at the posted PostCityInit, normally inside LoadCity |
 | Camera | Complete, math unit tested | The four detours stay installed while ShowNeighbors is off and pass through. The scroll polygon is taken to hold 6 points (bounding box if not). Depth precision at zoom 1 to 3 in very large regions is open |
 | Capture | Complete, math unit tested | Needs the snapshot extension of the driver. Cars and sims of the paused game are in the tiles. A level that is rendered again is not drawn by neighbors until it is complete. A save during a render is handled but untested. SCD3D11 readback format is assumed |
 | Tile cache, Neighbors | Complete, math unit tested | Tiles must be a power of two. Each tile costs twice its size (see gaps). No neighbors at a custom magnification. Seam of at most half a pixel. Zoom 5 shows zoom 4 tiles at 2x |
 | Interaction | Complete, math unit tested | The pick is on the ground at the edge height: the top of a tall neighbor building can pick the city behind it. Tint limits in `re-notes/interaction.md` |
-| Batch | Complete, queue unit tested | Saves every city it leaves. A load that ends in the region view interrupts the run until a city is opened |
 | Export | Complete, math, page and end to end export unit tested. Not run in the game yet | Needs the internet for Leaflet. Outlines of cities rendered before `groundHeight` existed use 250 m. One worker thread: about 10 ms per output tile, mostly WebP encode |
+| Batch | Complete, queue unit tested | Saves every city it leaves. Starts in a city or in the region view and ends there. The region view start is not tested in game yet |
 | Overlay | Complete, math unit tested | No mipmaps (grainy at zoom 1). 64 MB texture limit. The two-point pick also sends the click to the game |
 
 What the review changed is in the git log of `feat/review` (one commit per defect).

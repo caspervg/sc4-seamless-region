@@ -42,15 +42,25 @@ Windows 1.1.641, read-only Ghidra (`ghx -p win`). Code: `src/dll/batch/*`. Tests
 
 - Order: the start city first (no switch), then a greedy nearest-first walk over the city
   centres, then back to the start city.
+- Start in the region view: no start city. The walk starts at the first city to render in
+  (cellZ, cellX) order. The first city opens with `CitySwitcher::RequestOpen`. At the end, and
+  after a cancel, `RequestRegionView` saves the last city (when it can be saved) and goes to the
+  region view. batch.json has `"regionView": true`. A file without the key (older versions)
+  started in a city. Resume in the region view keeps the saved order. A run keeps its end: a
+  region view run resumed in a city ends in the region view, a city run resumed in the region
+  view opens its start city at the end.
+- No hidden pause and no saved speed in the region view: there is no city. The pause starts at
+  OnCityInit of the first city.
 - `batch.json` (`<RendersDirectory>/batch.json`, written through a temporary file and a rename)
   holds the run id, the state (running, done, cancelled, stopped), the force flag, the start
   city, pending in order, done (with seconds), skipped and failed (with reasons) and the
   attempts per city. The attempt is counted and written before the switch. A run that is still
-  "running" at a city load is offered to continue, never continued without a click. On
+  "running" at a city load or in the region view is offered to continue, never continued
+  without a click. On
   continue, a city with 2 attempts fails.
 - Timeouts: switch and load 5 min, render without progress 10 min (then `CityCapturer::Cancel`).
-  A failure records the reason and the run goes on. A failed load that ends in the region view
-  interrupts the run (it stays "running" in the file).
+  A failure records the reason and the run goes on. A failed load ends in the region view: that
+  city fails and the next one opens from there (`RequestOpen`).
 - A switch away from the player's own city that fails (the save failed) stops the run: the
   batch never leaves that city without a save. A city the batch opened has no player changes,
   so the switch away uses `allowWithoutSave = true` when that city cannot be saved.

@@ -28,7 +28,8 @@ namespace Messages
     constexpr uint32_t kPostLoad = 0x26C63342;
     // Sent: inside LoadCity.
     constexpr uint32_t kPreCityInit = 0x26D31EC0;
-    // Posted: after LoadCity returned, so after a city switch task has ended.
+    // Posted. LoadCity pumps both queues at its end (0x00455964), so it normally arrives inside
+    // LoadCity, and after LoadCity returned when the pump stops early (500 messages or 5 s).
     constexpr uint32_t kPostCityInit = 0x26D31EC1;
     // Posted, after kPostCityInit: every simulator finished its post-city-init work.
     constexpr uint32_t kPostCityInitComplete = 0xEA8AE29A;
@@ -61,6 +62,11 @@ namespace Messages
     constexpr uint32_t kCameraPreViewChange = 0xA6B79600;
     constexpr uint32_t kCameraPostViewChange = 0xA6B79620;
 
+    // Posted by cSC4WinRegionScreen::Init (0x007b1900, at 0x007b22ee) when the region view is
+    // created: at game start, when the player leaves a city and when the region changes. It
+    // arrives on a later pump. No city is open then.
+    constexpr uint32_t kPostRegionInit = 0xCBB5BB45;
+
     // Every message the director always listens to.
     constexpr std::array kDirectorMessages{
         kPostCityInit,
@@ -70,6 +76,7 @@ namespace Messages
         kPreSave,
         kSave,
         kPostSave,
+        kPostRegionInit,
     };
 }
 
