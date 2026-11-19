@@ -47,10 +47,15 @@ namespace
     }
 }
 
-void RegionIndex::Refresh()
+void RegionIndex::Refresh() { Read_(GameAccess::RegionalCity()); }
+
+// cSC4App::GetRegionalCity is not null in the region view: CloseCity reloads the city it closed
+// into the same holder (cSC4App +0x4c). So the region view reads without it.
+void RegionIndex::RefreshWithoutCity() { Read_(nullptr); }
+
+void RegionIndex::Read_(cISC4RegionalCity* current)
 {
     cISC4Region* region = GameAccess::Region();
-    cISC4RegionalCity* current = GameAccess::RegionalCity();
     std::vector<CityInfo> cities;
     std::filesystem::path directory;
     std::string name;

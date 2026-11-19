@@ -48,6 +48,7 @@ private:
     void UnregisterMessages_();
     void OnPostCityInit_();
     void OnPreCityShutdown_();
+    void OnPostRegionInit_();
 
     Settings settings_;
     ModuleContext ctx_;
