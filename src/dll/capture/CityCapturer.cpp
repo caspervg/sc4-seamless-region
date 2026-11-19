@@ -6,6 +6,7 @@
 #include <cstring>
 #include <exception>
 #include <fstream>
+#include <limits>
 
 #include <webp/encode.h>
 
@@ -13,6 +14,10 @@
 #include "cISC4App.h"
 #include "cISC4City.h"
 #include "cISC4LightingManager.h"
+#include "cISC4Occupant.h"
+#include "cISC4OccupantManager.h"
+#include "cSC4BaseOccupantFilter.h"
+#include "SC4List.h"
 #include "cISC4RenderProperties.h"
 #include "cISC4View3DWin.h"
 #include "cISC4ViewManager.h"
@@ -53,7 +58,27 @@ namespace
     // Room above the highest terrain for buildings. The tallest lots of the game and of
     // custom content stay below this. A larger value only adds tiles that are found empty
     // after one read.
+    // Room above the terrain for buildings when the tallest occupant is not known.
     constexpr float kBuildingHeadroomMetres = 600.0f;
+    // Room above the terrain for trees, and above the tallest occupant for parts of models
+    // outside their bounding box.
+    constexpr float kMinHeadroomMetres = 40.0f;
+    constexpr float kOccupantTopMarginMetres = 10.0f;
+    constexpr uint32_t kFloraOccupantType = 0x74758926u;
+    // Work per idle tick while steps make progress. The window repaints between ticks.
+    constexpr double kTickBudgetMs = 200.0;
+
+    // Everything but flora: trees are low and a city has very many of them.
+    class NoFloraFilter final : public cSC4BaseOccupantFilter
+    {
+    public:
+        bool IsOccupantTypeIncluded(const uint32_t type) override { return type != kFloraOccupantType; }
+    };
+
+    double MsSince(const std::chrono::steady_clock::time_point since)
+    {
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - since).count();
+    }
 
     // Calibration reads a small block this far outside the projected city bounds.
     constexpr int kCalibrationSize = 16;
@@ -285,7 +310,15 @@ bool CityCapturer::Begin_(const bool testTile, const CaptureRequest& request)
         }
     }
     minHeight_ = low;
-    maxHeight_ = high + kBuildingHeadroomMetres;
+    terrainHigh_ = high;
+    // Rows of empty tiles above the city cost as much as full ones: use the real skyline.
+    const float tallest = TallestOccupantTop_(citySizeX_, citySizeZ_);
+    if (std::isfinite(tallest) && tallest < high + 5000.0f) {
+        maxHeight_ = std::max(high + kMinHeadroomMetres, tallest + kOccupantTopMarginMetres);
+    }
+    else {
+        maxHeight_ = high + kBuildingHeadroomMetres;
+    }
     tileSize_ = CityRenderMeta().tileSize;
 
     testTile_ = testTile;
@@ -355,7 +388,8 @@ bool CityCapturer::Begin_(const bool testTile, const CaptureRequest& request)
     tilesStartTime_ = startTime_;
 
     phase_ = Phase::Prepare;
-    stepId_ = ctx_.idle->AddRecurring([this] { return Step_(); });
+    timing_ = Timing();
+    stepId_ = ctx_.idle->AddRecurring([this] { return Tick_(); });
     if (stepId_ == 0) {
         phase_ = Phase::Idle;
         return refuse("The idle scheduler of the plugin does not run.");
@@ -424,6 +458,52 @@ bool CityCapturer::TileTouchesCity_(const Level& level, const int tx, const int 
 }
 
 // ---- the state machine -------------------------------------------------------------------------
+
+float CityCapturer::TallestOccupantTop_(const float citySizeX, const float citySizeZ)
+{
+    cISC4City* city = GameAccess::City();
+    cISC4OccupantManager* occupants = city ? city->GetOccupantManager() : nullptr;
+    if (!occupants) {
+        return std::numeric_limits<float>::quiet_NaN();
+    }
+    const float boxMin[3] = {0.0f, -100000.0f, 0.0f};
+    const float boxMax[3] = {citySizeX, 100000.0f, citySizeZ};
+    SC4List<cISC4Occupant*> found;
+    NoFloraFilter filter;
+    if (!occupants->GetOccupantsByBBox(found, boxMin, boxMax, &filter, std::numeric_limits<uint32_t>::max())) {
+        return std::numeric_limits<float>::quiet_NaN();
+    }
+    float top = -std::numeric_limits<float>::infinity();
+    for (cISC4Occupant* occupant : found) {
+        if (!occupant) {
+            continue;
+        }
+        cS3DVector3 low, high;
+        occupant->GetBoundingBox(&low, &high);
+        if (std::isfinite(high.fY)) {
+            top = std::max(top, high.fY);
+        }
+    }
+    LOG_INFO("Capture: {} occupants without flora, the tallest reaches {:.0f} m", found.size(), top);
+    return std::isfinite(top) ? top : std::numeric_limits<float>::quiet_NaN();
+}
+
+bool CityCapturer::Tick_()
+{
+    const auto start = Clock::now();
+    ++timing_.ticks;
+    for (;;) {
+        const int frames = framesDrawn_;
+        const Phase before = phase_;
+        if (!Step_()) {
+            return false;
+        }
+        // A step that only waits (models, a screen shake, the store) gives the game its tick.
+        if (testTile_ || (framesDrawn_ == frames && phase_ == before) || MsSince(start) >= kTickBudgetMs) {
+            return true;
+        }
+    }
+}
 
 bool CityCapturer::Step_()
 {
@@ -755,9 +835,12 @@ bool CityCapturer::StepBlock_()
     {
         const cS3DVector3& live = ctx_.cameraReader->Frame().target;
         if (live.fX != target.fX || live.fY != target.fY || live.fZ != target.fZ) {
+            const auto moveStart = Clock::now();
             SetTarget_(target);
             // The thumbnail writer pumps after the move, before it draws.
-            if (!Pump_()) {
+            const bool alive = Pump_();
+            timing_.moveMs += MsSince(moveStart);
+            if (!alive) {
                 return false;
             }
             if (!game.Fetch() || !ctx_.cameraReader->Update()) {
@@ -795,9 +878,12 @@ bool CityCapturer::StepBlock_()
     }
 
     // 4. Draw and read. This is the one draw and the one read of this tick.
+    const auto drawStart = Clock::now();
     game.renderer->ForceFullRedraw();
     game.renderer->Draw();
     ++framesDrawn_;
+    const auto readStart = Clock::now();
+    timing_.drawMs += MsSince(drawStart);
     std::vector<uint8_t>& pass = pass_ == 0 ? blockA_ : blockB_;
     if (reads_.size() == 1) {
         // The read is the whole block: straight into the block buffer.
@@ -813,6 +899,7 @@ bool CityCapturer::StepBlock_()
         pass.resize(static_cast<size_t>(blockW) * block_.h * tileSize_ * 4);
         CaptureMath::BlitRgba(readBuffer_.data(), read.w, read.h, pass.data(), blockW, read.x, read.y);
     }
+    timing_.readMs += MsSince(readStart);
     shakeTicks_ = 0;
     if (++readIndex_ < reads_.size()) {
         return true;
@@ -957,7 +1044,7 @@ bool CityCapturer::WriteMeta_(const bool final)
     meta.sizeX = sizeX_;
     meta.sizeZ = sizeZ_;
     meta.tileSize = tileSize_;
-    meta.groundHeight = 0.5f * (minHeight_ + maxHeight_ - kBuildingHeadroomMetres);  // terrain middle
+    meta.groundHeight = 0.5f * (minHeight_ + terrainHigh_);  // terrain middle
     const std::optional<CityRenderMeta> earlier = ctx_.tileStore->LoadMeta(cityKey_);
     const bool usable = earlier && earlier->tileSize == meta.tileSize && earlier->formatVersion == meta.formatVersion;
 
@@ -1149,6 +1236,9 @@ bool CityCapturer::ModelsReady_(const bool tile)
     }
     if (ready) {
         waiting_ = false;
+        if (tile) {
+            timing_.modelsMs += MsSince(waitStart_);
+        }
     }
     return ready;
 }
@@ -1290,6 +1380,8 @@ void CityCapturer::End_(const bool ok, std::string phase, std::string error, con
     LOG_INFO("Capture: {} ({} of {} tiles, {} written, {} empty, {} drawn twice, {} frames, {} s)",
              ok ? "finished" : "stopped", progress_.done, progress_.total, tilesWritten_, tilesEmpty_, tilesTwoPass_,
              framesDrawn_, seconds);
+    LOG_INFO("Capture: time in ms: move {:.0f}, models {:.0f}, draw {:.0f}, read {:.0f}, in {} ticks", timing_.moveMs,
+             timing_.modelsMs, timing_.drawMs, timing_.readMs, timing_.ticks);
 
     if (onFinished_) {
         // A copy: the callback may set another callback or start the next capture.

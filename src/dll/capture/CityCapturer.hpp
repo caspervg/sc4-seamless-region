@@ -144,8 +144,12 @@ private:
     void BuildLevels_(const CaptureRequest& request);
     [[nodiscard]] bool TileTouchesCity_(const Level& level, int tx, int ty) const;
 
-    // One idle tick. Returns false when the capture ended.
+    // One idle tick: steps while they make progress, within a time budget. False when the
+    // capture ended.
+    bool Tick_();
     bool Step_();
+    // Top of the tallest building, prop or network of the city, or NaN when unknown.
+    [[nodiscard]] static float TallestOccupantTop_(float citySizeX, float citySizeZ);
     bool StepPrepare_();
     bool StepCalibrate_(bool second);
     bool StepLevelBegin_();
@@ -210,6 +214,7 @@ private:
     int cellX_ = 0, cellZ_ = 0, sizeX_ = 1, sizeZ_ = 1;
     float citySizeX_ = 0.0f, citySizeZ_ = 0.0f;
     float minHeight_ = 0.0f, maxHeight_ = 0.0f;
+    float terrainHigh_ = 0.0f;  // highest terrain or sea surface
     int tileSize_ = 512;
 
     std::vector<Level> levels_;
@@ -262,6 +267,15 @@ private:
     int tilesEmpty_ = 0;
     int tilesTwoPass_ = 0;
     int framesDrawn_ = 0;
+    // Where the time goes, for the finish log line.
+    struct Timing
+    {
+        double moveMs = 0.0;    // SetViewTargetPosition and the pump after it
+        double modelsMs = 0.0;  // waiting for models after a move, across ticks
+        double drawMs = 0.0;    // ForceFullRedraw and Draw
+        double readMs = 0.0;    // the screen readback
+        int ticks = 0;          // idle ticks with capture work
+    } timing_;
 
     // Last result, for the panel.
     std::string lastResult_;
