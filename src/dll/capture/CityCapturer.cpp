@@ -12,6 +12,7 @@
 #include "cISC43DRender.h"
 #include "cISC4App.h"
 #include "cISC4City.h"
+#include "cISC4LightingManager.h"
 #include "cISC4RenderProperties.h"
 #include "cISC4View3DWin.h"
 #include "cISC4ViewManager.h"
@@ -73,6 +74,16 @@ namespace
     constexpr uint32_t kPumpMinMessages = 20;
     constexpr uint32_t kPumpMaxMessages = 100;
     constexpr uint32_t kPumpNoTimeLimit = 0xFFFFFFFFu;
+
+    cISC4LightingManager* LightingManager(cISC43DRender* renderer)
+    {
+        if (!renderer) {
+            return nullptr;
+        }
+        using Fn = cISC4LightingManager*(__thiscall*)(cISC43DRender*);
+        const Fn fn = (*reinterpret_cast<Fn* const*>(renderer))[CaptureAddresses::Renderer::kGetLightingManagerSlot];
+        return fn(renderer);
+    }
 
     struct Game
     {
@@ -509,6 +520,18 @@ bool CityCapturer::StepPrepare_()
         // The thumbnail writer turns kRenderSnapshot on and puts it back to off.
         properties->SetBoolValue(CaptureAddresses::Renderer::kRenderSnapshotProperty, true);
         saved_.snapshotPropertySet = true;
+    }
+    if (ctx_.settings && ctx_.settings->captureAtNoon) {
+        // Like the thumbnail writer: noon light, so every render looks the same. The clock is
+        // paused, so the game does not move the time of day on during the render.
+        if (cISC4LightingManager* lighting = LightingManager(game.renderer)) {
+            saved_.timeOfDay = lighting->GetTimeOfDay();
+            saved_.timeOfDaySaved = true;
+            lighting->SetTimeOfDay(CaptureAddresses::kNoon);
+        }
+        else {
+            LOG_WARN("Capture: the lighting manager is not available. The render uses the light of the game.");
+        }
     }
     game.renderer->StopScreenShake(0);
     if (frame.magnification != 1.0f) {
@@ -1055,6 +1078,13 @@ void CityCapturer::SetClearColor_(const uint32_t rgba)
     }
 }
 
+void CityCapturer::SetTimeOfDay_(const float time) const
+{
+    if (cISC4LightingManager* lighting = LightingManager(GameAccess::Renderer())) {
+        lighting->SetTimeOfDay(time);
+    }
+}
+
 void CityCapturer::RestoreClearColor_()
 {
     if (saved_.clearColorSet) {
@@ -1132,6 +1162,9 @@ void CityCapturer::Restore_(const bool cityClosing)
     }
 
     RestoreClearColor_();
+    if (saved_.timeOfDaySaved) {
+        SetTimeOfDay_(saved_.timeOfDay);
+    }
     if (saved_.snapshotPropertySet && game.app) {
         if (cISC4RenderProperties* properties = game.app->GetRenderProperties()) {
             properties->SetBoolValue(CaptureAddresses::Renderer::kRenderSnapshotProperty, false);
@@ -1318,6 +1351,11 @@ void CityCapturer::OnSaveBegin_()
     RestoreClearColor_();
     saved_.clearColorDirect = direct;  // keeps the way the color is set for the rest of the render
     renderer->EnableBackgroundPicture(saved_.backgroundPicture);
+    if (saved_.timeOfDaySaved) {
+        // The game time of day for the save. The thumbnail writer sets noon for its own picture
+        // and puts back what it found.
+        SetTimeOfDay_(saved_.timeOfDay);
+    }
     saveInsideRender_ = true;
     LOG_INFO("Capture: the city is saved during the render, the render goes on after the save");
 }
@@ -1335,6 +1373,9 @@ void CityCapturer::ResumeAfterSave_()
     }
     game.renderer->EnableBackgroundPicture(false);
     SetClearColor_(clearColorNow_);
+    if (saved_.timeOfDaySaved) {
+        SetTimeOfDay_(CaptureAddresses::kNoon);
+    }
     if (saved_.snapshotPropertySet) {
         // The thumbnail writer turns the property off at its end.
         if (cISC4RenderProperties* properties = game.app->GetRenderProperties()) {
@@ -1444,6 +1485,7 @@ void CityCapturer::DrawPanelSection()
     }
     if (ctx_.settings) {
         ImGui::Text("Render after each save: %s", ctx_.settings->renderOnSave ? "on" : "off");
+        ImGui::Text("Light: %s", ctx_.settings->captureAtNoon ? "noon" : "time of day of the game");
     }
     if (!lastResult_.empty()) {
         ImGui::TextWrapped("Last result: %s", lastResult_.c_str());

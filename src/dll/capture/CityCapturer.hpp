@@ -136,6 +136,8 @@ private:
         bool dataViewPushed = false;
         bool snapshotPropertySet = false;
         bool synchronousModels = false;
+        bool timeOfDaySaved = false;    // the render runs at noon
+        float timeOfDay = 0.0f;
     };
 
     bool Begin_(bool testTile, const CaptureRequest& request);
@@ -163,6 +165,8 @@ private:
 
     void SetClearColor_(uint32_t rgba);
     void RestoreClearColor_();
+    // Sets the time of day of the lighting, when the render changed it.
+    void SetTimeOfDay_(float time) const;
     void SetTarget_(const cS3DVector3& target);
     // Runs the message pump of the game like the thumbnail writer. False when the capture
     // ended inside it (the city closed).

@@ -39,6 +39,8 @@ public:
     bool clickToSwitch = true;
     // Render the city after every save.
     bool renderOnSave = false;
+    // Render with noon light, whatever the time of day in the game.
+    bool captureAtNoon = true;
     // GPU tile cache limit in megabytes.
     int tileCacheMB = 96;
     // Texture uploads per frame: at most this many tiles...

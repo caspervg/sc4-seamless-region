@@ -218,6 +218,8 @@ void SeamlessPanel::DrawSettings_()
     changed |= ImGui::Checkbox("Click a neighbor to play it", &s->clickToSwitch);
     HelpMarker("The game saves your city first, if saving is allowed.");
     changed |= ImGui::Checkbox("Render the city after each save", &s->renderOnSave);
+    changed |= ImGui::Checkbox("Render at noon", &s->captureAtNoon);
+    HelpMarker("Render cities with noon light. Then all neighbors look the same, also when you render at night.");
     changed |= ImGui::SliderInt("Scroll past the edge (metres)", &s->zoom45BandMetres, Settings::kMinBandMetres,
                                 Settings::kMaxBandMetres, "%d", ImGuiSliderFlags_AlwaysClamp);
     HelpMarker("At zoom 4 and 5, the camera can move this far past the edge of your city.");

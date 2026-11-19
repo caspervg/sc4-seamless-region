@@ -44,7 +44,8 @@ What the capture takes over and what not:
 | `PushView(0)` and view level 1 | yes | A data view or an underground view must not be in the tiles |
 | `kRenderSnapshot` (0x1c) on | yes, back to off at the end like the writer | What reads it was not found (low confidence on its effect) |
 | Background picture | `EnableBackgroundPicture(false)` (slot +0xcc, writes renderer +0x4d), restored from +0x4d | The clear color only shows without it |
-| Noon, 0.25 magnification, 4 point antialiasing, water glare off, realistic filter | **no** | The tiles must look like the live view. Magnification is 1.0 |
+| Noon | yes, unless `CaptureAtNoon=false` | Neighbors rendered at different times of day look the same. `cISC43DRender::GetLightingManager` (slot 9, +0x24, called at `0x005ddf82`), then `GetTimeOfDay` (+0x14) and `SetTimeOfDay(12.0)` (+0x18). Put back at the end and around a save inside the render |
+| 0.25 magnification, 4 point antialiasing, water glare off, realistic filter | **no** | The tiles must look like the live view. Magnification is 1.0 |
 | Messages `0x4AB04CBE`/`0x4AB04CBF` | no | They bracket the writer's change of the view filter. The capture leaves the filter alone |
 | Fog | left as the live view has it | The eye stays on one plane for every view target (`UpdateCameraPositionParams`), so depth and fog are the same for every tile and for the live view |
 

@@ -543,6 +543,15 @@ installed. The checks are the same for both. Tools tab, group "Capture".
 5. Start a region render (Batch). No `Capture: the city was saved, rendering it` line shows
    during the batch: the batch renders each city itself.
 
+### Render at noon
+
+1. Settings tab: "Render at noon" is on (the default). Wait until it is night in the game.
+2. Render one test tile. The tile shows day light. After the render, the city on the screen is
+   at night again.
+3. Turn "Render at noon" off and render the test tile again. The tile now shows night.
+4. With "Render at noon" on, save the city (Ctrl+S) during a full render. The region picture
+   looks as after a normal save, and the render goes on at noon.
+
 ## Batch
 
 Use a small test region with 3 to 5 founded cities and one empty tile. Copy the region first:

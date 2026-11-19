@@ -65,7 +65,14 @@ namespace CaptureAddresses
         constexpr uint32_t kViewportClearColor = 0x1a8;
         // cISC4RenderProperties bool property the thumbnail writer turns on (kRenderSnapshot).
         constexpr int32_t kRenderSnapshotProperty = 0x1c;
+        // cISC43DRender::GetLightingManager, vtable slot 9 (+0x24). The thumbnail writer calls
+        // it at 0x005ddf82 and gets a plain cISC4LightingManager* (no AddRef). The gzcom-dll
+        // header declares a return by value, which does not match: call it through the vtable.
+        constexpr uint32_t kGetLightingManagerSlot = 9;
     }
+
+    // cISC4LightingManager::SetTimeOfDay value the thumbnail writer uses (0x005de0ad, slot +0x18).
+    constexpr float kNoon = 12.0f;
 
     // cISC4ViewManager data view 0: the plain city, no data view on top.
     constexpr uint32_t kPlainDataView = 0;
