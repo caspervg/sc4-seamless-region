@@ -76,6 +76,15 @@ namespace CaptureAddresses
 
     // cISC4ViewManager data view 0: the plain city, no data view on top.
     constexpr uint32_t kPlainDataView = 0;
+    // Data view 0xF3, "DataView: Regional Transport Map" (exemplar 6534284A-690F693F-4A0B68F3):
+    // hides every occupant and draws the networks as colored triangles. docs/re-notes/
+    // transport-view.md.
+    constexpr uint32_t kTransportDataView = 0xF3;
+    // uint32 at the cISC4ViewManager pointer (the map view, SetDataView 0x007a49b0): the current
+    // data view instance, 0x4A0B6800 + id, 0 for the plain view. It stays put when the map view
+    // is not ready (+0x142 == 0). PushView 0x007a61e0 uses its +0x9c8 on this pointer.
+    constexpr uint32_t kCurrentDataViewOffset = 0x9cc;
+    constexpr uint32_t kTransportDataViewInstance = 0x4A0B6800u + kTransportDataView;
     // cSC4View3DWin view level 1: the surface (not an underground view).
     constexpr uint32_t kSurfaceViewLevel = 1;
 }

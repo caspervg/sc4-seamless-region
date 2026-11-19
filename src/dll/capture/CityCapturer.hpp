@@ -19,6 +19,12 @@
 // those tiles comes from the difference (CaptureMath::ComposeTwoPasses). Both key colors are
 // measured from the screen first, so the pixel format of the back buffer does not matter.
 //
+// Transport layer (Settings::captureTransportLayer): after the blocks of a level, the game's
+// data view 0xF3 (the transport map of the region view) is pushed once, the tiles that the
+// normal pass found non-empty are drawn again with the same blocks and key colors, but without
+// a model wait, and the view is popped. They go to t<rot>z<zoom>/ as their own level.
+// docs/re-notes/transport-view.md.
+//
 // Writes through TileStore. Restores the game state (zoom, rotation, camera target,
 // magnification, data view, view level, background, clear color, free roam, walls, neighbor
 // drawing, model loading, pause) whether it succeeds, fails or is cancelled. When the city
@@ -89,6 +95,9 @@ public:
     // The "Render up to zoom" choice of the panel (Settings::maxRenderZoom), with its help text.
     // The batch panel shows it too.
     static void DrawMaxZoomChoice(Settings& settings);
+    // The "Transport layer" check box (Settings::captureTransportLayer). The batch panel shows it
+    // too.
+    static void DrawTransportChoice(Settings& settings);
 
 private:
     enum class Phase
@@ -114,6 +123,8 @@ private:
         int tiles = 0;      // tiles that touch the outline
         bool started = false;   // its older tiles were deleted, its new tiles are on their way
         bool captured = false;  // every tile of this run is handed to the store
+        bool transport = false; // the transport layer of the level before it
+        bool skipped = false;   // left out part way: never complete
     };
 
     // What Prepare changed, so Restore puts back exactly that.
@@ -139,6 +150,7 @@ private:
         bool viewLevelSaved = false;
         uint32_t viewLevel = 0;
         bool dataViewPushed = false;
+        bool transportPushed = false;   // data view 0xF3 is on top of the capture's data view 0
         bool snapshotPropertySet = false;
         bool synchronousModels = false;
         bool glareSaved = false;        // the render turned the water glare off
@@ -175,6 +187,16 @@ private:
     // Writes meta.json for the tiles that are on disk now. final = the render is complete.
     bool WriteMeta_(bool final);
     int maxZoom_ = 3;  // zoom index, the highest this render makes
+    bool transport_ = false;  // this render makes the transport layer
+
+    // Pushes data view 0xF3, pumps and checks that it took. False when it did not (logged) or
+    // when the capture ended in the pump.
+    bool PushTransport_();
+    // Pops data view 0xF3 when the capture pushed it. True when it did.
+    bool PopTransport_();
+    // Leaves the current level out from here on: its tiles stop counting and it never shows as
+    // complete.
+    void SkipLevel_();
 
     void SetClearColor_(uint32_t rgba);
     void RestoreClearColor_();
@@ -232,6 +254,10 @@ private:
     bool levelBegun_ = false;        // the tiles of the level wait in pending_
     int levelTilesDone_ = 0;
     std::vector<uint8_t> pending_;   // tilesX * tilesY flags: the tile still waits for its render
+    // tilesX * tilesY flags of the normal level drawnLevel_: the tile was not empty. The transport
+    // level after it draws only those.
+    std::vector<uint8_t> drawn_;
+    size_t drawnLevel_ = SIZE_MAX;
 
     // The current block.
     enum class TileKind : uint8_t
