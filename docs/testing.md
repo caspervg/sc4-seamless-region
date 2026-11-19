@@ -583,9 +583,19 @@ city with roads, rail, a highway and zones.
 11. Turn the option off, save the city and render again: the `t` folders are deleted at the end,
     and `meta.json` names only the 16 normal levels. Without a save in between the `t` folders
     stay.
-12. With the NAM and RHW: the transport tiles show RHW only when you opened a data view in that
-    city before the render, the same as the game's own transport map (open point in
-    `docs/todo.md`).
+12. Dirt roads (RHW) on the transport map (`docs/re-notes/transport-view.md` section 9). At game
+    start the log shows `Hooking: applied patch TransportMapTypeFlags` and `Capture: dirt roads
+    (RHW) are drawn on the transport map`. Use a city with RHW and do not open a data view:
+    - With a NAM that keeps the game's highway color (no `0B9EC13D` override, for example the
+      sc4pac NAM): the RHW shows in highway red on the transport tiles. Diagonal RHW shows as
+      steps of full cells, not as smooth lines.
+    - With a NAM that sets the highway color to 0 (the development install): the RHW shows in
+      road grey. Highways stay as the NAM draws them.
+    - Roads, streets, rail and highways look as before. With highway red, a cell where a road
+      crosses the RHW is a full red cell.
+    - Save the city and go to the region view. Turn on the transport map there: the RHW of this
+      city shows, also when you did not open a data view.
+    - Exit the game: the log shows `Hooking: restored patch TransportMapTypeFlags`.
 
 ### Render at noon
 
