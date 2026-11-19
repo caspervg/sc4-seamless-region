@@ -143,6 +143,9 @@ void Settings::Load(const std::filesystem::path& settingsFilePath)
         r.Int("UploadMsPerFrame", uploadMsPerFrame, kMinUploadMs, kMaxUploadMs);
         r.Int("Zoom45BandMetres", zoom45BandMetres, kMinBandMetres, kMaxBandMetres);
         r.Int("WebpQuality", webpQuality, kMinWebpQuality, kMaxWebpQuality);
+        r.Int("MapQuality", mapQuality, kMinWebpQuality, kMaxWebpQuality);
+        r.Int("MapCacheMB", mapCacheMB, kMinMapCacheMB, kMaxMapCacheMB);
+        r.Int("MapUpscaleLevels", mapUpscaleLevels, kMinMapUpscale, kMaxMapUpscale);
     }
     catch (const std::exception& e) {
         LOG_ERROR("Failed to read settings from {}: {}", Logger::PathText(settingsFilePath), e.what());
@@ -173,6 +176,9 @@ bool Settings::Save(const std::filesystem::path& settingsFilePath) const
         s["UploadMsPerFrame"] = std::to_string(uploadMsPerFrame);
         s["Zoom45BandMetres"] = std::to_string(zoom45BandMetres);
         s["WebpQuality"] = std::to_string(webpQuality);
+        s["MapQuality"] = std::to_string(mapQuality);
+        s["MapCacheMB"] = std::to_string(mapCacheMB);
+        s["MapUpscaleLevels"] = std::to_string(mapUpscaleLevels);
         if (!file.write(ini)) {
             LOG_ERROR("Failed to write settings to {}", Logger::PathText(settingsFilePath));
             return false;

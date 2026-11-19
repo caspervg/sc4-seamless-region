@@ -49,6 +49,12 @@ public:
     int zoom45BandMetres = 1024;
     // WebP quality for stored tiles, 0 to 100.
     int webpQuality = 82;
+    // Region map export: WebP quality of the map tiles, 0 to 100.
+    int mapQuality = 75;
+    // Region map export: memory for decoded city tiles in megabytes.
+    int mapCacheMB = 32;
+    // Region map export: zoom levels above the full size level (shown enlarged).
+    int mapUpscaleLevels = 1;
 
     // Range limits, also used by the panel.
     static constexpr int kMinTileCacheMB = 16, kMaxTileCacheMB = 1024;
@@ -56,6 +62,8 @@ public:
     static constexpr int kMinUploadMs = 1, kMaxUploadMs = 50;
     static constexpr int kMinBandMetres = 0, kMaxBandMetres = 16384;
     static constexpr int kMinWebpQuality = 0, kMaxWebpQuality = 100;
+    static constexpr int kMinMapCacheMB = 8, kMaxMapCacheMB = 48;
+    static constexpr int kMinMapUpscale = 0, kMaxMapUpscale = 3;
 
 private:
     uint32_t revision_ = 0;
