@@ -1,5 +1,6 @@
 #include "TestRunner.hpp"
 #include "batch/BatchQueue.hpp"
+#include "store/TileStore.hpp"
 
 #include <string>
 #include <vector>
@@ -187,4 +188,34 @@ TEST_CASE(BatchJsonRegionViewRoundTripAndOldFiles)
     }
     const auto old = BatchQueue::Parse(text);
     CHECK(old && !old->regionView);
+}
+
+// The batch rule: a city is up to date only when its render is newer than its save and its
+// meta.json has every level up to the chosen zoom.
+TEST_CASE(BatchUpToDateNeedsEveryLevelUpToTheMaxZoom)
+{
+    CityRenderMeta meta;
+    meta.saveFileTime = 1000;
+    for (int r = 0; r < 4; ++r) {
+        for (int z = 0; z < 4; ++z) {
+            meta.levels.push_back({r, z, 0.0f, 0.0f, 1, 1});
+        }
+    }
+    const std::optional<CityRenderMeta> upTo4 = meta;
+    CHECK(CityMeta::NeedsRender(std::nullopt, 1000, 3));  // never rendered
+    CHECK(!CityMeta::NeedsRender(upTo4, 1000, 3));
+    CHECK(!CityMeta::NeedsRender(upTo4, 1000, 2));  // more than asked is fine
+    CHECK(CityMeta::NeedsRender(upTo4, 1000, 4));   // zoom 5 is missing
+    CHECK(CityMeta::NeedsRender(upTo4, 1001, 3));   // saved after the render
+    // One level missing (a cancelled render): render again.
+    CityRenderMeta part = meta;
+    part.levels.erase(part.levels.begin() + 5);
+    CHECK(CityMeta::NeedsRender(part, 1000, 3));
+    CHECK(!CityMeta::HasLevelsUpTo(part, 3));
+    // With zoom 5 on disk.
+    for (int r = 0; r < 4; ++r) {
+        meta.levels.push_back({r, 4, 0.0f, 0.0f, 1, 1});
+    }
+    CHECK(!CityMeta::NeedsRender(meta, 1000, 4));
+    CHECK(CityMeta::HasLevelsUpTo(meta, 4));
 }
