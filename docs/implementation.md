@@ -318,6 +318,15 @@ gives blocks of one tile, read in parts. When the window size changes during a b
 block is planned again for the new size. Progress, the time left and the store keep counting
 tiles. Details: `docs/re-notes/capture.md`, Blocks.
 
+**Transport layer** (`CaptureTransportLayer`, off by default, the "Transport layer" check box next
+to "Render up to"). Each normal level is followed by a transport level of the same zoom, rotation
+and grid: `PushView(0xF3)` once, pump, check the current data view (map view +0x9cc), draw the
+tiles the normal pass wrote, with the same blocks and key colors and no model wait, `PopView(0xF3)`.
+A push that does not take leaves the level out with a log line. A save pops the view at pre-save,
+and the next block step pushes and checks again. Restore, cancel, failure and city close pop it
+first. Progress and the time left count the transport tiles (an upper bound until the normal
+level knows its tiles). Details: `docs/re-notes/transport-view.md`, sections 7 and 8.
+
 ### store/TileStore and store/WebpCodec
 
 ```cpp
@@ -347,8 +356,12 @@ bool Decode(std::span<const uint8_t> data, std::vector<uint8_t>& rgba, int& w, i
 }
 ```
 
-Layout: `<Region>/RegionRenders/<cityKey>/r<rot>z<zoom>/<tx>_<ty>.webp` and
-`<Region>/RegionRenders/<cityKey>/meta.json`. Fully transparent tiles are not written.
+Layout: `<Region>/RegionRenders/<cityKey>/r<rot>z<zoom>/<tx>_<ty>.webp`, the transport layer in
+`t<rot>z<zoom>/` (`TileKey::transport`), and `<Region>/RegionRenders/<cityKey>/meta.json`. Fully
+transparent tiles are not written. meta.json levels have `"layer": "normal"` or `"transport"`
+(`Level::transport`; a missing field is normal, an unknown layer is left out). The index, the scan
+and `DeleteLevel` keep the two layers apart (one bit of the packed key). `CityMeta::ChooseLevel`
+never picks a transport level, so neighbors, walls and the picker only see normal tiles.
 
 ### render/TileCache and render/NeighborRenderer
 
@@ -474,6 +487,10 @@ degrees), so only zoom 4 can stand in for zoom 5 (same pitch, exactly 2x).
   (`docs/re-notes/capture.md`, "Which zooms").
 - **Batch**: a city is up to date only when its render is not stale and its `meta.json` has every
   level up to the max (`CityMeta::NeedsRender`). Raising the max makes every city need a render.
+  With `CaptureTransportLayer` on, every transport level up to the max is needed too.
+- **Levels a render does not make** (`CityMeta::LevelsToDrop`): levels above the max, and
+  transport levels when the option is off, stay while the city was not saved since, else the
+  final meta.json leaves them out and their tiles are deleted.
 - **Neighbors, walls and tint** use `CityMeta::ChooseLevel` per view (rotation and zoom). The
   camera module hides an edge wall only in the views where the neighbor across it is drawn, so
   with max zoom 3 the walls stay at zoom 4 and 5. The hover tint uses the front style only where

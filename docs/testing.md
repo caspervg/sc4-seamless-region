@@ -547,6 +547,46 @@ installed. The checks are the same for both. Tools tab, group "Capture".
 5. Start a region render (Batch). No `Capture: the city was saved, rendering it` line shows
    during the batch: the batch renders each city itself.
 
+### Transport layer
+
+The capture also renders the game's transport view (`docs/re-notes/transport-view.md`). Use a
+city with roads, rail, a highway and zones.
+
+1. Turn on "Transport layer" next to "Render up to" (Capture or Region render section). The
+   tooltip explains it. Save the settings: the INI has `CaptureTransportLayer=true`.
+2. Press "Render this city". After the tiles of each level the text says "Rotation R, zoom Z,
+   transport: tile N of M". M is the number of tiles the normal pass wrote for that level.
+3. Log lines per level, after the normal level:
+   - `Capture: transport view open in N ms` (note N for a large city: it is one pass over every
+     occupant)
+   - `Capture: rotation R zoom Z transport: N tiles in a grid of X x Y`
+   - no `the transport view did not open` warning. If it shows, report the data view number
+     in the line.
+4. While the transport tiles render, the screen shows the transport map: no buildings, no
+   props or trees, networks as flat colored lines, zones as a pale tint, terrain and water as
+   normal. The map view buttons and the legend can flicker. That is expected.
+5. Output: `t0z0` to `t3z3` next to `r0z0` to `r3z3`. A `t` folder has no more files than its
+   `r` folder. `meta.json` has 32 levels, 16 with `"layer": "transport"`, with the same
+   `originX`, `originY`, `tilesX` and `tilesY` as the normal level of the same rotation and zoom.
+6. Put a `t` tile over the `r` tile with the same name in an image editor: roads and terrain line
+   up to the pixel. Outside the city the tile is transparent.
+7. After the end the city shows the normal view (buildings back, no data view, map view buttons
+   as before), and neighbors draw normal tiles, never transport tiles.
+8. Cancel during a transport level: the view is normal at once. `meta.json` does not name that
+   transport level. Start the region render: this city renders again (the transport level is
+   missing).
+9. Save (Ctrl+S) during a transport level. Log: `Capture: the transport view is closed for the
+   save`, then `Capture: transport view open in N ms` again, and the render goes on. The region
+   view picture of the city after the save looks like a normal save (normal and transport map).
+10. Leave to the region view during a transport level: no crash, the next city opens in the
+    normal view.
+11. Turn the option off, save the city and render again: the `t` folders are deleted at the end,
+    and `meta.json` names only the 16 normal levels. Without a save in between the `t` folders
+    stay.
+12. With the NAM and RHW: the transport tiles show RHW only when you opened a data view in that
+    city before the render, the same as the game's own transport map (open point in
+    `docs/todo.md`).
+
 ### Render at noon
 
 1. Settings tab: "Render at noon" is on (the default). Wait until it is night in the game.
@@ -706,6 +746,8 @@ Changes apply to the next render. Save the settings to keep them.
    is up to date. Choose "Zoom 5": every city needs a render (the zoom 5 levels are missing).
 2. Choose "Zoom 3" with cities rendered up to zoom 4: every city is up to date.
 3. The choice is off while the region render runs.
+4. Turn on "Transport layer" in the Region render section: every city without transport levels
+   needs a render. After the run, turn it off: every city is up to date again.
 
 ## Region map export
 

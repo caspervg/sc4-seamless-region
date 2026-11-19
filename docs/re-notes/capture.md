@@ -228,8 +228,9 @@ restore as the others, at 146 px per cell. A level above the chosen zoom that an
 left (zoom 5 on disk, now a render up to zoom 4) is not touched while the city has not been saved
 since that render (`saveFileTime` of the earlier meta equals the save of now): it still shows the
 city as it is. When the city was saved since, it is out of date: the final `meta.json` leaves it
-out, then `TileStore::DeleteLevel` removes its tiles (`CityMeta::HigherLevelsToDrop`). So stale
-tiles never show and `meta.json` names only levels that are on disk.
+out, then `TileStore::DeleteLevel` removes its tiles (`CityMeta::LevelsToDrop`). The same holds for
+transport levels when the transport layer is off. So stale tiles never show and `meta.json` names
+only levels that are on disk.
 
 **What stays out of the tiles.** Neighbor tiles (`NeighborRenderer::SetEnabled(false)`), the
 edge walls (`CameraExtender::SetEdgeWallsHidden(all)`), the hover tint and the map overlay (both

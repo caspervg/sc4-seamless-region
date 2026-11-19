@@ -68,20 +68,19 @@ city a few ticks later. Saves that leave the city (switch, region view, quit) do
 
 ## Transport layer
 
-The RE is done: `docs/re-notes/transport-view.md`. The region view's transport picture is the
-game's data view `0xF3` pushed on the normal view (`PushView(0xF3)` ... `PopView(0xF3)`), same
-camera, so the tiles line up. To build:
+Built (`CaptureTransportLayer`, `docs/re-notes/transport-view.md` sections 7 and 8), not run in
+the game yet (`docs/testing.md`, Capture, Transport layer). Left:
 
-1. `CaptureTransportLayer` option, off by default.
-2. Per level, after the normal blocks: push `0xF3`, pump, check the view manager's current view
-   (+0x9cc == `0x4A0B68F3`), draw the non-empty tiles again (no model wait), pop, pump. One
-   push and pop per level: a switch walks every occupant.
-3. Tiles in `t<rot>z<zoom>/`, transport levels in `meta.json`. The store scan and the neighbor
-   renderer must ignore them.
-4. Pop at pre-save and at city shutdown, push again after the save.
-5. A second base layer on the Leaflet map. In game later, if wanted.
+1. **RHW on the transport map.** The game's layout view cannot draw dirt roads (type 11). With
+   the NAM's 0xF3 exemplar (data source `0x4C`, dark colour ramp) they show as a data overlay,
+   but only after the player opened a data view in that city. Trace where the map view fills
+   the overlay of source `0x4C` (map view +0x13c, the `0x4C` cases in `0x007a17b0`, the ATM
+   call), then find the cheapest safe way to fill it before the transport pass.
+2. Measure the cost of `PushView(0xF3)` in a large city (log `Capture: transport view open in`).
+3. In game, if wanted: neighbor tiles from the `t` levels while the live city shows the
+   transport data view.
 
-Limits: RHW (dirt road), pipes, power lines and subway are not drawn, the same as in the game.
+Limits: pipes, power lines and subway are not drawn, the same as in the game.
 
 ## Fancier region map page
 
