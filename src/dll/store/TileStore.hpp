@@ -2,10 +2,11 @@
 
 // Store (W2-D): reads and writes the rendered tiles of every city of the region.
 //
-// Layout: <Region>/RegionRenders/<cityKey>/r<rot>z<zoom>/<tx>_<ty>.webp and
-// <Region>/RegionRenders/<cityKey>/meta.json. Fully transparent tiles are not written (and an
-// older file for the same tile is deleted). Up to 4 encode worker threads, bounded queue. Zoom 5 is
-// stored only when the player renders up to zoom 5 (Settings::maxRenderZoom).
+// Layout: <Region>/RegionRenders/<cityKey>/r<rot>z<zoom>/<tx>_<ty>.webp, the transport layer in
+// t<rot>z<zoom>/ with the same tile names, and <Region>/RegionRenders/<cityKey>/meta.json. Fully
+// transparent tiles are not written (and an older file for the same tile is deleted). Up to 4
+// encode worker threads, bounded queue. Zoom 5 is stored only when the player renders up to zoom 5
+// (Settings::maxRenderZoom).
 //
 // Threads: QueueWrite, WriteMeta, Flush, DeleteCity, SetRegionDirectory and the panel run on the
 // game thread (capture side). HasTile, ReadTile and TilePath are safe from any thread, for
@@ -37,6 +38,7 @@ struct TileKey
     int zoom = 0;         // zoom index 0..4
     int tx = 0;           // ViewMath::TileGrid tile column
     int ty = 0;           // tile row
+    bool transport = false;  // the transport layer (t<rot>z<zoom>/), else the normal one
 };
 
 struct CityRenderMeta
@@ -55,6 +57,9 @@ struct CityRenderMeta
         // less than 1 has fewer pixels and is drawn larger (CityMeta::LevelScale). Metas written
         // before the field existed read as 1.
         float magnification = 1.0f;
+        // The transport layer ("layer": "transport" in meta.json), drawn on the same grid as the
+        // normal level of the same rotation and zoom. Metas without the field are "normal".
+        bool transport = false;
     };
     std::vector<Level> levels;
     // Both are Windows FILETIME ticks (100 ns since 1601), see TileStore::FileTime. saveFileTime
@@ -79,7 +84,7 @@ namespace CityMeta
     [[nodiscard]] bool IsStale(const std::optional<CityRenderMeta>& meta, int64_t saveFileTime);
     // The levels meta.json may name while a render runs: the levels in `rendered` (complete
     // on disk), plus every level of `earlier` that is neither in `rendered` nor in `dropped`
-    // (levels whose tiles are being replaced). Levels match by rotation and zoom.
+    // (levels whose tiles are being replaced). Levels match by rotation, zoom and layer.
     [[nodiscard]] std::vector<CityRenderMeta::Level> MergeLevels(const std::vector<CityRenderMeta::Level>& earlier,
                                                                  const std::vector<CityRenderMeta::Level>& rendered,
                                                                  const std::vector<CityRenderMeta::Level>& dropped);
@@ -91,19 +96,24 @@ namespace CityMeta
     [[nodiscard]] double LevelScale(const CityRenderMeta::Level& level, int viewZoom);
     // The level of one rotation to draw at viewZoom. Of the levels with tiles and a scale of at
     // least 1, the one with the smallest scale: the most detail, never shrunk. So zoom 5 takes
-    // its own level, else zoom 4 at twice the size. nullptr when no level fits.
+    // its own level, else zoom 4 at twice the size. Transport levels never count. nullptr when
+    // no level fits.
     [[nodiscard]] const CityRenderMeta::Level* ChooseLevel(const std::vector<CityRenderMeta::Level>& levels,
                                                            int rotation, int viewZoom);
-    // Every rotation has every zoom index from 0 to maxZoom.
-    [[nodiscard]] bool HasLevelsUpTo(const CityRenderMeta& meta, int maxZoom);
+    // Every rotation has every zoom index from 0 to maxZoom, with transport = true also in the
+    // transport layer.
+    [[nodiscard]] bool HasLevelsUpTo(const CityRenderMeta& meta, int maxZoom, bool transport = false);
     // The batch rule: a city needs a render when its render is stale (IsStale) or a level up to
-    // maxZoom (zoom index) is missing.
-    [[nodiscard]] bool NeedsRender(const std::optional<CityRenderMeta>& meta, int64_t saveFileTime, int maxZoom);
-    // The levels above maxZoom (zoom index) of an earlier render that a new render up to maxZoom
-    // must delete: all of them when the city was saved after that render (its saveFileTime
-    // differs from saveFileTime), else none. They stay while they still show the city as it is.
-    [[nodiscard]] std::vector<CityRenderMeta::Level> HigherLevelsToDrop(const CityRenderMeta& earlier, int maxZoom,
-                                                                        int64_t saveFileTime);
+    // maxZoom (zoom index) is missing. With transport, a missing transport level counts too.
+    [[nodiscard]] bool NeedsRender(const std::optional<CityRenderMeta>& meta, int64_t saveFileTime, int maxZoom,
+                                   bool transport = false);
+    // The levels of an earlier render that a new render up to maxZoom (zoom index), with or
+    // without the transport layer, does not make again: levels above maxZoom, and transport
+    // levels when the new render has none. All of them must go when the city was saved after
+    // that render (its saveFileTime differs from saveFileTime), else none. They stay while they
+    // still show the city as it is.
+    [[nodiscard]] std::vector<CityRenderMeta::Level> LevelsToDrop(const CityRenderMeta& earlier, int maxZoom,
+                                                                  int64_t saveFileTime, bool transport = false);
 }
 
 class TileStore final : public Module
@@ -136,8 +146,8 @@ public:
     // True when the city has no render or its save file differs from the rendered one.
     [[nodiscard]] bool IsStale(const CityInfo& city) const;
     // CityMeta::NeedsRender for the city's save file: stale, or a level up to maxZoom (zoom
-    // index) is missing.
-    [[nodiscard]] bool NeedsRender(const CityInfo& city, int maxZoom) const;
+    // index) is missing, with transport also a transport level.
+    [[nodiscard]] bool NeedsRender(const CityInfo& city, int maxZoom, bool transport = false) const;
     // Cached directory index, no disk hit and no allocation per call once a city is indexed.
     // The first call for a city that the background scan has not reached yet scans that city.
     [[nodiscard]] bool HasTile(const TileKey& key) const;
@@ -159,8 +169,8 @@ public:
     // Deletes the tiles of one rotation and zoom of a city on the worker, in queue order: tiles
     // queued after this call stay. A render calls it before it writes a level again, so no
     // tile of the older render is left where the new one has none. Take the level out of
-    // meta.json first.
-    bool DeleteLevel(const std::string& cityKey, int rotation, int zoom);
+    // meta.json first. transport: the level of the transport layer.
+    bool DeleteLevel(const std::string& cityKey, int rotation, int zoom, bool transport = false);
     // City keys that have a meta.json in the renders folder. Reads the disk, not for every frame.
     [[nodiscard]] std::vector<std::string> ListRenderedCities() const;
 
@@ -190,7 +200,7 @@ private:
     {
         enum class Type : uint8_t { Write, DeleteCity, DeleteLevel, Scan };
         Type type = Type::Write;
-        TileKey key;          // Write, DeleteLevel (city, rotation and zoom)
+        TileKey key;          // Write, DeleteLevel (city, rotation, zoom and layer)
         std::string cityKey;  // DeleteCity
         std::vector<uint8_t> rgba;
         int w = 0, h = 0;

@@ -212,6 +212,9 @@ TEST_CASE(MapPageIsSelfContained)
     page.height = 2000;
     page.maxZoom = 4;
     page.upscaleLevels = 2;
+    page.rotation = 2;
+    page.sourceZoom = 4;
+    page.transport = true;
     MapExport::PageCity city;
     city.name = "</script><b>Oak \"Town\"";
     city.outline = {cS3DVector2(1.0f, 2.0f), cS3DVector2(10.04f, 2.0f), cS3DVector2(10.0f, 20.0f),
@@ -222,9 +225,21 @@ TEST_CASE(MapPageIsSelfContained)
     CHECK(html.starts_with("<!doctype html>"));
     CHECK(html.find("https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js") != std::string::npos);
     CHECK(html.find("https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css") != std::string::npos);
-    CHECK(html.find("sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=") != std::string::npos);
+    // The sha384 of the cdnjs files, checked against the downloaded files.
+    CHECK(html.find("sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH") != std::string::npos);
+    CHECK(html.find("sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H") != std::string::npos);
+    // Every external file is a pinned Leaflet file from cdnjs, everything else is relative.
+    const std::string pinned = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/";
+    for (size_t at = html.find("https://"); at != std::string::npos; at = html.find("https://", at + 1)) {
+        CHECK(html.compare(at, pinned.size(), pinned) == 0);
+    }
+    CHECK(html.find("http://") == std::string::npos);
     CHECK(html.find("L.CRS.Simple") != std::string::npos);
-    CHECK(html.find("tiles/{z}/{x}/{y}.webp") != std::string::npos);
+    CHECK(html.find("'/{z}/{x}/{y}.webp'") != std::string::npos);
+    CHECK(html.find("tiles('tiles'") != std::string::npos && html.find("tiles('tiles-transport'") != std::string::npos);
+    CHECK(html.find("map.fitBounds(ground") != std::string::npos);
+    CHECK(html.find("requestFullscreen") != std::string::npos && html.find("replaceState") != std::string::npos);
+    CHECK(html.find("L.control.layers") != std::string::npos && html.find("datalist") != std::string::npos);
     CHECK(html.find("maxNativeZoom: data.maxZoom") != std::string::npos);
     CHECK(html.find("Made with SC4 Seamless Region") != std::string::npos);
     CHECK(html.find("<h1>Bay &amp; &lt;Hills&gt;</h1>") != std::string::npos);
@@ -242,6 +257,8 @@ TEST_CASE(MapPageIsSelfContained)
     CHECK(introAt != std::string::npos);
     const std::string intro = html.substr(introAt, html.find("</p>", introAt) - introAt);
     CHECK(intro.find(';') == std::string::npos && intro.find("2026-11-19") != std::string::npos);
+    CHECK(intro.find("Rotation 3, made from the zoom 5 renders.") != std::string::npos);
+    CHECK(html.find("@ROTATION@") == std::string::npos && html.find("@ZOOM@") == std::string::npos);
 
     // The inline data block is valid JSON with the page values.
     const std::string open = "id=\"region-data\">";
@@ -251,6 +268,7 @@ TEST_CASE(MapPageIsSelfContained)
     CHECK(!data.is_discarded());
     if (!data.is_discarded()) {
         CHECK(data["maxZoom"] == 4 && data["upscale"] == 2 && data["width"] == 3000 && data["height"] == 2000);
+        CHECK(data["rotation"] == 2 && data["sourceZoom"] == 4 && data["transport"] == true);
         CHECK(data["cities"].size() == 1);
         CHECK(data["cities"][0]["name"] == city.name);
         CHECK(data["cities"][0]["outline"].size() == 4);
@@ -297,7 +315,7 @@ namespace
         }
 
         void WriteTile(const CityInfo& c, const int rotation, const int tx, const int ty, const int size,
-                       const std::array<uint8_t, 4> color) const
+                       const std::array<uint8_t, 4> color, const bool transport = false) const
         {
             std::vector<uint8_t> rgba(static_cast<size_t>(size) * size * 4);
             for (size_t i = 0; i < rgba.size(); i += 4) {
@@ -305,16 +323,17 @@ namespace
             }
             std::vector<uint8_t> encoded;
             CHECK(WebpCodec::Encode(rgba.data(), size, size, 90, encoded));
-            const fs::path file = TileStore::TilePathIn(renders, {c.key, rotation, kZoomIndex, tx, ty});
+            const fs::path file = TileStore::TilePathIn(renders, {c.key, rotation, kZoomIndex, tx, ty, transport});
             fs::create_directories(file.parent_path());
             std::ofstream(file, std::ios::binary)
                 .write(reinterpret_cast<const char*>(encoded.data()), static_cast<std::streamsize>(encoded.size()));
         }
     };
 
-    bool PixelAt(const fs::path& map, const int z, const int x, const int y, std::array<uint8_t, 4>& out)
+    bool PixelAt(const fs::path& map, const int z, const int x, const int y, std::array<uint8_t, 4>& out,
+                 const wchar_t* folder = L"tiles")
     {
-        const fs::path file = map / L"tiles" / std::to_wstring(z) / std::to_wstring(x / MapMath::kTileSize) /
+        const fs::path file = map / folder / std::to_wstring(z) / std::to_wstring(x / MapMath::kTileSize) /
                               (std::to_wstring(y / MapMath::kTileSize) + L".webp");
         const std::string bytes = ReadText(file);
         std::vector<uint8_t> rgba;
@@ -365,7 +384,13 @@ TEST_CASE(MapExportEndToEnd)
         m.levels.push_back({rotation, 1, 0.0f, 0.0f, 1, 1});
         return m;
     };
-    const CityRenderMeta westMeta = metaFor(west, 0);
+    CityRenderMeta westMeta = metaFor(west, 0);
+    // West also has the transport layer at the source zoom, on the same grid.
+    {
+        CityRenderMeta::Level transport = westMeta.levels[0];
+        transport.transport = true;
+        westMeta.levels.push_back(transport);
+    }
     const CityRenderMeta eastMeta = metaFor(east, 0);
     region.WriteMeta(west, westMeta);
     region.WriteMeta(east, eastMeta);
@@ -391,8 +416,10 @@ TEST_CASE(MapExportEndToEnd)
     const std::array<uint8_t, 4> red{230, 20, 20, 255}, green{20, 200, 40, 255};
     region.WriteTile(west, 0, (px - westAt.x) / kSource, (py - westAt.y) / kSource, kSource, red);
     region.WriteTile(east, 0, (px - eastAt.x) / kSource, (py - eastAt.y) / kSource, kSource, green);
-    // A lone West tile at its grid origin.
+    // A lone West tile at its grid origin, and its transport tile.
     region.WriteTile(west, 0, 0, 0, kSource, red);
+    const std::array<uint8_t, 4> blue{30, 40, 220, 255};
+    region.WriteTile(west, 0, 0, 0, kSource, blue, true);
 
     // An older map that the export replaces.
     fs::create_directories(region.renders / L"map");
@@ -408,6 +435,8 @@ TEST_CASE(MapExportEndToEnd)
     const MapExport::Result result = MapExport::Run(request, progress, stop);
     CHECK(result.ok);
     CHECK(result.cities == 2);
+    CHECK(result.transportCities == 1);
+    CHECK(result.message.find("transport view shows 1 of them") != std::string::npos);
     CHECK(result.sourceZoom == kZoomIndex && progress.sourceZoom == kZoomIndex);  // the highest every city has
     CHECK(progress.estimateBytes > 0);
     CHECK(result.message.find("Small") != std::string::npos);  // left out, and named
@@ -430,6 +459,10 @@ TEST_CASE(MapExportEndToEnd)
     CHECK(Near(pixel, green));  // East is in front
     CHECK(PixelAt(map, maxZoom, westAt.x - minX + 5, westAt.y - minY + 5, pixel));
     CHECK(Near(pixel, red));
+    // The transport layer: the same place on the same canvas, from the transport tile.
+    CHECK(PixelAt(map, maxZoom, westAt.x - minX + 5, westAt.y - minY + 5, pixel, L"tiles-transport"));
+    CHECK(Near(pixel, blue));
+    CHECK(fs::is_regular_file(map / L"tiles-transport" / L"0" / L"0" / L"0.webp"));
     // Only the output tiles over the three city tiles are written: each covers 1 to 4.
     int baseFiles = 0;
     for (const auto& entry : fs::recursive_directory_iterator(map / L"tiles" / std::to_wstring(maxZoom))) {
@@ -441,6 +474,15 @@ TEST_CASE(MapExportEndToEnd)
     CHECK(html.find("\"maxZoom\":" + std::to_string(maxZoom)) != std::string::npos);
     CHECK(html.find("\"name\":\"West\"") != std::string::npos && html.find("\"name\":\"East\"") != std::string::npos);
     CHECK(html.find("Bare") == std::string::npos && html.find("Turned") == std::string::npos);
+    CHECK(html.find("\"transport\":true") != std::string::npos);
+
+    // Without the transport layer: no tiles-transport folder, no switch on the page.
+    request.transport = false;
+    const MapExport::Result normalOnly = MapExport::Run(request, progress, stop);
+    CHECK(normalOnly.ok && normalOnly.transportCities == 0);
+    CHECK(!fs::exists(map / L"tiles-transport"));
+    CHECK(ReadText(map / L"index.html").find("\"transport\":false") != std::string::npos);
+    request.transport = true;
 
     // Rotation 2: only Turned has a render there.
     request.rotation = 2;
@@ -467,6 +509,12 @@ TEST_CASE(MapExportEndToEnd)
     const MapExport::Result noZoom5 = MapExport::Run(request, progress, stop);
     CHECK(!noZoom5.ok && !noZoom5.cancelled && !noZoom5.message.empty());
     CHECK(fs::is_regular_file(map / L"index.html"));
+
+    // The last map is the full one again, so SC4SR_KEEP_EXPORT_TEST keeps a map with both layers.
+    request.sourceZoom = -1;
+    const MapExport::Result last = MapExport::Run(request, progress, stop);
+    CHECK(last.ok && last.cities == 2 && last.transportCities == 1);
+    CHECK(fs::is_directory(map / L"tiles-transport"));
 }
 
 // The map's default source zoom: the highest that every rendered city has, else the one most

@@ -321,6 +321,83 @@ Per block switching would cost two full occupant passes per block.
 Skipped: a hand-built filter and custom view (PushView does it), and a flat terrain mode (the
 game has none).
 
+## 7. What the capture does (built)
+
+`CaptureTransportLayer` (INI, the "Transport layer" check box next to "Render up to"). Code:
+`CityCapturer` (levels with `transport = true`, `PushTransport_`, `PopTransport_`), constants in
+`capture/CaptureAddresses.hpp`.
+
+- Each normal level is followed by its transport level (same zoom, rotation and grid). The
+  normal pass marks the tiles it wrote (`drawn_`). The transport level draws only those, with the
+  same blocks, key colors and two-pass compose, and no model wait.
+- `StepLevelBegin_` of a transport level does not call `SetZoomAndRotation` when the view is
+  already there (it would only reload models), then `PushView(0xF3)`, pump, and checks the
+  current data view at +0x9cc. `PushView` (`0x007a61e0`) reads +0x9c8 from `ECX` itself, so the
+  offsets are on the `cISC4ViewManager` pointer (checked in the disassembly). When the check fails
+  the level is left out with a log line and the view is popped.
+- `NextLevel_` pops 0xF3 (one push and pop per level). The next level begins with a pump.
+- Pre-save: `OnSaveBegin_` pops 0xF3. The push comes back in the next block step: the step
+  sees the view is not pushed, goes back to `StepLevelBegin_`, which pushes, pumps and checks
+  again. So the push is never made inside the save message, and it is checked each time.
+- `Restore_` pops 0xF3 first (before the camera goes back and before `PopView(0)`), also when the
+  city closes. `PopView` does nothing for an id that is not in the list and `SetDataView` returns
+  at once when the map view is not ready.
+- Tiles: `t<rot>z<zoom>/`, meta.json levels with `"layer": "transport"` (`"normal"` for the
+  others, missing in older files means normal). Neighbors, walls, the picker and the batch rule
+  without the option ignore transport levels (`CityMeta::ChooseLevel`, `HasLevelsUpTo`).
+
+## 8. Dirt roads (RHW) on the transport map
+
+User report: with the NAM, RHW (dirt road, network type 11) shows on the region view's
+transport map only when a data view was opened in that city during the session.
+
+What the code says:
+
+- The layout view cannot draw type 11. Windows `RebuildMap` (`0x0060acd0`) builds a
+  `cSC4NetworkORFilter(0x1f4f)` and loops over the 9 entries of `sMapIndexToNetworkType` at
+  `0x00aa76b8` (bytes read: 3, 1, 10, 0, 6, 9, 8, 12, 2), testing each against
+  `kFlagForNetworkType` at `0x00aa7540` (1 << type). Type 11 (flag `0x800`) passes the OR filter
+  but matches no entry, so a dirt road cell gets no triangles. Confirmed (Windows tables and
+  decompile, Mac the same). The colour is indexed by map index (`this + 0x20 + index * 4`), so a
+  tenth entry would read the airport colour at +0x48. No unused slot, no lazy table: not a range
+  check bug, and not a small byte patch.
+- The NAM of the development install (`Documents\SimCity 4\Plugins\770-network-addon-mod_001.dat`,
+  read with the dbpf tools) replaces both exemplars:
+  - `6534284A-690F693F-4A0B68F3` "DataView: Regional Transport Map" keeps the custom view
+    `0x4B8EA424` and the empty type filter, and **adds** `DataView: Data source` (`0x4A0B47E5`) =
+    `0x4C`, `DataView: Colour ramp` = {0x00000000, 0xC0000000, 0x000000FF, 0xC0000000},
+    `DataView: Maximum scale` = 0xFF and `DataView: Travel Types` (`0x6B7C9DDD`) = 1.
+  - `6534284A-690F693F-0B9EC13D` colour table, 14 entries in map index order: street
+    `0xFF969696`, rail `0xFF9F1F20`, one-way road, road and avenue `0xFFA5A2A0`, monorail
+    `0xFF780094`, light rail `0xFF201FBF`, ground highway and highway 0 (not drawn), then the
+    zone colours. Still no entry for dirt road, the table has no room for one.
+  So with the NAM, the transport map is the layout view plus a data overlay of source `0x4C`
+  with a dark ramp. The dirt road lines come from that overlay, not from the layout view.
+  Strong (data read, the layout view cannot draw them).
+- The playtest install (sc4pac NAM 50.49): `NetworkAddonMod_BaseContent.dat` has no entry for
+  `4A0B68F3` or `0B9EC13D` (only `097DEA64` in group `690F693F`). The NAM data view files there
+  replace Traffic (`4A0B6809`, data source 9, highlight 9), Zones (`4A0B681E`) and Abandoned
+  buildings (`4A0B681A`), not 0xF3. Which file of that install carries the 0xF3 override (if
+  any) was not looked up, to keep off the OneDrive folder. The `nam.dll.1.3.1.sc4pac` folder
+  lists empty. The `NAM.dll` of the development install has no string about data views, the
+  transport map or the region view (its INI names no such feature). So nothing points to a NAM
+  DLL hook here. Probable.
+- `SetDataView` (`0x007a49b0`) treats source `0x4C` like source 9 (traffic): it sets the overlay
+  flag at map view +0x13c (+0xf, `0x007dc1c0`) for 9 and `0x4C`, and `0x007a17b0` sets
+  `SL::ATM()` slot +0x20 to `0xC0` only for `0x4C` and subscribes the map view to the data
+  messages of source 9 and `0x4C`. Confirmed (decompile). Where the overlay grid of source `0x4C`
+  is filled, and why it stays empty until the player opened a data view, was **not** traced. A
+  likely place is the map view's own update of the data overlay, which runs while the map view
+  panel is in use. Speculative.
+
+Result for the capture: no change. The capture pushes 0xF3 with the same `PushView` call the
+game's thumbnail writer makes, so its transport tiles look like the game's own transport map:
+with RHW when the player opened a data view in that city before the render, else without. A
+push and pop of another data view before the transport pass would only help if the missing step is
+in `SetDataView`, and the game's writer already does a full `SetDataView(0xF3)` without effect.
+Open point in `docs/todo.md`: trace the fill of data source `0x4C` (the data overlay at map view
++0x13c, the `0x4C` cases in `0x007a17b0`, and the ATM call), then decide on a fix.
+
 ## Proposed Windows names (not applied)
 
 | Address | Name | Mac source | Confidence | Evidence |

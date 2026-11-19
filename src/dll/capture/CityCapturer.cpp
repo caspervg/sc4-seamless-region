@@ -333,6 +333,7 @@ bool CityCapturer::Begin_(const bool testTile, const CaptureRequest& request)
     tileSize_ = CityRenderMeta().tileSize;
 
     testTile_ = testTile;
+    transport_ = !testTile && ctx_.settings && ctx_.settings->captureTransportLayer;
     levels_.clear();
     if (testTile) {
         Level level;
@@ -376,6 +377,10 @@ bool CityCapturer::Begin_(const bool testTile, const CaptureRequest& request)
     tileB_.assign(static_cast<size_t>(tileSize_) * tileSize_ * 4, 0);
     outgoing_.clear();
     pending_.reserve(largestGrid);
+    if (transport_) {
+        drawn_.reserve(largestGrid);
+    }
+    drawnLevel_ = SIZE_MAX;
 
     saved_ = SavedState();
     cancelRequested_ = false;
@@ -410,9 +415,10 @@ bool CityCapturer::Begin_(const bool testTile, const CaptureRequest& request)
                  levels_[0].zoom + 1, testTx_, testTy_);
     }
     else {
-        LOG_INFO(
-            "Capture: started for city '{}', {} levels up to zoom {}, {} tiles of {} px, heights {:.0f} to {:.0f} m",
-            cityKey_, levels_.size(), maxZoom_ + 1, total, tileSize_, minHeight_, maxHeight_);
+        LOG_INFO("Capture: started for city '{}', {} levels up to zoom {}{}, at most {} tiles of {} px, heights "
+                 "{:.0f} to {:.0f} m",
+                 cityKey_, levels_.size(), maxZoom_ + 1, transport_ ? " with the transport layer" : "", total,
+                 tileSize_, minHeight_, maxHeight_);
     }
     return true;
 }
@@ -435,6 +441,12 @@ void CityCapturer::BuildLevels_(const CaptureRequest& request)
             }
         }
         levels_.push_back(level);
+        if (transport_) {
+            // Right after its normal level, at the same zoom and rotation. Its tile count is an
+            // upper bound until the normal level knows its non-empty tiles.
+            level.transport = true;
+            levels_.push_back(level);
+        }
     }
 }
 
@@ -716,11 +728,24 @@ bool CityCapturer::StepLevelBegin_()
         return true;
     }
     Game game;
-    if (!game.Fetch()) {
+    if (!game.Fetch() || !ctx_.cameraReader->Update()) {
         return Fail_("The city view is gone.");
     }
-    const Level& level = levels_[levelIndex_];
-    game.view->SetZoomAndRotation(level.zoom, level.rotation);
+    Level& level = levels_[levelIndex_];
+    if (level.transport && !levelBegun_ &&
+        (drawnLevel_ == SIZE_MAX || drawnLevel_ + 1 != levelIndex_ || !levels_[drawnLevel_].captured)) {
+        // Its normal level was left out, so there is nothing to draw on.
+        progress_.total -= level.tiles;
+        level.skipped = true;
+        NextLevel_();
+        return true;
+    }
+    // The transport level has the zoom and rotation of the level before it. Setting them again
+    // would only reload models it does not show.
+    const CameraFrame& before = ctx_.cameraReader->Frame();
+    if (!level.transport || before.zoomIndex != level.zoom || before.rotation != level.rotation) {
+        game.view->SetZoomAndRotation(level.zoom, level.rotation);
+    }
     if (!Pump_() || !game.Fetch() || !ctx_.cameraReader->Update()) {
         return phase_ == Phase::Idle ? false : Fail_("The city view is gone.");
     }
@@ -743,21 +768,104 @@ bool CityCapturer::StepLevelBegin_()
         NextLevel_();
         return true;
     }
+    if (level.transport && !saved_.transportPushed && !PushTransport_()) {
+        if (phase_ == Phase::Idle) {
+            return false;
+        }
+        SkipLevel_();
+        return true;
+    }
     waiting_ = false;
     phase_ = Phase::LevelWait;
     return true;
 }
 
+bool CityCapturer::PushTransport_()
+{
+    Game game;
+    cISC4ViewManager* viewManager = game.Fetch() ? game.view->GetViewManager() : nullptr;
+    if (!viewManager) {
+        LOG_WARN("Capture: the view manager is not available. The transport layer of rotation {} zoom {} is left "
+                 "out.",
+                 levels_[levelIndex_].rotation, levels_[levelIndex_].zoom + 1);
+        return false;
+    }
+    const auto start = Clock::now();
+    viewManager->PushView(CaptureAddresses::kTransportDataView);
+    saved_.transportPushed = true;
+    if (!Pump_()) {
+        return false;
+    }
+    viewManager = game.Fetch() ? game.view->GetViewManager() : nullptr;
+    const uint32_t current = GameAccess::ReadField<uint32_t>(viewManager, CaptureAddresses::kCurrentDataViewOffset);
+    if (current != CaptureAddresses::kTransportDataViewInstance) {
+        LOG_WARN("Capture: the transport view did not open (data view 0x{:08X}). The transport layer of rotation {} "
+                 "zoom {} is left out.",
+                 current, levels_[levelIndex_].rotation, levels_[levelIndex_].zoom + 1);
+        PopTransport_();
+        return false;
+    }
+    LOG_INFO("Capture: transport view open in {:.0f} ms", MsSince(start));
+    return true;
+}
+
+bool CityCapturer::PopTransport_()
+{
+    if (!saved_.transportPushed) {
+        return false;
+    }
+    saved_.transportPushed = false;
+    // PopView does nothing when the id is not in the list, and SetDataView returns at once when
+    // the map view is not ready, so this is safe also while the city closes.
+    if (cISC4View3DWin* view = GameAccess::View3D()) {
+        if (cISC4ViewManager* viewManager = view->GetViewManager()) {
+            viewManager->PopView(CaptureAddresses::kTransportDataView);
+        }
+    }
+    return true;
+}
+
+void CityCapturer::SkipLevel_()
+{
+    Level& level = levels_[levelIndex_];
+    progress_.total -= level.tiles - levelTilesDone_;
+    level.skipped = true;
+    NextLevel_();
+}
+
 bool CityCapturer::StepLevelWait_()
 {
-    if (!ModelsReady_(false)) {
+    Level& level = levels_[levelIndex_];
+    // The transport view shows no models.
+    if (!level.transport && !ModelsReady_(false)) {
         return true;
     }
     phase_ = Phase::Block;
-    Level& level = levels_[levelIndex_];
     if (!levelBegun_) {
-        LOG_INFO("Capture: rotation {} zoom {}: {} tiles in a grid of {} x {}", level.rotation, level.zoom + 1,
-                 level.tiles, level.grid.tilesX, level.grid.tilesY);
+        const size_t gridTiles = static_cast<size_t>(level.grid.tilesX) * level.grid.tilesY;
+        if (level.transport) {
+            // Only the tiles where the normal pass found something: terrain is in both.
+            pending_.assign(drawn_.begin(), drawn_.end());
+            const int tiles = static_cast<int>(std::ranges::count(pending_, uint8_t{1}));
+            progress_.total -= level.tiles - tiles;
+            level.tiles = tiles;
+        }
+        else {
+            // Once per level: the reserved capacity of the largest grid is reused.
+            pending_.assign(gridTiles, 0);
+            for (int ty = 0; ty < level.grid.tilesY; ++ty) {
+                for (int tx = 0; tx < level.grid.tilesX; ++tx) {
+                    const bool wanted = testTile_ ? tx == testTx_ && ty == testTy_ : TileTouchesCity_(level, tx, ty);
+                    pending_[static_cast<size_t>(ty) * level.grid.tilesX + tx] = wanted ? 1 : 0;
+                }
+            }
+            if (transport_) {
+                drawn_.assign(gridTiles, 0);
+                drawnLevel_ = levelIndex_;
+            }
+        }
+        LOG_INFO("Capture: rotation {} zoom {}{}: {} tiles in a grid of {} x {}", level.rotation, level.zoom + 1,
+                 level.transport ? " transport" : "", level.tiles, level.grid.tilesX, level.grid.tilesY);
         if (!testTile_) {
             // The tile grid moves with the terrain heights, and a tile that was full can be
             // empty now. So the older tiles of this level go first, and meta.json stops
@@ -766,15 +874,7 @@ bool CityCapturer::StepLevelWait_()
             if (!WriteMeta_(false)) {
                 return Fail_("The render information (meta.json) could not be written.");
             }
-            ctx_.tileStore->DeleteLevel(cityKey_, level.rotation, level.zoom);
-        }
-        // Once per level: the reserved capacity of the largest grid is reused.
-        pending_.assign(static_cast<size_t>(level.grid.tilesX) * level.grid.tilesY, 0);
-        for (int ty = 0; ty < level.grid.tilesY; ++ty) {
-            for (int tx = 0; tx < level.grid.tilesX; ++tx) {
-                const bool wanted = testTile_ ? tx == testTx_ && ty == testTy_ : TileTouchesCity_(level, tx, ty);
-                pending_[static_cast<size_t>(ty) * level.grid.tilesX + tx] = wanted ? 1 : 0;
-            }
+            ctx_.tileStore->DeleteLevel(cityKey_, level.rotation, level.zoom, level.transport);
         }
         levelBegun_ = true;
     }
@@ -796,15 +896,18 @@ bool CityCapturer::StepBlock_()
         return Fail_("The city view is gone.");
     }
     const Level& level = levels_[levelIndex_];
+    const auto backToLevelBegin = [this] {
+        if (pass_ == 1) {
+            SetClearColor_(kKeyColorA);
+        }
+        phase_ = Phase::LevelBegin;
+        return true;
+    };
     {
         const CameraFrame& frame = ctx_.cameraReader->Frame();
         // The player can still zoom and rotate with the keyboard. Put the level back.
         if (frame.zoomIndex != level.zoom || frame.rotation != level.rotation || frame.magnification != 1.0f) {
-            if (pass_ == 1) {
-                SetClearColor_(kKeyColorA);
-            }
-            phase_ = Phase::LevelBegin;
-            return true;
+            return backToLevelBegin();
         }
         // A new window size holds other blocks. Plan the tiles of this block again. Nothing of
         // the block is handed to the store yet, so no tile is lost or written twice.
@@ -873,9 +976,13 @@ bool CityCapturer::StepBlock_()
                  block_.tx, block_.ty);
     }
 
-    // 3. Models for this view.
-    if (!ModelsReady_(true)) {
+    // 3. Models for this view. The transport view shows none.
+    if (!level.transport && !ModelsReady_(true)) {
         return true;
+    }
+    // A save took the transport view away (OnSaveBegin_). LevelBegin opens it again.
+    if (level.transport && !saved_.transportPushed) {
+        return backToLevelBegin();
     }
 
     // 4. Draw and read. This is the one draw and the one read of this tick.
@@ -988,6 +1095,7 @@ bool CityCapturer::StepWaitStore_()
         outgoingKey_.zoom = level.zoom;
         outgoingKey_.tx = tile.tx;
         outgoingKey_.ty = tile.ty;
+        outgoingKey_.transport = level.transport;
         lastStoreTry_ = Clock::now();
         if (!ctx_.tileStore->QueueWrite(outgoingKey_, std::move(outgoing_), tileSize_, tileSize_)) {
             if (!waiting_) {
@@ -1002,6 +1110,9 @@ bool CityCapturer::StepWaitStore_()
         outgoing_.clear();
         waiting_ = false;
         ++tilesWritten_;
+        if (!level.transport && drawnLevel_ == levelIndex_) {
+            drawn_[static_cast<size_t>(tile.ty) * level.grid.tilesX + tile.tx] = 1;
+        }
         TileDone_();
     }
     if (NextBlock_()) {
@@ -1054,12 +1165,13 @@ bool CityCapturer::WriteMeta_(const bool final)
         if (level.captured || level.started) {
             (level.captured ? rendered : dropped)
                 .push_back({level.rotation, level.zoom, level.grid.originCanvas.fX, level.grid.originCanvas.fY,
-                            level.grid.tilesX, level.grid.tilesY});
+                            level.grid.tilesX, level.grid.tilesY, 1.0f, level.transport});
         }
     }
-    // Levels above the zoom of this render (zoom 5 of an earlier render, now up to zoom 4) stay
-    // while they still show the city as it is. When the city was saved after them, they go at
-    // the end: meta.json first stops naming them, then their tiles are deleted.
+    // Levels this render does not make (zoom 5 of an earlier render, now up to zoom 4, or the
+    // transport layer, now off) stay while they still show the city as it is. When the city was
+    // saved after them, they go at the end: meta.json first stops naming them, then their tiles
+    // are deleted.
     std::vector<CityRenderMeta::Level> higher;
     if (final) {
         if (!CameraAdapter::StoreTimes(savePath_, meta.saveFileTime, meta.renderTime)) {
@@ -1067,7 +1179,7 @@ bool CityCapturer::WriteMeta_(const bool final)
             meta.renderTime = NowFileTime();
         }
         if (usable) {
-            higher = CityMeta::HigherLevelsToDrop(*earlier, maxZoom_, meta.saveFileTime);
+            higher = CityMeta::LevelsToDrop(*earlier, maxZoom_, meta.saveFileTime, transport_);
             dropped.insert(dropped.end(), higher.begin(), higher.end());
         }
     }
@@ -1086,9 +1198,9 @@ bool CityCapturer::WriteMeta_(const bool final)
         return false;
     }
     for (const CityRenderMeta::Level& level : higher) {
-        LOG_INFO("Capture: rotation {} zoom {} of the earlier render is out of date and is deleted", level.rotation,
-                 level.zoom + 1);
-        ctx_.tileStore->DeleteLevel(cityKey_, level.rotation, level.zoom);
+        LOG_INFO("Capture: rotation {} zoom {}{} of the earlier render is out of date and is deleted", level.rotation,
+                 level.zoom + 1, level.transport ? " transport" : "");
+        ctx_.tileStore->DeleteLevel(cityKey_, level.rotation, level.zoom, level.transport);
     }
     return true;
 }
@@ -1124,8 +1236,11 @@ void CityCapturer::TileDone_()
 void CityCapturer::NextLevel_()
 {
     if (levelIndex_ < levels_.size()) {
-        levels_[levelIndex_].captured = levelTilesDone_ > 0 || levels_[levelIndex_].tiles == 0;
+        Level& level = levels_[levelIndex_];
+        level.captured = !level.skipped && (levelTilesDone_ > 0 || level.tiles == 0);
     }
+    // One push and pop per transport level. The next level begins with a pump.
+    PopTransport_();
     ++levelIndex_;
     levelRetries_ = 0;
     levelTilesDone_ = 0;
@@ -1263,6 +1378,9 @@ bool CityCapturer::ModelsReady_(const bool tile)
 // Puts back everything Prepare changed.
 void CityCapturer::Restore_(const bool cityClosing)
 {
+    // The transport view first, so the camera below goes back in the normal view. Also while
+    // the city closes: the data view list belongs to the map view, not to the capture.
+    PopTransport_();
     Game game;
     game.Fetch();
     ModelLoadMonitor* monitor = ctx_.modelLoadMonitor;
@@ -1378,6 +1496,7 @@ void CityCapturer::End_(const bool ok, std::string phase, std::string error, con
     std::vector<uint8_t>().swap(readBuffer_);
     std::vector<uint8_t>().swap(outgoing_);
     std::vector<uint8_t>().swap(pending_);
+    std::vector<uint8_t>().swap(drawn_);
 
     const uint32_t seconds = ElapsedMs(startTime_) / 1000;
     progress_.finished = true;
@@ -1421,14 +1540,14 @@ void CityCapturer::PhaseText_(char* text, const size_t size) const
     case Phase::CalibrateSecond: std::snprintf(text, size, "Checking the color outside the city"); break;
     case Phase::LevelBegin:
     case Phase::LevelWait:
-        std::snprintf(text, size, "Rotation %d, zoom %d: loading models", level ? level->rotation : 0,
-                      level ? level->zoom + 1 : 0);
+        std::snprintf(text, size, "Rotation %d, zoom %d: %s", level ? level->rotation : 0, level ? level->zoom + 1 : 0,
+                      level && level->transport ? "opening the transport view" : "loading models");
         break;
     case Phase::Block:
     case Phase::WaitStore:
-        std::snprintf(text, size, "Rotation %d, zoom %d: tile %d of %d%s", level ? level->rotation : 0,
-                      level ? level->zoom + 1 : 0, levelTilesDone_ + 1, level ? level->tiles : 0,
-                      phase_ == Phase::WaitStore ? " (waiting for the tile writer)" : "");
+        std::snprintf(text, size, "Rotation %d, zoom %d%s: tile %d of %d%s", level ? level->rotation : 0,
+                      level ? level->zoom + 1 : 0, level && level->transport ? ", transport" : "", levelTilesDone_ + 1,
+                      level ? level->tiles : 0, phase_ == Phase::WaitStore ? " (waiting for the tile writer)" : "");
         break;
     case Phase::Finish: std::snprintf(text, size, "Writing the last tiles"); break;
     case Phase::Idle: std::snprintf(text, size, "%s", progress_.phase.c_str()); break;
@@ -1461,6 +1580,11 @@ bool CityCapturer::OtherWorkRuns_() const
 // module), and the thumbnail writer puts the camera back where the render had it.
 void CityCapturer::OnSaveBegin_()
 {
+    // The save writes the occupants and makes the region picture: not with the transport view
+    // on. The block step opens it again after the save (StepBlock_, then StepLevelBegin_).
+    if (PopTransport_()) {
+        LOG_INFO("Capture: the transport view is closed for the save");
+    }
     cISC43DRender* renderer = GameAccess::Renderer();
     if (phase_ == Phase::Idle || !saved_.backgroundSaved || !renderer) {
         return;
@@ -1560,6 +1684,24 @@ void CityCapturer::DrawMaxZoomChoice(Settings& settings)
     }
 }
 
+void CityCapturer::DrawTransportChoice(Settings& settings)
+{
+    if (ImGui::Checkbox("Transport layer", &settings.captureTransportLayer)) {
+        settings.MarkChanged();
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::BeginItemTooltip()) {
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+        ImGui::TextUnformatted("Also render the transport view of the city, as the transport map of the region view "
+                               "shows it: roads, rails and zones in colors on the terrain. The region map can then "
+                               "show it. A render takes more time. Dirt roads, pipes, power lines and subways do not "
+                               "show, as in the game. Save the settings to keep your choice.");
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+    }
+}
+
 void CityCapturer::DrawPanelSection()
 {
     const bool cityOpen = GameAccess::City() && GameAccess::View3D();
@@ -1593,6 +1735,7 @@ void CityCapturer::DrawPanelSection()
     if (ctx_.settings) {
         ImGui::BeginDisabled(batchRuns);
         DrawMaxZoomChoice(*ctx_.settings);
+        DrawTransportChoice(*ctx_.settings);
         ImGui::EndDisabled();
     }
     ImGui::BeginDisabled(!cityOpen || !readback || batchRuns);

@@ -7,7 +7,9 @@
 // Steps: read meta.json of every city and place the cities on one canvas (MapMath), composite
 // the base level from the city tiles (back to front between cities, through a bounded cache of
 // decoded tiles), halve it level by level from the tiles just written, write index.html. All
-// into <RegionRenders>/map.tmp, which replaces <RegionRenders>/map only at the end.
+// into <RegionRenders>/map.tmp, which replaces <RegionRenders>/map only at the end. When the
+// cities have transport levels at the source zoom, the same is done again from them into
+// tiles-transport/, on the same canvas.
 
 #include <array>
 #include <atomic>
@@ -40,6 +42,9 @@ namespace MapExport
         int quality = 75;                  // WebP quality of the map tiles
         size_t cacheBytes = 32u * 1024 * 1024;  // decoded city tiles, capped by kMemoryCapBytes
         int upscaleLevels = 1;             // Leaflet zoom levels above the stored one
+        // Also make the transport layer (tiles-transport/) when a city has transport levels at
+        // the source zoom and rotation.
+        bool transport = true;
     };
 
     enum class Phase : int
@@ -55,6 +60,7 @@ namespace MapExport
     {
         std::atomic<int> phase{static_cast<int>(Phase::Reading)};
         std::atomic<int> zoom{0};  // the Leaflet zoom being made
+        std::atomic<int> layer{0};  // 0 the normal view, 1 the transport view
         std::atomic<int64_t> done{0};
         std::atomic<int64_t> total{0};
         std::atomic<int> sourceZoom{-1};        // zoom index, known after Reading
@@ -77,6 +83,7 @@ namespace MapExport
         std::string message;  // for the panel, friendly text
         int cities = 0;
         int sourceZoom = -1;  // zoom index the map was made from
+        int transportCities = 0;  // cities on the transport layer, 0 when it was not made
         int64_t tilesWritten = 0;
         int64_t cityTilesDecoded = 0;  // decodes of city tiles, cache misses included
         uint64_t bytesWritten = 0;
@@ -99,6 +106,9 @@ namespace MapExport
         int width = 0, height = 0;  // canvas pixels at maxZoom
         int maxZoom = 0;
         int upscaleLevels = 1;
+        int rotation = 0;     // 0..3
+        int sourceZoom = 3;   // zoom index of the city renders
+        bool transport = false;  // tiles-transport/ exists
         std::vector<PageCity> cities;
     };
 

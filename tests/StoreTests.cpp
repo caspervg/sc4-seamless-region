@@ -719,8 +719,8 @@ TEST_CASE(MetaChooseLevelPerZoom)
     CHECK(full && full->magnification == 1.0f);
 }
 
-// Levels above the new render's zoom stay while the city did not change since they were made.
-TEST_CASE(MetaHigherLevelsToDrop)
+// Levels a new render does not make stay while the city did not change since they were made.
+TEST_CASE(MetaLevelsToDrop)
 {
     CityRenderMeta earlier;
     earlier.saveFileTime = 500;
@@ -729,10 +729,110 @@ TEST_CASE(MetaHigherLevelsToDrop)
             earlier.levels.push_back({r, z, 0.0f, 0.0f, 1, 1});
         }
     }
-    CHECK(CityMeta::HigherLevelsToDrop(earlier, 3, 500).empty());  // same save: zoom 5 stays
-    const auto drop = CityMeta::HigherLevelsToDrop(earlier, 3, 600);  // saved since
+    CHECK(CityMeta::LevelsToDrop(earlier, 3, 500).empty());  // same save: zoom 5 stays
+    const auto drop = CityMeta::LevelsToDrop(earlier, 3, 600);  // saved since
     CHECK(drop.size() == 4);
     CHECK(std::ranges::all_of(drop, [](const CityRenderMeta::Level& l) { return l.zoom == 4; }));
-    CHECK(CityMeta::HigherLevelsToDrop(earlier, 2, 600).size() == 8);
-    CHECK(CityMeta::HigherLevelsToDrop(earlier, 4, 600).empty());
+    CHECK(CityMeta::LevelsToDrop(earlier, 2, 600).size() == 8);
+    CHECK(CityMeta::LevelsToDrop(earlier, 4, 600).empty());
+
+    // Transport levels of an earlier render: a render without the transport layer drops them
+    // once the city was saved since, a render with it keeps those up to its zoom.
+    for (int r = 0; r < 4; ++r) {
+        for (int z = 0; z < 4; ++z) {
+            earlier.levels.push_back({r, z, 0.0f, 0.0f, 1, 1, 1.0f, true});
+        }
+    }
+    CHECK(CityMeta::LevelsToDrop(earlier, 4, 500).empty());
+    const auto noTransport = CityMeta::LevelsToDrop(earlier, 4, 600);
+    CHECK(noTransport.size() == 16);
+    CHECK(std::ranges::all_of(noTransport, [](const CityRenderMeta::Level& l) { return l.transport; }));
+    CHECK(CityMeta::LevelsToDrop(earlier, 4, 600, true).empty());
+    // Up to zoom 3: zoom 4 and 5 of the normal layer, zoom 4 of the transport layer.
+    CHECK(CityMeta::LevelsToDrop(earlier, 2, 600, true).size() == 12);
+}
+
+// The transport layer in meta.json: its own levels, "normal" for metas without the field.
+TEST_CASE(MetaTransportLayerRoundTrip)
+{
+    using Level = CityRenderMeta::Level;
+    CityRenderMeta meta = SampleMeta();
+    meta.levels.push_back({0, 1, -1024.0f, 300.5f, 6, 4, 1.0f, true});
+    const std::string text = CityMeta::ToJson(meta);
+    CHECK(text.find("\"layer\": \"transport\"") != std::string::npos);
+    CHECK(text.find("\"layer\": \"normal\"") != std::string::npos);
+    const auto parsed = CityMeta::Parse(text);
+    CHECK(parsed && parsed->levels.size() == 3);
+    if (parsed && parsed->levels.size() == 3) {
+        CHECK(!parsed->levels[0].transport && !parsed->levels[1].transport && parsed->levels[2].transport);
+        CHECK(parsed->levels[2].rotation == 0 && parsed->levels[2].zoom == 1 && parsed->levels[2].tilesX == 6);
+    }
+    // An older meta.json without the field: every level is normal.
+    std::string old = CityMeta::ToJson(SampleMeta());
+    for (size_t at = old.find("\"layer\""); at != std::string::npos; at = old.find("\"layer\"")) {
+        const size_t end = old.find(',', at);
+        old.erase(at, end + 1 - at);
+    }
+    CHECK(old.find("layer") == std::string::npos);
+    const auto oldParsed = CityMeta::Parse(old);
+    CHECK(oldParsed && oldParsed->levels.size() == 2 && !oldParsed->levels[0].transport &&
+          !oldParsed->levels[1].transport);
+    // A layer of a later version is left out, a layer that is not a string is an error.
+    std::string later = text;
+    later.replace(later.find("\"transport\""), 11, "\"night\"");
+    const auto laterParsed = CityMeta::Parse(later);
+    CHECK(laterParsed && laterParsed->levels.size() == 2);
+    std::string bad = text;
+    bad.replace(bad.find("\"transport\""), 11, "7");
+    CHECK(!CityMeta::Parse(bad).has_value());
+
+    // The neighbors and the walls never use a transport level.
+    const std::vector<Level> onlyTransport = {{0, 3, 0.0f, 0.0f, 2, 2, 1.0f, true}};
+    CHECK(CityMeta::ChooseLevel(onlyTransport, 0, 3) == nullptr);
+    CHECK(CityMeta::ChooseLevel(onlyTransport, 0, 4) == nullptr);
+    const std::vector<Level> both = {{0, 3, 0.0f, 0.0f, 2, 2, 1.0f, true}, {0, 3, 5.0f, 0.0f, 2, 2}};
+    const Level* chosen = CityMeta::ChooseLevel(both, 0, 3);
+    CHECK(chosen && !chosen->transport && chosen->originX == 5.0f);
+
+    // Merge matches the layer: replacing the transport level keeps the normal one.
+    const std::vector<Level> earlier = {{0, 3, 0.0f, 0.0f, 2, 2}, {0, 3, 0.0f, 0.0f, 2, 2, 1.0f, true}};
+    const std::vector<Level> dropped = {{0, 3, 0.0f, 0.0f, 0, 0, 1.0f, true}};
+    const std::vector<Level> merged = CityMeta::MergeLevels(earlier, {}, dropped);
+    CHECK(merged.size() == 1 && !merged[0].transport);
+}
+
+// Transport tiles live in t<rot>z<zoom>/, apart from the normal tiles of the same level.
+TEST_CASE(StoreTransportLayerFolders)
+{
+    Fixture f(L"transport");
+    const TileKey normal = Key("City", 1, 2, 3, 4);
+    TileKey transport = normal;
+    transport.transport = true;
+    CHECK(TileStore::TilePathIn(L"R", normal) == fs::path(L"R") / L"City" / L"r1z2" / L"3_4.webp");
+    CHECK(TileStore::TilePathIn(L"R", transport) == fs::path(L"R") / L"City" / L"t1z2" / L"3_4.webp");
+    CHECK(f.store.QueueWrite(normal, GradientTile(16, 16), 16, 16));
+    f.store.Flush();
+    CHECK(f.store.HasTile(normal) && !f.store.HasTile(transport));
+    CHECK(f.store.QueueWrite(transport, GradientTile(16, 16), 16, 16));
+    f.store.Flush();
+    CHECK(f.store.HasTile(normal) && f.store.HasTile(transport));
+    CHECK(fs::exists(f.store.TilePath(transport)) && f.store.TilePath(transport) != f.store.TilePath(normal));
+
+    // The folder scan finds both layers again.
+    f.store.SetRegionDirectory({});
+    f.store.SetRegionDirectory(f.region);
+    f.store.Flush();
+    CHECK(f.store.HasTile(normal) && f.store.HasTile(transport));
+    const uint64_t both = f.store.CityBytes("City").value_or(0);
+    CHECK(both > 0);
+
+    // Deleting the transport level keeps the normal level, and the other way round.
+    CHECK(f.store.DeleteLevel("City", 1, 2, true));
+    f.store.Flush();
+    CHECK(f.store.HasTile(normal) && !f.store.HasTile(transport) && !fs::exists(f.store.TilePath(transport)));
+    CHECK(f.store.CityBytes("City").value_or(0) < both);
+    CHECK(f.store.QueueWrite(transport, GradientTile(16, 16), 16, 16));
+    CHECK(f.store.DeleteLevel("City", 1, 2));
+    f.store.Flush();
+    CHECK(!f.store.HasTile(normal) && f.store.HasTile(transport));
 }

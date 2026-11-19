@@ -318,6 +318,15 @@ gives blocks of one tile, read in parts. When the window size changes during a b
 block is planned again for the new size. Progress, the time left and the store keep counting
 tiles. Details: `docs/re-notes/capture.md`, Blocks.
 
+**Transport layer** (`CaptureTransportLayer`, off by default, the "Transport layer" check box next
+to "Render up to"). Each normal level is followed by a transport level of the same zoom, rotation
+and grid: `PushView(0xF3)` once, pump, check the current data view (map view +0x9cc), draw the
+tiles the normal pass wrote, with the same blocks and key colors and no model wait, `PopView(0xF3)`.
+A push that does not take leaves the level out with a log line. A save pops the view at pre-save,
+and the next block step pushes and checks again. Restore, cancel, failure and city close pop it
+first. Progress and the time left count the transport tiles (an upper bound until the normal
+level knows its tiles). Details: `docs/re-notes/transport-view.md`, sections 7 and 8.
+
 ### store/TileStore and store/WebpCodec
 
 ```cpp
@@ -347,8 +356,12 @@ bool Decode(std::span<const uint8_t> data, std::vector<uint8_t>& rgba, int& w, i
 }
 ```
 
-Layout: `<Region>/RegionRenders/<cityKey>/r<rot>z<zoom>/<tx>_<ty>.webp` and
-`<Region>/RegionRenders/<cityKey>/meta.json`. Fully transparent tiles are not written.
+Layout: `<Region>/RegionRenders/<cityKey>/r<rot>z<zoom>/<tx>_<ty>.webp`, the transport layer in
+`t<rot>z<zoom>/` (`TileKey::transport`), and `<Region>/RegionRenders/<cityKey>/meta.json`. Fully
+transparent tiles are not written. meta.json levels have `"layer": "normal"` or `"transport"`
+(`Level::transport`; a missing field is normal, an unknown layer is left out). The index, the scan
+and `DeleteLevel` keep the two layers apart (one bit of the packed key). `CityMeta::ChooseLevel`
+never picks a transport level, so neighbors, walls and the picker only see normal tiles.
 
 ### render/TileCache and render/NeighborRenderer
 
@@ -414,8 +427,17 @@ std::string BuildPage(const Page& page);
 ```
 
 Builds one browsable map of the whole region from the tiles of one source zoom (3, 4 or 5) and
-one rotation (0 to 3), both chosen in the panel (`--zoom` and `--rotation` in `SC4RegionMap.exe`). Output in `<Region>/RegionRenders/map/`: `index.html` and
-`tiles/<z>/<x>/<y>.webp`.
+one rotation (0 to 3), both chosen in the panel (`--zoom` and `--rotation` in `SC4RegionMap.exe`).
+One rotation per export. Output in `<Region>/RegionRenders/map/`: `index.html`,
+`tiles/<z>/<x>/<y>.webp` and, when cities have transport levels at the source zoom and rotation,
+`tiles-transport/<z>/<x>/<y>.webp`.
+
+- **Transport layer.** `Request::transport` (the "Transport view" check box, on by default,
+  `--transport`/`--no-transport` in the tool). A transport level counts only on the grid of the
+  normal level it belongs to. The second pyramid uses the same canvas, placement, order and
+  compositing as the first. Cities without transport tiles are empty in it. The tile flags are
+  made again per layer, so memory stays the same. `Result::transportCities` tells how many
+  cities it has.
 
 - **Source.** `Request::sourceZoom`, by default (-1) `MapMath::ChooseSourceZoom`: the highest
   zoom from 3 to 5 that every city with a render in the rotation has, else the one most cities
@@ -440,10 +462,19 @@ one rotation (0 to 3), both chosen in the panel (`--zoom` and `--rotation` in `S
   tiles, under 1 MB of flags, so the cap holds. Disk and time grow 4 times. The export estimates
   the size from the city tile files (4/3 of their bytes) once it has read the cities, shows it in
   the panel and the tool, and warns above 1 GB (`kLargeMapBytes`).
-- **Page.** One file. Leaflet 1.9.4 from cdnjs with SRI, `L.CRS.Simple`, `maxNativeZoom` =
-  `maxZoom`, MapUpscaleLevels zoom levels above it, `maxBounds` around the canvas. City outlines
-  are invisible polygons with a hover highlight, a name tooltip and click to zoom. The data is
-  an inline JSON block, so the page works from `file://`. It needs the internet for Leaflet.
+- **Page.** One file. Leaflet 1.9.4 from cdnjs with SRI (sha384 of `leaflet.js` and
+  `leaflet.css`, checked against the downloaded files, whose sha512 matches the cdnjs API), no
+  plugin. `L.CRS.Simple`, `maxNativeZoom` = `maxZoom`, MapUpscaleLevels zoom levels above it,
+  `maxBounds` around the canvas, zoom steps of 0.25. Opens exactly fitted to the ground of the
+  cities (their outlines) with a 16 px margin. City outlines are invisible polygons with a hover highlight and click to zoom. City
+  names show as labels when the city is at least 180 px wide on the screen, else as a hover
+  tooltip. Own small controls: city search (input with a datalist), full screen (Fullscreen API
+  on the map box), an overview map (a second `L.map` with the same tiles and a frame of the view,
+  click to move). The position is in the address (`#zoom/x/y` in map pixels, `/transport` for the
+  transport view, `history.replaceState`), and a changed address moves the map. With transport
+  tiles a layer switch (`L.control.layers`, two base layers). Names go in with `textContent` and
+  option values, the inline JSON has `<` escaped. Relative URLs only, so the page works from
+  `file://` and from any web folder. It needs the internet for Leaflet.
 - **Threading.** `Start` snapshots the renders folder, region name, cities and settings on the
   game thread and starts one worker thread below normal priority. The game thread only reads
   progress (atomics) and cancels. The export does not read the city, so it goes on across a
@@ -474,6 +505,10 @@ degrees), so only zoom 4 can stand in for zoom 5 (same pitch, exactly 2x).
   (`docs/re-notes/capture.md`, "Which zooms").
 - **Batch**: a city is up to date only when its render is not stale and its `meta.json` has every
   level up to the max (`CityMeta::NeedsRender`). Raising the max makes every city need a render.
+  With `CaptureTransportLayer` on, every transport level up to the max is needed too.
+- **Levels a render does not make** (`CityMeta::LevelsToDrop`): levels above the max, and
+  transport levels when the option is off, stay while the city was not saved since, else the
+  final meta.json leaves them out and their tiles are deleted.
 - **Neighbors, walls and tint** use `CityMeta::ChooseLevel` per view (rotation and zoom). The
   camera module hides an edge wall only in the views where the neighbor across it is drawn, so
   with max zoom 3 the walls stay at zoom 4 and 5. The hover tint uses the front style only where

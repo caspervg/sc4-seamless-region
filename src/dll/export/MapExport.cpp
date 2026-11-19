@@ -68,6 +68,11 @@ namespace
                used == static_cast<int>(name.size()) && tx >= 0 && ty >= 0;
     }
 
+    // Map layers: the normal view and the transport view, each with its own tile pyramid.
+    constexpr int kNormal = 0;
+    constexpr int kTransport = 1;
+    constexpr const wchar_t* kTilesDir[] = {L"tiles", L"tiles-transport"};
+
     // One city level that is on the map.
     struct Placed
     {
@@ -75,12 +80,15 @@ namespace
         CityRenderMeta::Level level;
         float groundHeight = MapMath::kDefaultGroundHeight;
         MapMath::Source source;
-        fs::path levelDir;
-        std::vector<uint8_t> present;  // tilesX * tilesY, 1 when the tile file exists
+        std::array<fs::path, 2> levelDir;  // per layer
+        // Per layer: tilesX * tilesY, 1 when the tile file exists. Empty for a city without that
+        // layer.
+        std::array<std::vector<uint8_t>, 2> present;
 
-        [[nodiscard]] bool Has(const int tx, const int ty) const
+        [[nodiscard]] bool Has(const int layer, const int tx, const int ty) const
         {
-            return present[static_cast<size_t>(ty) * source.tilesX + tx] != 0;
+            const std::vector<uint8_t>& p = present[layer];
+            return !p.empty() && p[static_cast<size_t>(ty) * source.tilesX + tx] != 0;
         }
     };
 
@@ -137,8 +145,13 @@ namespace
                 return result;
             }
 
-            const bool done = ReadCities_(result) && Layout_(result) && Base_(result) && Pyramid_(result) &&
-                              Page_(result) && Swap_(result);
+            bool done = ReadCities_(result) && Layout_(result);
+            for (layer_ = kNormal; done && layer_ < layers_; ++layer_) {
+                progress_.layer = layer_;
+                MarkCandidates_();
+                done = Base_(result) && Pyramid_(result);
+            }
+            done = done && Page_(result) && Swap_(result);
             if (!done) {
                 if (Stopped_()) {
                     result.cancelled = true;
@@ -156,11 +169,17 @@ namespace
             result.bytesWritten = bytesWritten_;
             result.indexHtml = finalDir_ / L"index.html";
             result.sourceZoom = zoom_;
-            char text[160];
+            result.transportCities = layers_ > 1 ? transportCities_ : 0;
+            char text[200];
             std::snprintf(text, sizeof(text), "The map is ready: %d cities from zoom %d, %lld tiles, %.1f MB.",
                           result.cities, zoom_ + 1, static_cast<long long>(tilesWritten_),
                           static_cast<double>(bytesWritten_) / (1024.0 * 1024.0));
-            result.message = text + LeftOutText_();
+            result.message = text;
+            if (result.transportCities > 0) {
+                std::snprintf(text, sizeof(text), " The transport view shows %d of them.", result.transportCities);
+                result.message += text;
+            }
+            result.message += LeftOutText_();
             return result;
         }
 
@@ -213,7 +232,7 @@ namespace
                 }
                 uint32_t mask = 0;
                 for (const CityRenderMeta::Level& l : meta->levels) {
-                    mask |= Usable_(l) ? 1u << l.zoom : 0u;
+                    mask |= !l.transport && Usable_(l) ? 1u << l.zoom : 0u;
                 }
                 if (mask != 0) {
                     rendered.emplace_back(city, std::move(*meta));
@@ -230,8 +249,9 @@ namespace
 
             uint64_t sourceBytes = 0;
             for (const auto& [city, meta] : rendered) {
-                const auto level = std::ranges::find_if(
-                    meta.levels, [&](const CityRenderMeta::Level& l) { return l.zoom == zoom_ && Usable_(l); });
+                const auto level = std::ranges::find_if(meta.levels, [&](const CityRenderMeta::Level& l) {
+                    return !l.transport && l.zoom == zoom_ && Usable_(l);
+                });
                 if (level == meta.levels.end()) {
                     leftOut_.push_back(city.name.empty() ? city.key : city.name);
                     continue;
@@ -243,23 +263,20 @@ namespace
                 p.source.tilesX = level->tilesX;
                 p.source.tilesY = level->tilesY;
                 p.source.tileSize = meta.tileSize;
-                const TileKey key{city.key, req_.rotation, zoom_, 0, 0};
-                p.levelDir = TileStore::TilePathIn(req_.rendersDir, key).parent_path();
-                p.present.assign(static_cast<size_t>(p.source.tilesX) * p.source.tilesY, 0);
-                std::error_code ec;
-                for (fs::directory_iterator it(p.levelDir, ec), end; !ec && it != end; it.increment(ec)) {
-                    int tx = 0;
-                    int ty = 0;
-                    if (ParseTileName(it->path().filename().native(), tx, ty) && tx < p.source.tilesX &&
-                        ty < p.source.tilesY) {
-                        p.present[static_cast<size_t>(ty) * p.source.tilesX + tx] = 1;
-                        std::error_code sizeEc;
-                        const uintmax_t size = it->file_size(sizeEc);
-                        sourceBytes += sizeEc ? 0 : size;
-                    }
+                sourceBytes += ScanLevel_(p, kNormal);
+                // The transport level lies on the grid of the normal level. One with another grid
+                // is from another render: it is left out.
+                const auto transport = std::ranges::find_if(meta.levels, [&](const CityRenderMeta::Level& l) {
+                    return l.transport && l.zoom == zoom_ && Usable_(l) && l.tilesX == level->tilesX &&
+                           l.tilesY == level->tilesY && l.originX == level->originX && l.originY == level->originY;
+                });
+                if (req_.transport && transport != meta.levels.end()) {
+                    sourceBytes += ScanLevel_(p, kTransport);
+                    ++transportCities_;
                 }
                 cities_.push_back(std::move(p));
             }
+            layers_ = transportCities_ > 0 ? 2 : 1;
             if (cities_.empty()) {
                 return Fail_(result, "No city of the region has a render at this zoom in this rotation. Choose "
                                      "another zoom or render the cities first.");
@@ -268,8 +285,10 @@ namespace
             // third. ponytail: the city tile sizes stand in for the map tile sizes (quality differs).
             const int64_t estimate = static_cast<int64_t>(sourceBytes / 3 * 4);
             progress_.estimateBytes = estimate;
-            LOG_INFO("Export: {} cities have a render at zoom {} in rotation {}, the map will be about {} MB",
-                     cities_.size(), zoom_ + 1, req_.rotation, estimate / (1024 * 1024));
+            LOG_INFO("Export: {} cities have a render at zoom {} in rotation {}, {} of them with the transport "
+                     "layer, the map will be about {} MB",
+                     cities_.size(), zoom_ + 1, req_.rotation, layers_ > 1 ? transportCities_ : 0,
+                     estimate / (1024 * 1024));
             if (!leftOut_.empty()) {
                 LOG_INFO("Export: {} rendered cities have no render at zoom {} and are not on the map", leftOut_.size(),
                          zoom_ + 1);
@@ -279,6 +298,30 @@ namespace
                          estimate / (1024 * 1024));
             }
             return true;
+        }
+
+        // Lists the tile files of one layer of a city level. Returns their bytes.
+        uint64_t ScanLevel_(Placed& p, const int layer) const
+        {
+            TileKey key{p.info.key, req_.rotation, zoom_, 0, 0};
+            key.transport = layer == kTransport;
+            p.levelDir[layer] = TileStore::TilePathIn(req_.rendersDir, key).parent_path();
+            std::vector<uint8_t>& present = p.present[layer];
+            present.assign(static_cast<size_t>(p.source.tilesX) * p.source.tilesY, 0);
+            uint64_t bytes = 0;
+            std::error_code ec;
+            for (fs::directory_iterator it(p.levelDir[layer], ec), end; !ec && it != end; it.increment(ec)) {
+                int tx = 0;
+                int ty = 0;
+                if (ParseTileName(it->path().filename().native(), tx, ty) && tx < p.source.tilesX &&
+                    ty < p.source.tilesY) {
+                    present[static_cast<size_t>(ty) * p.source.tilesX + tx] = 1;
+                    std::error_code sizeEc;
+                    const uintmax_t size = it->file_size(sizeEc);
+                    bytes += sizeEc ? 0 : size;
+                }
+            }
+            return bytes;
         }
 
         // " Not on the map (no zoom 5 render): A, B and 2 more." Empty when every city is on it.
@@ -355,13 +398,27 @@ namespace
                 return Fail_(result, "The region is too large for a map.");
             }
             levels_.resize(static_cast<size_t>(maxZoom_) + 1);
-            for (int z = 0; z <= maxZoom_; ++z) {
-                levels_[z].Resize(MapMath::TilesAt(width_, maxZoom_, z), MapMath::TilesAt(height_, maxZoom_, z));
-            }
             cacheBudget_ = std::clamp(req_.cacheBytes, kMinCacheBytes,
                                       MapExport::kMemoryCapBytes - kFixedBytes - static_cast<size_t>(flagBytes));
 
-            // Candidates: base tiles over at least one city tile file, then every parent of one.
+            int64_t total = 0;
+            for (layer_ = kNormal; layer_ < layers_; ++layer_) {
+                total += MarkCandidates_();
+            }
+            layer_ = kNormal;
+            progress_.total = total;
+            LOG_INFO("Export: canvas {} x {} px, zoom 0 to {}, {} tiles to make in {} layers, cache {} MB", width_,
+                     height_, maxZoom_, total, layers_, cacheBudget_ / (1024 * 1024));
+            return true;
+        }
+
+        // Clears the tile flags and marks the candidates of layer_: base tiles over at least one
+        // city tile file, then every parent of one. Returns their count.
+        int64_t MarkCandidates_()
+        {
+            for (int z = 0; z <= maxZoom_; ++z) {
+                levels_[z].Resize(MapMath::TilesAt(width_, maxZoom_, z), MapMath::TilesAt(height_, maxZoom_, z));
+            }
             LevelFlags& base = levels_[maxZoom_];
             int64_t total = 0;
             for (int ty = 0; ty < base.tilesY; ++ty) {
@@ -385,10 +442,7 @@ namespace
                     }
                 }
             }
-            progress_.total = total;
-            LOG_INFO("Export: canvas {} x {} px, zoom 0 to {}, {} tiles to make, cache {} MB", width_, height_,
-                     maxZoom_, total, cacheBudget_ / (1024 * 1024));
-            return true;
+            return total;
         }
 
         [[nodiscard]] bool AnySource_(const int tx, const int ty) const
@@ -400,7 +454,7 @@ namespace
                 }
                 for (int y = y0; y < y1; ++y) {
                     for (int x = x0; x < x1; ++x) {
-                        if (c.Has(x, y)) {
+                        if (c.Has(layer_, x, y)) {
                             return true;
                         }
                     }
@@ -413,7 +467,8 @@ namespace
 
         const Decoded* Source_(const Placed& c, const int tx, const int ty)
         {
-            const TileKey key{c.info.key, req_.rotation, zoom_, tx, ty};
+            TileKey key{c.info.key, req_.rotation, zoom_, tx, ty};
+            key.transport = layer_ == kTransport;
             if (Decoded* hit = cache_.Find(key, ++stamp_)) {
                 return hit;
             }
@@ -421,7 +476,7 @@ namespace
             ++decodes_;
             wchar_t name[32];
             std::swprintf(name, std::size(name), L"%d_%d.webp", tx, ty);
-            if (!ReadFile(c.levelDir / name, fileBytes_) ||
+            if (!ReadFile(c.levelDir[layer_] / name, fileBytes_) ||
                 !WebpCodec::Decode(fileBytes_, scratch_.rgba, scratch_.w, scratch_.h)) {
                 if (!decodeWarned_) {
                     decodeWarned_ = true;
@@ -445,7 +500,7 @@ namespace
                 return false;
             }
             LevelFlags& l = levels_[z];
-            const fs::path column = tmpDir_ / L"tiles" / std::to_wstring(z) / std::to_wstring(tx);
+            const fs::path column = tmpDir_ / kTilesDir[layer_] / std::to_wstring(z) / std::to_wstring(tx);
             if (!l.columnMade[tx]) {
                 std::error_code ec;
                 fs::create_directories(column, ec);
@@ -499,7 +554,7 @@ namespace
                             }
                             for (int y = y0; y < y1; ++y) {
                                 for (int x = x0; x < x1; ++x) {
-                                    if (!c.Has(x, y)) {
+                                    if (!c.Has(layer_, x, y)) {
                                         continue;
                                     }
                                     const Decoded* d = Source_(c, x, y);
@@ -520,7 +575,8 @@ namespace
                 }
             }
             cache_.Clear([](Decoded&) {});
-            LOG_INFO("Export: full size level done, {} city tiles decoded", decodes_);
+            LOG_INFO("Export: full size level of the {} layer done, {} city tiles decoded so far",
+                     layer_ == kTransport ? "transport" : "normal", decodes_);
             return true;
         }
 
@@ -553,8 +609,8 @@ namespace
                             if (cx >= below.tilesX || cy >= below.tilesY || !below.written[below.Index(cx, cy)]) {
                                 continue;
                             }
-                            const fs::path file = tmpDir_ / L"tiles" / std::to_wstring(z + 1) / std::to_wstring(cx) /
-                                                  (std::to_wstring(cy) + L".webp");
+                            const fs::path file = tmpDir_ / kTilesDir[layer_] / std::to_wstring(z + 1) /
+                                                  std::to_wstring(cx) / (std::to_wstring(cy) + L".webp");
                             int w = 0;
                             int h = 0;
                             if (!ReadFile(file, fileBytes_) ||
@@ -593,6 +649,9 @@ namespace
             page.height = height_;
             page.maxZoom = maxZoom_;
             page.upscaleLevels = req_.upscaleLevels;
+            page.rotation = req_.rotation;
+            page.sourceZoom = zoom_;
+            page.transport = layers_ > 1;
             for (const Placed& c : cities_) {
                 page.cities.push_back({c.info.name.empty() ? c.info.key : c.info.name,
                                        MapMath::Outline(projection_, c.info, c.level.originX, c.level.originY,
@@ -638,6 +697,9 @@ namespace
         std::vector<Placed> cities_;
         std::vector<std::string> leftOut_;  // rendered cities without a render at zoom_
         int zoom_ = -1;                     // the source zoom index
+        int layers_ = 1;                    // 2 with the transport layer
+        int layer_ = kNormal;               // the layer being made
+        int transportCities_ = 0;           // cities with a transport level at zoom_
         std::vector<int> order_;  // indices into cities_, back to front
         ViewMath::OrthoProjection projection_;
         int width_ = 0, height_ = 0, maxZoom_ = 0;
@@ -671,15 +733,19 @@ namespace
         return out;
     }
 
-    // Leaflet 1.9.4 from cdnjs with Subresource Integrity (the hashes of the cdnjs files).
-    constexpr std::string_view kPage = R"(<!doctype html>
+    // Leaflet 1.9.4 from cdnjs with Subresource Integrity: sha384 of the cdnjs files, checked
+    // against the downloaded files (their sha512 matches the cdnjs API). Everything else is in the
+    // page: the overview map, full screen, the position in the link and the city search are a few
+    // lines each, so no plugin is needed. Relative tile URLs, so the page works from file:// and
+    // from any web folder.
+    constexpr std::string_view kPage = R"PAGE(<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>@TITLE@</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css"
-  integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="anonymous" referrerpolicy="no-referrer">
+  integrity="sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H" crossorigin="anonymous" referrerpolicy="no-referrer">
 <style>
   html, body { margin: 0; height: 100%; background: #16181c; color: #e4e6ea; font: 14px/1.4 system-ui, sans-serif; }
   body { display: flex; flex-direction: column; }
@@ -689,17 +755,34 @@ namespace
   #map { flex: 1; min-height: 0; }
   #map, .leaflet-container { background: #16181c; }
   #map > p { padding: 16px; margin: 0; }
+  .leaflet-container { font: 13px/1.4 system-ui, sans-serif; }
+  .leaflet-tooltip.city-label { background: rgba(22, 24, 28, 0.75); color: #fff; border: 0; border-radius: 4px;
+    box-shadow: none; padding: 2px 7px; font-weight: 600; pointer-events: none; }
+  .leaflet-tooltip.city-label::before { display: none; }
+  .map-box { background: rgba(22, 24, 28, 0.88); color: #e4e6ea; border-radius: 6px; padding: 6px 8px;
+    box-shadow: 0 1px 5px rgba(0, 0, 0, 0.5); }
+  .map-box label { display: block; font-size: 12px; color: #9aa1aa; margin-bottom: 3px; }
+  .map-box input { width: 170px; box-sizing: border-box; padding: 4px 6px; border: 1px solid #3a3f48;
+    border-radius: 4px; background: #0f1114; color: #e4e6ea; font: inherit; }
+  .map-box output { display: block; font-size: 12px; color: #ffb35e; min-height: 0; }
+  .leaflet-control-layers { background: rgba(22, 24, 28, 0.88); color: #e4e6ea; border: 0 !important; }
+  .leaflet-control-layers-expanded { padding: 6px 10px; }
+  .leaflet-bar a.full-screen { display: flex; align-items: center; justify-content: center; }
+  .leaflet-bar a.full-screen svg { width: 16px; height: 16px; }
+  .mini-map { width: 200px; height: 140px; border: 2px solid #3a3f48; border-radius: 4px; background: #0f1114;
+    cursor: pointer; }
+  @media (max-width: 640px) { .mini-map { display: none; } .map-box input { width: 130px; } }
 </style>
 </head>
 <body>
 <header>
 <h1>@REGION@</h1>
-<p>Exported on @DATE@. Put the pointer on a city to see its name. Click a city to zoom to it.</p>
+<p>Exported on @DATE@. Rotation @ROTATION@, made from the zoom @ZOOM@ renders. Put the pointer on a city to see its name. Click a city to zoom to it.</p>
 </header>
 <div id="map"></div>
 <script type="application/json" id="region-data">@DATA@</script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"
-  integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  integrity="sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <script>
 (function () {
   var box = document.getElementById('map');
@@ -712,34 +795,267 @@ namespace
   var data = JSON.parse(document.getElementById('region-data').textContent);
   var scale = Math.pow(2, data.maxZoom);
   function toLatLng(p) { return L.latLng(-p[1] / scale, p[0] / scale); }
+  function toPixel(ll) { return [Math.round(ll.lng * scale), Math.round(-ll.lat * scale)]; }
   var bounds = L.latLngBounds(toLatLng([0, 0]), toLatLng([data.width, data.height]));
+  // The ground of the cities: the canvas also has room above the terrain for tall buildings.
+  var ground = L.latLngBounds([]);
+  data.cities.forEach(function (c) { c.outline.forEach(function (p) { ground.extend(toLatLng(p)); }); });
+  if (!ground.isValid()) {
+    ground = bounds;
+  }
   var topZoom = data.maxZoom + data.upscale;
+  var lowZoom = -3;
+  var blank = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==';
   var map = L.map(box, {
-    crs: L.CRS.Simple, minZoom: 0, maxZoom: topZoom,
+    crs: L.CRS.Simple, minZoom: lowZoom, maxZoom: topZoom, zoomSnap: 0.25,
     maxBounds: bounds.pad(0.25), maxBoundsViscosity: 1.0
   });
-  L.tileLayer('tiles/{z}/{x}/{y}.webp', {
-    tileSize: 256, minZoom: 0, maxNativeZoom: data.maxZoom, maxZoom: topZoom, bounds: bounds, noWrap: true,
-    errorTileUrl: 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==',
-    attribution: 'Made with SC4 Seamless Region'
-  }).addTo(map);
+  function tiles(folder, attribution) {
+    return L.tileLayer(folder + '/{z}/{x}/{y}.webp', {
+      tileSize: 256, minZoom: lowZoom, minNativeZoom: 0, maxNativeZoom: data.maxZoom, maxZoom: topZoom,
+      bounds: bounds, noWrap: true, errorTileUrl: blank,
+      attribution: attribution ? 'Made with SC4 Seamless Region' : ''
+    });
+  }
+  var NORMAL = 'Normal view', TRANSPORT = 'Transport view';
+  var bases = {};
+  bases[NORMAL] = tiles('tiles', true);
+  if (data.transport) {
+    bases[TRANSPORT] = tiles('tiles-transport', true);
+  }
+  var current = NORMAL;
+
+  // The position in the link: #zoom/x/y in map pixels, and /transport for the transport view.
+  function readHash() {
+    var parts = location.hash.replace(/^#/, '').split('/');
+    var z = parseFloat(parts[0]), x = parseFloat(parts[1]), y = parseFloat(parts[2]);
+    if (parts.length < 3 || !isFinite(z) || !isFinite(x) || !isFinite(y)) {
+      return null;
+    }
+    return { zoom: Math.min(Math.max(z, lowZoom), topZoom), center: toLatLng([x, y]),
+             transport: parts[3] === 'transport' && data.transport };
+  }
+  function writeHash() {
+    var c = toPixel(map.getCenter());
+    var text = '#' + Math.round(map.getZoom() * 100) / 100 + '/' + c[0] + '/' + c[1] +
+               (current === TRANSPORT ? '/transport' : '');
+    if (text === location.hash) {
+      return;
+    }
+    try {
+      history.replaceState(null, '', text);
+    } catch (e) {
+      location.replace(text);
+    }
+  }
+  function swapMini(name) {
+    mini.removeLayer(miniBases[current]);
+    current = name;
+    miniBases[current].addTo(mini);
+  }
+  function showBase(name) {
+    if (name === current || !bases[name]) {
+      return;
+    }
+    map.removeLayer(bases[current]);
+    bases[name].addTo(map);
+    swapMini(name);
+  }
+
+  var start = readHash();
+  if (start && start.transport) {
+    current = TRANSPORT;
+  }
+  bases[current].addTo(map);
+  if (start) {
+    map.setView(start.center, start.zoom);
+  } else {
+    // Exactly fitted, not rounded down to a zoom step.
+    map.options.zoomSnap = 0;
+    map.fitBounds(ground, { padding: [16, 16] });
+    map.options.zoomSnap = 0.25;
+  }
+  if (data.transport) {
+    L.control.layers(bases, null, { collapsed: false, position: 'topright' }).addTo(map);
+  }
+
+  // City outlines: a highlight on hover, the name, click to zoom. Names show on the map once a
+  // city is large enough on the screen.
   var idle = { color: '#ffd75e', weight: 2, opacity: 0, fillColor: '#ffd75e', fillOpacity: 0 };
-  var hover = { opacity: 1, fillOpacity: 0.12 };
-  data.cities.forEach(function (city) {
-    var shape = L.polygon(city.outline.map(toLatLng), idle).addTo(map);
-    var label = document.createElement('span');
-    label.textContent = city.name;
-    shape.bindTooltip(label, { sticky: true, direction: 'top' });
+  var hover = { opacity: 1, fillOpacity: 0.15 };
+  function zoomTo(city) {
+    map.fitBounds(city.shape.getBounds(), { padding: [40, 40], maxZoom: data.maxZoom });
+    city.shape.setStyle(hover);
+    setTimeout(function () { city.shape.setStyle(idle); }, 1500);
+  }
+  var cities = data.cities.map(function (entry) {
+    var shape = L.polygon(entry.outline.map(toLatLng), idle).addTo(map);
+    var area = shape.getBounds();
+    var name = document.createElement('span');
+    name.textContent = entry.name;
+    var tip = document.createElement('span');
+    tip.textContent = entry.name;
+    var city = {
+      name: entry.name, shape: shape, tip: tip, labelShown: false,
+      width: (area.getEast() - area.getWest()) * scale,
+      label: L.tooltip({ permanent: true, direction: 'center', className: 'city-label', interactive: false })
+        .setLatLng(area.getCenter()).setContent(name)
+    };
+    shape.bindTooltip(tip, { sticky: true, direction: 'top' });
     shape.on('mouseover', function () { shape.setStyle(hover); });
     shape.on('mouseout', function () { shape.setStyle(idle); });
-    shape.on('click', function () { map.fitBounds(shape.getBounds(), { maxZoom: data.maxZoom }); });
+    shape.on('click', function () { zoomTo(city); });
+    return city;
   });
-  map.fitBounds(bounds);
+  function updateLabels() {
+    var factor = Math.pow(2, map.getZoom() - data.maxZoom);
+    cities.forEach(function (city) {
+      var show = city.width * factor >= 180;
+      if (show === city.labelShown) {
+        return;
+      }
+      city.labelShown = show;
+      if (show) {
+        city.label.addTo(map);
+        city.shape.unbindTooltip();
+      } else {
+        map.removeLayer(city.label);
+        city.shape.bindTooltip(city.tip, { sticky: true, direction: 'top' });
+      }
+    });
+  }
+
+  // City search: type a name, then Enter or pick it from the list.
+  var Find = L.Control.extend({
+    options: { position: 'topright' },
+    onAdd: function () {
+      var form = L.DomUtil.create('form', 'map-box');
+      form.setAttribute('role', 'search');
+      var label = L.DomUtil.create('label', '', form);
+      label.htmlFor = 'find-city';
+      label.textContent = 'Find a city';
+      var input = L.DomUtil.create('input', '', form);
+      input.id = 'find-city';
+      input.type = 'search';
+      input.placeholder = 'City name';
+      input.autocomplete = 'off';
+      input.setAttribute('list', 'city-names');
+      var list = L.DomUtil.create('datalist', '', form);
+      list.id = 'city-names';
+      cities.map(function (c) { return c.name; }).sort().forEach(function (n) {
+        var option = document.createElement('option');
+        option.value = n;
+        list.appendChild(option);
+      });
+      var result = L.DomUtil.create('output', '', form);
+      function find() {
+        var text = input.value.trim().toLowerCase();
+        if (!text) {
+          result.textContent = '';
+          return;
+        }
+        var hit = cities.filter(function (c) { return c.name.toLowerCase() === text; })[0] ||
+                  cities.filter(function (c) { return c.name.toLowerCase().indexOf(text) === 0; })[0] ||
+                  cities.filter(function (c) { return c.name.toLowerCase().indexOf(text) >= 0; })[0];
+        result.textContent = hit ? '' : 'No city has this name.';
+        if (hit) {
+          zoomTo(hit);
+        }
+      }
+      L.DomEvent.on(form, 'submit', function (e) { L.DomEvent.preventDefault(e); find(); });
+      L.DomEvent.on(input, 'change', find);
+      L.DomEvent.on(input, 'keydown keyup keypress', L.DomEvent.stopPropagation);
+      L.DomEvent.disableClickPropagation(form);
+      L.DomEvent.disableScrollPropagation(form);
+      return form;
+    }
+  });
+  new Find().addTo(map);
+
+  // Full screen, when the browser allows it.
+  if (document.fullscreenEnabled && box.requestFullscreen) {
+    var Full = L.Control.extend({
+      options: { position: 'topleft' },
+      onAdd: function () {
+        var bar = L.DomUtil.create('div', 'leaflet-bar');
+        var button = L.DomUtil.create('a', 'full-screen', bar);
+        button.href = '#';
+        button.setAttribute('role', 'button');
+        button.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1 6V1h5M10 1h5v5M15 10v5h-5M6 15H1v-5" ' +
+                           'fill="none" stroke="currentColor" stroke-width="2"/></svg>';
+        function title() {
+          var text = document.fullscreenElement ? 'Stop the full screen' : 'Show the map on the full screen';
+          button.title = text;
+          button.setAttribute('aria-label', text);
+        }
+        title();
+        L.DomEvent.on(button, 'click', function (e) {
+          L.DomEvent.stop(e);
+          if (document.fullscreenElement) {
+            document.exitFullscreen();
+          } else {
+            box.requestFullscreen();
+          }
+        });
+        document.addEventListener('fullscreenchange', function () { title(); map.invalidateSize(); });
+        return bar;
+      }
+    });
+    new Full().addTo(map);
+  }
+
+  // A small overview map of the whole region with the part that the big map shows.
+  var Mini = L.Control.extend({
+    options: { position: 'bottomright' },
+    onAdd: function () {
+      var div = L.DomUtil.create('div', 'mini-map');
+      div.style.height = Math.round(Math.min(Math.max(200 * data.height / data.width, 80), 200)) + 'px';
+      div.title = 'Click to move the big map here';
+      L.DomEvent.disableClickPropagation(div);
+      L.DomEvent.disableScrollPropagation(div);
+      return div;
+    }
+  });
+  var miniBox = new Mini().addTo(map).getContainer();
+  var mini = L.map(miniBox, {
+    crs: L.CRS.Simple, minZoom: -8, maxZoom: data.maxZoom, zoomSnap: 0, zoomControl: false,
+    attributionControl: false, dragging: false, touchZoom: false, scrollWheelZoom: false,
+    doubleClickZoom: false, boxZoom: false, keyboard: false
+  });
+  var miniBases = {};
+  miniBases[NORMAL] = tiles('tiles', false);
+  if (data.transport) {
+    miniBases[TRANSPORT] = tiles('tiles-transport', false);
+  }
+  Object.keys(miniBases).forEach(function (k) { miniBases[k].options.minZoom = -8; });
+  miniBases[current].addTo(mini);
+  mini.fitBounds(ground);
+  var frame = L.rectangle(map.getBounds(), { color: '#ffd75e', weight: 2, fillOpacity: 0.12, interactive: false })
+    .addTo(mini);
+  mini.on('click', function (e) { map.panTo(e.latlng); });
+
+  map.on('baselayerchange', function (e) {
+    swapMini(e.name);
+    writeHash();
+  });
+  map.on('move', function () { frame.setBounds(map.getBounds()); });
+  map.on('moveend', writeHash);
+  map.on('zoomend', updateLabels);
+  window.addEventListener('hashchange', function () {
+    var to = readHash();
+    if (!to) {
+      return;
+    }
+    showBase(to.transport ? TRANSPORT : NORMAL);
+    map.setView(to.center, to.zoom);
+  });
+  updateLabels();
+  writeHash();
 })();
 </script>
 </body>
 </html>
-)";
+)PAGE";
 
     void ReplaceAll(std::string& text, const std::string_view from, const std::string_view to)
     {
@@ -778,6 +1094,7 @@ namespace MapExport
     {
         progress.done = 0;
         progress.total = 0;
+        progress.layer = 0;
         Exporter exporter(request, progress, stop);
         return exporter.Run();
     }
@@ -794,8 +1111,10 @@ namespace MapExport
             }
             cities.push_back({{"name", city.name}, {"outline", outline}});
         }
-        const json data = {{"region", page.regionName}, {"width", page.width},           {"height", page.height},
-                           {"maxZoom", page.maxZoom},   {"upscale", page.upscaleLevels}, {"cities", cities}};
+        const json data = {
+            {"region", page.regionName},     {"width", page.width},           {"height", page.height},
+            {"maxZoom", page.maxZoom},       {"upscale", page.upscaleLevels}, {"rotation", page.rotation},
+            {"sourceZoom", page.sourceZoom}, {"transport", page.transport},   {"cities", cities}};
         // Bad UTF-8 in a name becomes U+FFFD. "<" is escaped so no name can end the script block.
         std::string dataText = data.dump(-1, ' ', false, json::error_handler_t::replace);
         ReplaceAll(dataText, "<", "\\u003c");
@@ -804,6 +1123,8 @@ namespace MapExport
         return Fill(kPage, {{"@TITLE@", HtmlEscape(region + " region map")},
                             {"@REGION@", HtmlEscape(region)},
                             {"@DATE@", HtmlEscape(page.dateText)},
+                            {"@ROTATION@", std::to_string(page.rotation + 1)},
+                            {"@ZOOM@", std::to_string(page.sourceZoom + 1)},
                             {"@DATA@", dataText}});
     }
 }

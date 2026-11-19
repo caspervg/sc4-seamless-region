@@ -795,7 +795,8 @@ std::optional<BatchQueue::Run> RegionBatchRenderer::LoadRun_() const
 
 bool RegionBatchRenderer::NeedsRender_(const CityInfo& city) const
 {
-    return ctx_.tileStore->NeedsRender(city, ctx_.settings->MaxRenderZoomIndex());
+    return ctx_.tileStore->NeedsRender(city, ctx_.settings->MaxRenderZoomIndex(),
+                                       ctx_.settings->captureTransportLayer);
 }
 
 void RegionBatchRenderer::Log_(const std::string& line) const
@@ -822,6 +823,7 @@ void RegionBatchRenderer::DrawPanelSection()
     else {
         const char* why = WhyNotBegin_();
         CityCapturer::DrawMaxZoomChoice(*ctx_.settings);
+        CityCapturer::DrawTransportChoice(*ctx_.settings);
         ImGui::BeginDisabled(why != nullptr);
         bool open = false;
         if (ImGui::Button("Render the region")) {
@@ -830,7 +832,7 @@ void RegionBatchRenderer::DrawPanelSection()
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
             ImGui::SetTooltip("Renders every city that has no render, changed since its render, or has no render "
-                              "up to the zoom you chose.");
+                              "up to the zoom you chose. With the transport layer on, also every city without it.");
         }
         ImGui::SameLine();
         if (ImGui::Button("Render all cities again")) {

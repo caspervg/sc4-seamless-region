@@ -149,22 +149,26 @@ namespace
         return tx <= 0xffff && ty <= 0xffff;
     }
 
-    // "r<rot>z<zoom>"
-    bool ParseLevelName(const std::wstring& name, int& rot, int& zoom)
+    // "r<rot>z<zoom>" (normal) or "t<rot>z<zoom>" (transport)
+    bool ParseLevelName(const std::wstring& name, int& rot, int& zoom, bool& transport)
     {
-        if (name.size() != 4 || name[0] != L'r' || name[2] != L'z' || name[1] < L'0' || name[1] > L'3' ||
-            name[3] < L'0' || name[3] > L'7') {
+        if (name.size() != 4 || (name[0] != L'r' && name[0] != L't') || name[2] != L'z' || name[1] < L'0' ||
+            name[1] > L'3' || name[3] < L'0' || name[3] > L'7') {
             return false;
         }
+        transport = name[0] == L't';
         rot = name[1] - L'0';
         zoom = name[3] - L'0';
         return true;
     }
 
-    uint64_t Pack(const int rot, const int zoom, const int tx, const int ty)
+    // Bits 0-1 rotation, 2-4 zoom, 5-20 column, 21-36 row, 37 transport.
+    constexpr uint64_t kTransportBit = 1ull << 37;
+
+    uint64_t Pack(const int rot, const int zoom, const int tx, const int ty, const bool transport)
     {
         return static_cast<uint64_t>(rot) | (static_cast<uint64_t>(zoom) << 2) | (static_cast<uint64_t>(tx) << 5) |
-               (static_cast<uint64_t>(ty) << 21);
+               (static_cast<uint64_t>(ty) << 21) | (transport ? kTransportBit : 0);
     }
 }
 
@@ -184,7 +188,8 @@ namespace CityMeta
                               {"originY", l.originY},
                               {"tilesX", l.tilesX},
                               {"tilesY", l.tilesY},
-                              {"magnification", l.magnification}});
+                              {"magnification", l.magnification},
+                              {"layer", l.transport ? "transport" : "normal"}});
         }
         json j = {{"formatVersion", kFormatVersion},
                         {"cellX", meta.cellX},
@@ -284,6 +289,16 @@ namespace CityMeta
             if (entry.contains("magnification") && !Float(entry, "magnification", l.magnification)) {
                 return fail("a level is incomplete");
             }
+            if (const auto layer = entry.find("layer"); layer != entry.end()) {
+                if (!layer->is_string()) {
+                    return fail("a level is incomplete");
+                }
+                const std::string& name = layer->get_ref<const std::string&>();
+                if (name != "normal" && name != "transport") {
+                    continue;  // a layer of a later version: not for this one
+                }
+                l.transport = name == "transport";
+            }
             if (l.rotation < 0 || l.rotation > 3 || l.zoom < 0 || l.zoom > 4 || l.tilesX < 0 || l.tilesY < 0 ||
                 !std::isfinite(l.magnification) || l.magnification <= 0.0f) {
                 return fail("a level is out of range");
@@ -307,7 +322,7 @@ namespace CityMeta
     {
         const auto has = [](const std::vector<CityRenderMeta::Level>& levels, const CityRenderMeta::Level& level) {
             return std::ranges::any_of(levels, [&level](const CityRenderMeta::Level& l) {
-                return l.rotation == level.rotation && l.zoom == level.zoom;
+                return l.rotation == level.rotation && l.zoom == level.zoom && l.transport == level.transport;
             });
         };
         std::vector<CityRenderMeta::Level> merged = rendered;
@@ -338,7 +353,7 @@ namespace CityMeta
         const CityRenderMeta::Level* best = nullptr;
         double bestScale = 0.0;
         for (const CityRenderMeta::Level& level : levels) {
-            if (level.rotation != rotation || level.tilesX <= 0 || level.tilesY <= 0) {
+            if (level.transport || level.rotation != rotation || level.tilesX <= 0 || level.tilesY <= 0) {
                 continue;
             }
             const double scale = LevelScale(level, viewZoom);
@@ -350,31 +365,38 @@ namespace CityMeta
         return best;
     }
 
-    bool HasLevelsUpTo(const CityRenderMeta& meta, const int maxZoom)
+    bool HasLevelsUpTo(const CityRenderMeta& meta, const int maxZoom, const bool transport)
     {
-        for (int r = 0; r < ViewMath::kRotationCount; ++r) {
-            for (int z = 0; z <= maxZoom; ++z) {
-                if (std::ranges::none_of(
-                        meta.levels, [&](const CityRenderMeta::Level& l) { return l.rotation == r && l.zoom == z; })) {
-                    return false;
+        for (const bool layer : {false, true}) {
+            if (layer && !transport) {
+                break;
+            }
+            for (int r = 0; r < ViewMath::kRotationCount; ++r) {
+                for (int z = 0; z <= maxZoom; ++z) {
+                    if (std::ranges::none_of(meta.levels, [&](const CityRenderMeta::Level& l) {
+                            return l.rotation == r && l.zoom == z && l.transport == layer;
+                        })) {
+                        return false;
+                    }
                 }
             }
         }
         return true;
     }
 
-    bool NeedsRender(const std::optional<CityRenderMeta>& meta, const int64_t saveFileTime, const int maxZoom)
+    bool NeedsRender(const std::optional<CityRenderMeta>& meta, const int64_t saveFileTime, const int maxZoom,
+                     const bool transport)
     {
-        return IsStale(meta, saveFileTime) || !HasLevelsUpTo(*meta, maxZoom);
+        return IsStale(meta, saveFileTime) || !HasLevelsUpTo(*meta, maxZoom, transport);
     }
 
-    std::vector<CityRenderMeta::Level> HigherLevelsToDrop(const CityRenderMeta& earlier, const int maxZoom,
-                                                          const int64_t saveFileTime)
+    std::vector<CityRenderMeta::Level> LevelsToDrop(const CityRenderMeta& earlier, const int maxZoom,
+                                                    const int64_t saveFileTime, const bool transport)
     {
         std::vector<CityRenderMeta::Level> drop;
         if (earlier.saveFileTime != saveFileTime) {
             for (const CityRenderMeta::Level& level : earlier.levels) {
-                if (level.zoom > maxZoom) {
+                if (level.zoom > maxZoom || (level.transport && !transport)) {
                     drop.push_back(level);
                 }
             }
@@ -389,7 +411,7 @@ uint64_t TileStore::PackKey(const TileKey& key, bool& valid)
 {
     valid = key.rotation >= 0 && key.rotation <= 3 && key.zoom >= 0 && key.zoom <= 7 && key.tx >= 0 &&
             key.tx <= 0xffff && key.ty >= 0 && key.ty <= 0xffff;
-    return valid ? Pack(key.rotation, key.zoom, key.tx, key.ty) : 0;
+    return valid ? Pack(key.rotation, key.zoom, key.tx, key.ty, key.transport) : 0;
 }
 
 bool TileStore::SafeName(const std::string_view name)
@@ -409,7 +431,8 @@ fs::path TileStore::CityDirectory(const fs::path& renders, const std::string& ci
 
 fs::path TileStore::TilePathIn(const fs::path& renders, const TileKey& key)
 {
-    const std::string level = "r" + std::to_string(key.rotation) + "z" + std::to_string(key.zoom);
+    const std::string level =
+        (key.transport ? "t" : "r") + std::to_string(key.rotation) + "z" + std::to_string(key.zoom);
     const std::string file = std::to_string(key.tx) + "_" + std::to_string(key.ty) + ".webp";
     return CityDirectory(renders, key.cityKey) / level / file;
 }
@@ -421,8 +444,10 @@ TileStore::CityIndex TileStore::ScanCity(const fs::path& cityDir)
     for (fs::directory_iterator levels(cityDir, ec), end; !ec && levels != end; levels.increment(ec)) {
         int rot = 0;
         int zoom = 0;
+        bool transport = false;
         std::error_code entryEc;
-        if (!levels->is_directory(entryEc) || !ParseLevelName(levels->path().filename().native(), rot, zoom)) {
+        if (!levels->is_directory(entryEc) ||
+            !ParseLevelName(levels->path().filename().native(), rot, zoom, transport)) {
             continue;
         }
         std::error_code fileEc;
@@ -438,7 +463,7 @@ TileStore::CityIndex TileStore::ScanCity(const fs::path& cityDir)
                 continue;
             }
             const uint32_t size32 = static_cast<uint32_t>(std::min<uintmax_t>(size, 0xffffffffu));
-            result.tiles[Pack(rot, zoom, tx, ty)] = size32;
+            result.tiles[Pack(rot, zoom, tx, ty, transport)] = size32;
             result.bytes += size32;
         }
     }
@@ -614,9 +639,10 @@ bool TileStore::IsStale(const CityInfo& city) const
     return CityMeta::IsStale(LoadMeta(city.key), city.savePath.empty() ? 0 : FileTime(city.savePath));
 }
 
-bool TileStore::NeedsRender(const CityInfo& city, const int maxZoom) const
+bool TileStore::NeedsRender(const CityInfo& city, const int maxZoom, const bool transport) const
 {
-    return CityMeta::NeedsRender(LoadMeta(city.key), city.savePath.empty() ? 0 : FileTime(city.savePath), maxZoom);
+    return CityMeta::NeedsRender(LoadMeta(city.key), city.savePath.empty() ? 0 : FileTime(city.savePath), maxZoom,
+                                 transport);
 }
 
 bool TileStore::WriteMeta(const std::string& cityKey, const CityRenderMeta& meta)
@@ -794,13 +820,14 @@ bool TileStore::DeleteCity(const std::string& cityKey)
     return Enqueue(std::move(job), false);
 }
 
-bool TileStore::DeleteLevel(const std::string& cityKey, const int rotation, const int zoom)
+bool TileStore::DeleteLevel(const std::string& cityKey, const int rotation, const int zoom, const bool transport)
 {
     Job job;
     job.type = Job::Type::DeleteLevel;
     job.key.cityKey = cityKey;
     job.key.rotation = rotation;
     job.key.zoom = zoom;
+    job.key.transport = transport;
     bool valid = false;
     PackKey(job.key, valid);
     return valid && SafeName(cityKey) && Enqueue(std::move(job), false);
@@ -983,9 +1010,9 @@ void TileStore::ProcessDeleteLevel(const TileKey& level)
         std::unique_lock lock(mutex_);
         const auto it = index_.find(level.cityKey);
         if (renders == rendersDir_ && it != index_.end()) {
-            // Rotation and zoom are the low five bits of a packed tile key.
-            constexpr uint64_t kLevelBits = 0x1f;
-            const uint64_t wanted = Pack(level.rotation, level.zoom, 0, 0);
+            // Rotation and zoom are the low five bits of a packed tile key, the layer is its own bit.
+            constexpr uint64_t kLevelBits = 0x1f | kTransportBit;
+            const uint64_t wanted = Pack(level.rotation, level.zoom, 0, 0, level.transport);
             CityIndex& city = it->second;
             std::erase_if(city.tiles, [&](const auto& tile) {
                 if ((tile.first & kLevelBits) != wanted) {
@@ -998,7 +1025,8 @@ void TileStore::ProcessDeleteLevel(const TileKey& level)
         }
     }
     if (ec) {
-        LOG_WARN("Store: deleting r{}z{} of '{}' failed: {}", level.rotation, level.zoom, level.cityKey, ec.message());
+        LOG_WARN("Store: deleting {}{}z{} of '{}' failed: {}", level.transport ? 't' : 'r', level.rotation, level.zoom,
+                 level.cityKey, ec.message());
     }
 }
 

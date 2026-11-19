@@ -547,6 +547,46 @@ installed. The checks are the same for both. Tools tab, group "Capture".
 5. Start a region render (Batch). No `Capture: the city was saved, rendering it` line shows
    during the batch: the batch renders each city itself.
 
+### Transport layer
+
+The capture also renders the game's transport view (`docs/re-notes/transport-view.md`). Use a
+city with roads, rail, a highway and zones.
+
+1. Turn on "Transport layer" next to "Render up to" (Capture or Region render section). The
+   tooltip explains it. Save the settings: the INI has `CaptureTransportLayer=true`.
+2. Press "Render this city". After the tiles of each level the text says "Rotation R, zoom Z,
+   transport: tile N of M". M is the number of tiles the normal pass wrote for that level.
+3. Log lines per level, after the normal level:
+   - `Capture: transport view open in N ms` (note N for a large city: it is one pass over every
+     occupant)
+   - `Capture: rotation R zoom Z transport: N tiles in a grid of X x Y`
+   - no `the transport view did not open` warning. If it shows, report the data view number
+     in the line.
+4. While the transport tiles render, the screen shows the transport map: no buildings, no
+   props or trees, networks as flat colored lines, zones as a pale tint, terrain and water as
+   normal. The map view buttons and the legend can flicker. That is expected.
+5. Output: `t0z0` to `t3z3` next to `r0z0` to `r3z3`. A `t` folder has no more files than its
+   `r` folder. `meta.json` has 32 levels, 16 with `"layer": "transport"`, with the same
+   `originX`, `originY`, `tilesX` and `tilesY` as the normal level of the same rotation and zoom.
+6. Put a `t` tile over the `r` tile with the same name in an image editor: roads and terrain line
+   up to the pixel. Outside the city the tile is transparent.
+7. After the end the city shows the normal view (buildings back, no data view, map view buttons
+   as before), and neighbors draw normal tiles, never transport tiles.
+8. Cancel during a transport level: the view is normal at once. `meta.json` does not name that
+   transport level. Start the region render: this city renders again (the transport level is
+   missing).
+9. Save (Ctrl+S) during a transport level. Log: `Capture: the transport view is closed for the
+   save`, then `Capture: transport view open in N ms` again, and the render goes on. The region
+   view picture of the city after the save looks like a normal save (normal and transport map).
+10. Leave to the region view during a transport level: no crash, the next city opens in the
+    normal view.
+11. Turn the option off, save the city and render again: the `t` folders are deleted at the end,
+    and `meta.json` names only the 16 normal levels. Without a save in between the `t` folders
+    stay.
+12. With the NAM and RHW: the transport tiles show RHW only when you opened a data view in that
+    city before the render, the same as the game's own transport map (open point in
+    `docs/todo.md`).
+
 ### Render at noon
 
 1. Settings tab: "Render at noon" is on (the default). Wait until it is night in the game.
@@ -706,6 +746,8 @@ Changes apply to the next render. Save the settings to keep them.
    is up to date. Choose "Zoom 5": every city needs a render (the zoom 5 levels are missing).
 2. Choose "Zoom 3" with cities rendered up to zoom 4: every city is up to date.
 3. The choice is off while the region render runs.
+4. Turn on "Transport layer" in the Region render section: every city without transport levels
+   needs a render. After the run, turn it off: every city is up to date again.
 
 ## Region map export
 
@@ -729,17 +771,34 @@ cities" unless a step says otherwise.
    `Export: ended after S s. The map is ready: M cities, K tiles, X MB.`
 4. The panel says "The map is ready: ..." and shows "Open map". Click it. The browser opens
    `<Region>\RegionRenders\map\index.html` from disk.
-5. In the browser: a dark page, the region name and the date at the top, the whole region in
-   the middle. Each city is where the game shows it as a neighbor: compare with the view from
-   the first city of the region (the reference, the first rendered city in the Status list).
-   Cities without a render are empty. Tall buildings of a city in front cover the city behind
-   it, as in the game.
+5. In the browser: a dark page, the region name, the date, the rotation and the source zoom at
+   the top. The region fills the window with a small margin (not small in the middle). Each
+   city is where the game shows it as a neighbor: compare with the view from the first city of
+   the region (the reference, the first rendered city in the Status list). Cities without a
+   render are empty. Tall buildings of a city in front cover the city behind it, as in the game.
 6. Zoom in with the wheel to full size and one more step (enlarged). The map does not drift
-   far past the region when you drag it. Put the pointer on a city: a yellow outline on its
-   ground edge and a tooltip with its name. Click it: the map zooms to the city.
-7. "Made with SC4 Seamless Region" is in the lower right corner.
-8. Files: `map\index.html` and `map\tiles\<z>\<x>\<y>.webp`. No `map.tmp` and no
-   `map.old` folder stays. Empty areas have no tile files.
+   far past the region when you drag it. City names show on the map once a city is large
+   enough on the screen, and go away when you zoom out. Put the pointer on a city: a yellow
+   outline on its ground edge (and its name, when the name is not on the map yet). Click it:
+   the map zooms to the city.
+7. "Made with SC4 Seamless Region" is in the lower right corner. Above it, the overview map
+   shows the whole region with a yellow frame on the part the big map shows. The frame follows
+   when you drag or zoom. Click the overview map: the big map moves there.
+8. "Find a city" (top right): type a part of a name, pick a name from the list or press Enter.
+   The map zooms to the city and its outline shows for a moment. A name that no city has
+   shows "No city has this name."
+9. The full screen button (below the zoom buttons) shows the map on the whole screen and back.
+   Esc also leaves the full screen.
+10. The address of the page ends in `#zoom/x/y`. It changes when you move the map. Copy the
+    address, close the page and open the address: the same place and zoom. Edit the numbers in
+    the address bar: the map moves there.
+11. With transport tiles (see Capture, Transport layer): "Normal view" and "Transport view" in
+    the top right corner. The transport view lines up with the normal view, also in the overview
+    map, and the address ends in `/transport`. Without transport tiles the switch is not there.
+12. Files: `map\index.html`, `map\tiles\<z>\<x>\<y>.webp` and, with the transport layer,
+    `map\tiles-transport\<z>\<x>\<y>.webp`. No `map.tmp` and no `map.old` folder stays. Empty
+    areas have no tile files.
+13. Put the `map` folder on a web server (for example GitHub Pages): the page works the same.
 
 ### Rotation, cancel and refusal
 
@@ -762,6 +821,17 @@ cities" unless a step says otherwise.
    "The old map cannot be replaced..." and the old map stays.
 8. Without an internet connection the page says "The map cannot load Leaflet. Connect to the
    internet and open this page again."
+
+### Transport view
+
+1. Render some cities with "Transport layer" on. Export with "Transport view" on (the default):
+   the result says "The transport view shows N of them." The log has `Export: M cities have a
+   render at zoom 4 in rotation 0, N of them with the transport layer` and `full size level of
+   the transport layer done`. The panel shows "of the transport view" while it makes that layer.
+2. Cities without transport tiles are empty in the transport view.
+3. Turn "Transport view" off and export again: no `tiles-transport` folder, no switch on the
+   page. `SC4RegionMap.exe <region> --no-transport` does the same, `--transport` (the default)
+   makes the layer when the cities have it.
 
 ### Source zoom
 
