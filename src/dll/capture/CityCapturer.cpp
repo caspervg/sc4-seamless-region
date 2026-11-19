@@ -29,6 +29,8 @@
 #include "batch/RegionBatchRenderer.hpp"
 #include "capture/SnapshotReader.hpp"
 #include "core/GameAddresses.hpp"
+#include "core/Guard.hpp"
+#include "core/Hooking.hpp"
 #include "core/IdleScheduler.hpp"
 #include "core/Messages.hpp"
 #include "imgui.h"
@@ -177,6 +179,54 @@ namespace
         return static_cast<uint32_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - since).count());
     }
+
+    // ---- dirt roads (RHW) on the transport map ----
+    // The game's transport map has no entry for dirt road. RebuildMap's type test is pointed at
+    // sTypeFlags, which adds dirt road to the highway (or road) entry. The hook fills the table
+    // from the view's colors just before the game builds the map. Also fixes the game's own
+    // region transport thumbnails. docs/re-notes/transport-view.md, section 9.
+    namespace TM = CaptureAddresses::TransportMap;
+
+    std::array<uint32_t, 13> sTypeFlags = CaptureMath::TransportTypeFlags(0, 0);
+    Hooking::BytePatch sTypeFlagPatch;
+
+    using RebuildMapFn = void(__fastcall*)(void* self, void* edx);
+    Hooking::Detour<RebuildMapFn> sRebuildMap;
+
+    void __fastcall RebuildMapHook(void* self, void* edx)
+    {
+        Guarded("Transport map dirt roads", [self] {
+            const auto* colors = reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(self) + TM::kColors);
+            sTypeFlags = CaptureMath::TransportTypeFlags(colors[TM::kHighwayColorIndex], colors[TM::kRoadColorIndex]);
+        });
+        sRebuildMap.Original()(self, edx);
+    }
+
+    void RemoveDirtRoadFix()
+    {
+        sRebuildMap.Remove();
+        sTypeFlagPatch.Remove();
+    }
+
+    void InstallDirtRoadFix()
+    {
+        if (std::memcmp(reinterpret_cast<const void*>(TM::kTypeFlagTest), TM::kTypeFlagTestBytes,
+                        sizeof(TM::kTypeFlagTestBytes)) != 0) {
+            LOG_WARN("Capture: the transport map code is not as expected (another plugin may change it). "
+                     "Dirt roads stay off the transport map.");
+            return;
+        }
+        const auto table = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(sTypeFlags.data()));
+        uint8_t displacement[4];
+        std::memcpy(displacement, &table, sizeof(displacement));
+        if (!sRebuildMap.Install(TM::kRebuildMap, &RebuildMapHook, "TransportMapRebuild") ||
+            !sTypeFlagPatch.Apply(TM::kTypeFlagTestDisplacement, displacement, "TransportMapTypeFlags")) {
+            LOG_WARN("Capture: dirt roads stay off the transport map");
+            RemoveDirtRoadFix();
+            return;
+        }
+        LOG_INFO("Capture: dirt roads (RHW) are drawn on the transport map");
+    }
 }
 
 // ---- lifecycle ---------------------------------------------------------------------------------
@@ -192,6 +242,7 @@ bool CityCapturer::Initialize(const ModuleContext& ctx)
         preSaveToken_ = ctx_.messages->Subscribe(Messages::kPreSave, [this](cIGZMessage2*) { OnSaveBegin_(); });
         saveToken_ = ctx_.messages->Subscribe(Messages::kPostSave, [this](cIGZMessage2*) { OnSaved_(); });
     }
+    InstallDirtRoadFix();
     return true;
 }
 
@@ -208,6 +259,7 @@ void CityCapturer::Shutdown()
     saveToken_ = 0;
     preSaveToken_ = 0;
     onFinished_ = nullptr;
+    RemoveDirtRoadFix();
 }
 
 void CityCapturer::OnCityInit() {}

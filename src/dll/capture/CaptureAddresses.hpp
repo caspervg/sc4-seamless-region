@@ -87,4 +87,27 @@ namespace CaptureAddresses
     constexpr uint32_t kTransportDataViewInstance = 0x4A0B6800u + kTransportDataView;
     // cSC4View3DWin view level 1: the surface (not an underground view).
     constexpr uint32_t kSurfaceViewLevel = 1;
+
+    // ---------------------------------------------------------------------------------------
+    // The network map of data view 0xF3 (cSC4NetworkLayoutView), for dirt roads (RHW).
+    // docs/re-notes/transport-view.md, section 9.
+    // ---------------------------------------------------------------------------------------
+    namespace TransportMap
+    {
+        // void __thiscall cSC4NetworkLayoutView::RebuildMap(). Only caller: InitCustomView
+        // (0x0060c107), so it runs on every PushView(0xF3).
+        constexpr uintptr_t kRebuildMap = 0x0060acd0;
+        // In RebuildMap, per cell and per map entry: TEST [EAX*4 + 0x00aa7540], EBX
+        // (EAX = network type of the entry, EBX = network flags of the cell & 0x1f4f).
+        // 0x00aa7540 is the shared table kFlagForNetworkType (1 << type): only the 4-byte
+        // displacement of this one instruction is pointed at the plugin's own table.
+        constexpr uintptr_t kTypeFlagTest = 0x0060aed7;
+        constexpr uint8_t kTypeFlagTestBytes[7] = {0x85, 0x1C, 0x85, 0x40, 0x75, 0xAA, 0x00};
+        constexpr uintptr_t kTypeFlagTestDisplacement = kTypeFlagTest + 3;
+        // uint32 ARGB colors of the layout view (colour table 0x0B9EC13D, read by Init
+        // 0x0060aaf0), by map index: 3 road (type 0), 8 highway (type 2).
+        constexpr uint32_t kColors = 0x24;
+        constexpr uint32_t kRoadColorIndex = 3;
+        constexpr uint32_t kHighwayColorIndex = 8;
+    }
 }

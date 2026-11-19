@@ -70,11 +70,14 @@ city a few ticks later. Saves that leave the city (switch, region view, quit) do
 Built (`CaptureTransportLayer`, `docs/re-notes/transport-view.md` sections 7 and 8), not run in
 the game yet (`docs/testing.md`, Capture, Transport layer). Left:
 
-1. **RHW on the transport map.** The game's layout view cannot draw dirt roads (type 11). With
-   the NAM's 0xF3 exemplar (data source `0x4C`, dark colour ramp) they show as a data overlay,
-   but only after the player opened a data view in that city. Trace where the map view fills
-   the overlay of source `0x4C` (map view +0x13c, the `0x4C` cases in `0x007a17b0`, the ATM
-   call), then find the cheapest safe way to fill it before the transport pass.
+1. **RHW on the transport map.** Built: dirt roads take the highway (or road) entry of the
+   game's network map (`docs/re-notes/transport-view.md` section 9). Check in game
+   (`docs/testing.md`, Transport layer, step 12). Left, if wanted:
+   - Smooth diagonal RHW: the cells are full squares because the edge lookup asks for the
+     highway edges. Needs a code hook in the loop (section 9).
+   - The NAM's data overlay (source `0x4C`) stays empty until a data view was opened by hand.
+     Probable cause: `cSC4WinMapView::Update` needs the map view panel child window `0x4203`.
+     Confirm with the UI data, then decide if a trigger is worth it (section 9).
 2. Measure the cost of `PushView(0xF3)` in a large city (log `Capture: transport view open in`).
 3. In game, if wanted: neighbor tiles from the `t` levels while the live city shows the
    transport data view.

@@ -366,7 +366,7 @@ What the code says:
   - `6534284A-690F693F-4A0B68F3` "DataView: Regional Transport Map" keeps the custom view
     `0x4B8EA424` and the empty type filter, and **adds** `DataView: Data source` (`0x4A0B47E5`) =
     `0x4C`, `DataView: Colour ramp` = {0x00000000, 0xC0000000, 0x000000FF, 0xC0000000},
-    `DataView: Maximum scale` = 0xFF and `DataView: Travel Types` (`0x6B7C9DDD`) = 1.
+    `DataView: Maximum scale` = 0xFF and `DataView: Travel Types` (`0x6B7C5CDD`) = 1.
   - `6534284A-690F693F-0B9EC13D` colour table, 14 entries in map index order: street
     `0xFF969696`, rail `0xFF9F1F20`, one-way road, road and avenue `0xFFA5A2A0`, monorail
     `0xFF780094`, light rail `0xFF201FBF`, ground highway and highway 0 (not drawn), then the
@@ -396,7 +396,106 @@ with RHW when the player opened a data view in that city before the render, else
 push and pop of another data view before the transport pass would only help if the missing step is
 in `SetDataView`, and the game's writer already does a full `SetDataView(0xF3)` without effect.
 Open point in `docs/todo.md`: trace the fill of data source `0x4C` (the data overlay at map view
-+0x13c, the `0x4C` cases in `0x007a17b0`, and the ATM call), then decide on a fix.
++0x13c, the `0x4C` cases in `0x007a17b0`, and the ATM call), then decide on a fix. Section 9 has
+the trace and the fix that was built.
+
+## 9. Dirt roads: the overlay trace and the fix in the network map
+
+### 9.1 Data source 0x4C (the NAM overlay)
+
+The overlay is not a separate object. It is the map view's `SC4MarkedCellView` (map view +0x13c,
+Mac +0x154), which `cSC4WinMapView::Update` fills.
+
+- `SetDataView` (`0x007a49b0`) reads `DataView: Data source` (`0x4A0B47E5`) into map view +0x144
+  and `DataView: Travel Types` into +0x9ad.. (count at +0x9b5, at most 8). The Mac code reads
+  the travel types from property `0x6B7C5CDD` (Windows `PUSH 0x6b7c5cdd` at `0x007a4e45`, the
+  NAM exemplar has the same ID: section 8 had a typo, fixed). It then calls `UpdateHighlights`
+  (`0x007a1a00`), `Update` (`0x007a2f60`) and `HookUpdateMessages` (`0x007a17b0`). Confirmed
+  (Windows decompile, Mac `0x0027fc98`).
+- `Update` (Mac `0x0027db2e`), case `0x4C`: for every cell and every travel type it calls the
+  traffic simulator: `GetCapacity(mapped type, x, z)` (vtable slot +0x5c, Mac `0x000538d0`:
+  `1 / NetworkInfo` of that cell, 0 when the cell has no network of that kind) and, when it is
+  > 0, `GetTrafficEdgeDensity(x, z, travel type, ...)` (slot +0x30, Mac `0x00054010`). Travel
+  type 1 maps to traffic network type 1 (the car network, which includes dirt roads), so every
+  cell a car can use gets a value of at least 2 of 255. With the NAM ramp all values map to
+  `0xC0000000`, so every car cell is drawn dark: that is how RHW appears. Cells with
+  `IsRoadDamaged` (slot +0x40) get color 0. Then `SetMarkedCells`, `SetCellColors`,
+  `SetCellSize` on the marked cell view, which draws in renderer pass 5 (added once by
+  `Update`, flag +0x141). Strong (Mac logic, same shape in the Windows code).
+- After that, the overlay is refreshed on message `0x86AD10EE` every 250 ms for source `0x4C`
+  (Mac `cSC4WinMapView::DoMessage` `0x0027fab8`), as long as the hooked messages arrive. Strong.
+- **Why it can stay empty.** At its start (Windows `0x007a2fc8..0x007a3003`) `Update` asks the
+  map view's parent window for child `0x4203` with IID `0xCA318385`
+  (`GetParentWin()->GetChildAsRecursive`, slots +0x2c and +0x94). When that fails it jumps to
+  the end (`0x007a4864`): no marked cells are set. The traffic data is always there (it does
+  not depend on the UI), and `SetDataView` runs the same way for the UI and for `PushView`. So
+  the only step that can depend on the player is this window lookup. `HideWindow` (Mac
+  `0x00280b98`) also checks that child `0x8A2871B1` exists before it does anything, which
+  points to panel children that are created later than the map view. Probable: the map view
+  panel's child windows (with `0x4203`, the small map image) exist only after the player opens
+  the data view panel once in that city, and they stay (hidden) after it closes. Not confirmed
+  with the UI files.
+- A trigger from the DLL would be: show and hide the map view panel once (`ShowWindow` /
+  `HideWindow` through the UI), before the transport pass. That has UI side effects and the
+  exact window to open was not traced. Not built.
+
+### 9.2 The fix: dirt roads in the game's network map
+
+The NAM route needs the overlay. A direct fix in `RebuildMap` works for any NAM and also for
+the game's own region transport thumbnails, so that was built.
+
+The loop (`0x0060aecd..0x0060af2a`), per network occupant cell, confirmed (Windows disassembly):
+
+```
+0x0060ae70  CALL [EAX+0x30]            ; cISC4NetworkOccupant::GetNetworkFlag
+0x0060ae73  MOV EBX,EAX / AND EBX,0x1f4f   ; dirt road bit 11 (0x800) survives
+0x0060aecd  XOR EDI,EDI                ; map index 0..8
+0x0060aed0  MOV EAX,[EDI*4 + 0xaa76b8] ; type: 3, 1, 10, 0, 6, 9, 8, 12, 2
+0x0060aed7  TEST [EAX*4 + 0xaa7540],EBX    ; 85 1C 85 40 75 AA 00 (bytes read)
+0x0060aee7  PUSH EAX / CALL [EDX+0x98] ; GetEdgeTypesFlag(type)
+0x0060aeef  JNZ 0x0060afe2             ; edges: triangles toward the connected edges
+0x0060af00  CALL [EAX+0x20] (0x100000) ; HasNetworkFlag, set: no square
+0x0060af17  code EDI+1 -> all 4 parts of the cell (full square)
+```
+
+Later entries overwrite earlier ones, so highway (last) wins in a mixed cell.
+
+The patch:
+
+- `BytePatch` on the 4-byte displacement at `0x0060aeda` (inside the `TEST` at `0x0060aed7`),
+  applied only when the 7 bytes are `85 1C 85 40 75 AA 00`. It points at the plugin's own table
+  `sTypeFlags[13]`. `0x00aa7540` itself is shared (kFlagForNetworkType) and is not changed.
+- A detour on `RebuildMap` (`0x0060acd0`, `void __thiscall`, plain `RET`) fills the table just
+  before the game builds the map: `1 << type`, plus `0x800` on type 2 (highway) when the
+  highway color (layout view +0x24 + 8 * 4, ARGB) has alpha > 0, else on type 0 (road, +0x24 +
+  3 * 4) when that one is visible, else nothing (`CaptureMath::TransportTypeFlags`, tested).
+  Reason: the NAM of the development install sets the highway color to 0 (colour table
+  `0B9EC13D` in `770-network-addon-mod_001.dat`, read again: entries 7 and 8 are 0). With the
+  highway entry, RHW would be invisible there, and a road crossing the RHW would lose its color.
+- Both are installed in `CityCapturer::Initialize` and removed in `Shutdown` (and by
+  `Hooking::Shutdown`). Not a setting: it only adds dirt road cells to a map that had none.
+
+Checks:
+
+| Question | Answer | Confidence |
+|---|---|---|
+| (a) bytes at `0x0060aed7` | `85 1C 85 40 75 AA 00` | confirmed (`ghx mem`) |
+| (b) `GetEdgeTypesFlag(2)` on a pure dirt road | `0x0061af80` -> `0x00619b70`: the primary type (+0x4 of the edge store) or the extra type list, else **0**. So 0 -> full square of the highway code. No shape path, no crash | confirmed (Windows disassembly) |
+| (b) `HasNetworkFlag(0x100000)` | same check as for every other type, skips the square when set | confirmed |
+| (c) cell with road and dirt road | highway entry: road triangles, then a full red square over them. Road entry (NAM case): `GetEdgeTypesFlag(0)` is not 0, so the road shape, the RHW part is not drawn separately | strong |
+| (c) cell with highway and dirt road | highway edges, as before | strong |
+| (d) callers of `RebuildMap` | only `0x0060c107` in `InitCustomView` (`0x0060c0a0`) | confirmed (xrefs, Mac the same) |
+| (e) other readers of the patched instruction | none: no branch lands inside `0x0060aed8..0x0060aedd` (all jumps in the function checked), and the table at `0x00aa7540` keeps its bytes for its other users | confirmed for the function, other plugins that patch the same bytes are caught by the byte check |
+| Widening | `kShouldWidenForColorType` (`0x00aa7670`, by code): 5 (avenue), 8 and 9 (highways) widen. RHW on the highway code widens by one triangle into the next cell, as highways do. On the road code (4) it does not | confirmed (bytes) |
+| Vertex pass | gets the occupant again with the same `0x1f4f` filter for the height, dirt road passes | strong (Mac) |
+| Cost | one table fill per `PushView(0xF3)`, nothing per frame | confirmed |
+| Saved data | the region transport thumbnail (PNG instance 4) of a save now shows RHW | strong |
+
+Limits: dirt road cells are full squares (the edge lookup asks for the highway or road edges,
+which a pure dirt road does not have), so diagonal RHW is drawn as steps. Smooth shapes need a
+code hook that also asks `GetEdgeTypesFlag(11)` when the highway lookup gives 0 (13 bytes at
+`0x0060aee0..0x0060aeec` to a stub). Not built. The NAM's own overlay is unchanged: with the
+development NAM, RHW is grey from the map and dark from the overlay when the overlay is filled.
 
 ## Proposed Windows names (not applied)
 
@@ -417,3 +516,9 @@ Open point in `docs/todo.md`: trace the fill of data source `0x4C` (the data ove
 | `0x0079f7f0` | `cSC4ComplexViewOccupantFilter::IsOccupantIncluded` | `0x0027a246` | probable | vtable `0x00ab7e44` slot +0xc |
 | `0x007e63f0` | `cSC4View3DWin::SetCurrentViewFilter` (create function first) | - | strong | View3D vtable `0x00abce40` +0x4c, stores +0x320, messages `0x06CDB65A/B` |
 | `0x007e57c0` | `cSC4View3DWin::GetCurrentViewFilter` (create function first) | - | probable | vtable +0x48 |
+| `0x007a2f60` | `cSC4WinMapView::Update` | `0x0027db2e` | strong | called by SetDataView after UpdateHighlights, same start (+0x142, +0x140/+0x13c/+0x141 renderer add, child `0x4203` IID `0xCA318385`) |
+| `0x007a1a00` | `cSC4WinMapView::UpdateHighlights` | `0x0027bb0a` | probable | call position in SetDataView |
+| `0x007a17b0` | `cSC4WinMapView::HookUpdateMessages` | `0x0027c4f8` | strong | ATM slot +0x20 with `0xC0` only for source `0x4C`, last call of SetDataView |
+| `0x0079fb20` | `cSC4WinMapView::UnhookUpdateMessages` | `0x0027c1fa` | probable | call position in SetDataView (after the custom view release) |
+| `0x007dcd00` | `SC4MarkedCellView::ClearMarkedCells` | `0x0051af30` | probable | called with map view +0x13c where the Mac calls it |
+| `0x007dc1c0` | `SC4MarkedCellView::SetShouldUseNetworkAltitude` | `0x0051a47e` | probable | called with +0x13c and (source == 9 or `0x4C`) |
