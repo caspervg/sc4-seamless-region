@@ -626,3 +626,17 @@ TEST_CASE(MetaMergeLevelsKeepsOnlyWhatIsOnDisk)
     CityRenderMeta empty;
     CHECK(CityMeta::Parse(CityMeta::ToJson(empty)).has_value());
 }
+
+// meta.json written before groundHeight existed has none.
+TEST_CASE(MetaGroundHeightIsOptional)
+{
+    CityRenderMeta meta;
+    meta.levels.push_back({0, 3, 1.5f, -2.0f, 3, 4});
+    const auto old = CityMeta::Parse(CityMeta::ToJson(meta));
+    CHECK(old && !old->groundHeight);
+    meta.groundHeight = 312.5f;
+    const std::string text = CityMeta::ToJson(meta);
+    CHECK(text.find("groundHeight") != std::string::npos);
+    const auto parsed = CityMeta::Parse(text);
+    CHECK(parsed && parsed->groundHeight && *parsed->groundHeight == 312.5f);
+}
