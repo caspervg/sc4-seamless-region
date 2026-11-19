@@ -37,6 +37,8 @@
 #include "region/RegionIndex.hpp"
 #include "render/NeighborRenderer.hpp"
 #include "switching/CitySwitcher.hpp"
+#include "transportmap/DirtRoadTransportColor.h"
+#include "transportmap/Patching.h"
 #include "utils/Logger.h"
 #include "utils/Settings.h"
 
@@ -181,51 +183,28 @@ namespace
     }
 
     // ---- dirt roads (RHW) on the transport map ----
-    // The game's transport map has no entry for dirt road. RebuildMap's type test is pointed at
-    // sTypeFlags, which adds dirt road to the highway (or road) entry. The hook fills the table
-    // from the view's colors just before the game builds the map. Also fixes the game's own
-    // region transport thumbnails. docs/re-notes/transport-view.md, section 9.
-    namespace TM = CaptureAddresses::TransportMap;
-
-    std::array<uint32_t, 13> sTypeFlags = CaptureMath::TransportTypeFlags(0, 0);
-    Hooking::BytePatch sTypeFlagPatch;
-
-    using RebuildMapFn = void(__fastcall*)(void* self, void* edx);
-    Hooking::Detour<RebuildMapFn> sRebuildMap;
-
-    void __fastcall RebuildMapHook(void* self, void* edx)
-    {
-        Guarded("Transport map dirt roads", [self] {
-            const auto* colors = reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(self) + TM::kColors);
-            sTypeFlags = CaptureMath::TransportTypeFlags(colors[TM::kHighwayColorIndex], colors[TM::kRoadColorIndex]);
-        });
-        sRebuildMap.Original()(self, edx);
-    }
-
+    // The game's transport map has no entry for dirt road. transportmap/DirtRoadTransportColor
+    // (written in the style of the NAM DLL, to move there later) adds one with its own color. Also
+    // fixes the game's own region transport thumbnails. docs/re-notes/transport-view.md, section 10.
     void RemoveDirtRoadFix()
     {
-        sRebuildMap.Remove();
-        sTypeFlagPatch.Remove();
+        Patching::RemoveAll();
     }
 
     void InstallDirtRoadFix()
     {
-        if (std::memcmp(reinterpret_cast<const void*>(TM::kTypeFlagTest), TM::kTypeFlagTestBytes,
-                        sizeof(TM::kTypeFlagTestBytes)) != 0) {
-            LOG_WARN("Capture: the transport map code is not as expected (another plugin may change it). "
-                     "Dirt roads stay off the transport map.");
-            return;
+        if (!Hooking::IsInitialized()) {
+            return; // Not game version 641: the addresses are not valid.
         }
-        const auto table = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(sTypeFlags.data()));
-        uint8_t displacement[4];
-        std::memcpy(displacement, &table, sizeof(displacement));
-        if (!sRebuildMap.Install(TM::kRebuildMap, &RebuildMapHook, "TransportMapRebuild") ||
-            !sTypeFlagPatch.Apply(TM::kTypeFlagTestDisplacement, displacement, "TransportMapTypeFlags")) {
-            LOG_WARN("Capture: dirt roads stay off the transport map");
+        try {
+            DirtRoadTransportColor::Install();
+            LOG_INFO("Capture: dirt roads (RHW) are drawn on the transport map");
+        }
+        catch (const std::exception& e) {
             RemoveDirtRoadFix();
-            return;
+            LOG_WARN("Capture: the transport map code is not as expected (another plugin or the NAM DLL may "
+                     "change it). Dirt roads on the transport map are left to that plugin. {}", e.what());
         }
-        LOG_INFO("Capture: dirt roads (RHW) are drawn on the transport map");
     }
 }
 

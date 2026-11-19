@@ -1,0 +1,6 @@
+# This folder follows the nam-dll code style (https://github.com/NAMTeam/nam-dll, src/.editorconfig),
+# so that the files can be copied to that project.
+[*.{cpp,h}]
+indent_style = tab
+indent_size = 4
+trim_trailing_whitespace = true
