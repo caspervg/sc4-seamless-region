@@ -5,11 +5,13 @@
 #include <shellapi.h>
 
 #include <cstdio>
+#include <string>
 #include <system_error>
 
 #include "batch/RegionBatchRenderer.hpp"
 #include "capture/CityCapturer.hpp"
 #include "core/Guard.hpp"
+#include "export/MapMath.hpp"
 #include "imgui.h"
 #include "region/RegionIndex.hpp"
 #include "store/TileStore.hpp"
@@ -117,6 +119,7 @@ bool HtmlMapExporter::Start()
     request.dateText = Today();
     request.cities = ctx_.region->Cities();
     request.rotation = rotation_;
+    request.sourceZoom = sourceZoom_;
     request.quality = ctx_.settings->mapQuality;
     request.cacheBytes = static_cast<size_t>(ctx_.settings->mapCacheMB) * 1024 * 1024;
     request.upscaleLevels = ctx_.settings->mapUpscaleLevels;
@@ -126,6 +129,8 @@ bool HtmlMapExporter::Start()
     progress_.zoom = 0;
     progress_.done = 0;
     progress_.total = 0;
+    progress_.sourceZoom = -1;
+    progress_.estimateBytes = 0;
     result_ = MapExport::Result();
     message_.clear();
     started_ = std::chrono::steady_clock::now();
@@ -148,8 +153,8 @@ bool HtmlMapExporter::Start()
         LOG_ERROR("Export: starting the worker failed: {}", e.what());
         return false;
     }
-    LOG_INFO("Export: started the region map, rotation {}, {} cities in the region", rotation_,
-             ctx_.region->Cities().size());
+    LOG_INFO("Export: started the region map, rotation {}, source zoom {}, {} cities in the region", rotation_,
+             sourceZoom_ < 0 ? "automatic" : std::to_string(sourceZoom_ + 1), ctx_.region->Cities().size());
     return true;
 }
 
@@ -183,6 +188,14 @@ void HtmlMapExporter::DrawPanelSection()
         case MapExport::Phase::Pyramid: ImGui::Text("Making the smaller level %d...", progress_.zoom.load()); break;
         default: ImGui::TextUnformatted("Writing the page..."); break;
         }
+        if (const int zoom = progress_.sourceZoom.load(); zoom >= 0) {
+            const double megabytes = static_cast<double>(progress_.estimateBytes.load()) / (1024.0 * 1024.0);
+            ImGui::Text("From the zoom %d renders. The map will be about %.0f MB.", zoom + 1, megabytes);
+            if (progress_.estimateBytes.load() > MapExport::kLargeMapBytes) {
+                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
+                                   "This is a large map. Make sure that the disk has room for it.");
+            }
+        }
         char overlay[64];
         std::snprintf(overlay, sizeof(overlay), "%lld of %lld tiles", static_cast<long long>(done),
                       static_cast<long long>(total));
@@ -206,14 +219,30 @@ void HtmlMapExporter::DrawPanelSection()
         return;
     }
 
-    ImGui::TextWrapped("Make one map of the whole region. You open it in a web browser. It uses the zoom 4 "
-                       "renders of the cities.");
+    ImGui::TextWrapped("Make one map of the whole region. You open it in a web browser. It uses the renders of "
+                       "the cities at one zoom.");
     static constexpr const char* kRotations[] = {"1", "2", "3", "4"};
     ImGui::SetNextItemWidth(80.0f);
     ImGui::Combo("Rotation", &rotation_, kRotations, IM_ARRAYSIZE(kRotations));
     if (ImGui::BeginItemTooltip()) {
         ImGui::TextUnformatted("The map shows the region from this side. Only cities with a render in this "
                                "rotation are on the map.");
+        ImGui::EndTooltip();
+    }
+
+    static constexpr const char* kZooms[] = {"Best for all cities", "Zoom 3", "Zoom 4", "Zoom 5"};
+    int zoomChoice = sourceZoom_ < 0 ? 0 : sourceZoom_ - MapMath::kMinSourceZoom + 1;
+    ImGui::SetNextItemWidth(160.0f);
+    if (ImGui::Combo("Source zoom", &zoomChoice, kZooms, IM_ARRAYSIZE(kZooms))) {
+        sourceZoom_ = zoomChoice == 0 ? -1 : zoomChoice - 1 + MapMath::kMinSourceZoom;
+    }
+    if (ImGui::BeginItemTooltip()) {
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+        ImGui::TextUnformatted("The zoom of the city renders that the map uses. \"Best for all cities\" takes the "
+                               "highest zoom that every rendered city has. A map from zoom 5 has the most detail. It "
+                               "is about 4 times the size of a map from zoom 4 and takes about 4 times as long. "
+                               "Cities without a render at the zoom are not on the map. The panel names them.");
+        ImGui::PopTextWrapPos();
         ImGui::EndTooltip();
     }
 

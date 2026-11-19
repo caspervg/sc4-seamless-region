@@ -21,6 +21,8 @@ namespace fs = std::filesystem;
 
 namespace
 {
+    constexpr int kZoomIndex = 3;  // zoom 4, the source zoom of the tests
+
     CityInfo City(const int cellX, const int cellZ, const int size, const char* key)
     {
         CityInfo c;
@@ -56,7 +58,7 @@ TEST_CASE(MapPlacementMatchesNeighborRenderer)
     const CityInfo neighbors[] = {City(4, 3, 1, "east"), City(0, 0, 4, "far"), City(2, 5, 1, "south"),
                                   City(1, 3, 1, "west")};
     for (int rotation = 0; rotation < 4; ++rotation) {
-        const ViewMath::OrthoProjection p = ViewMath::OrthoProjection::For(MapMath::kZoomIndex, rotation);
+        const ViewMath::OrthoProjection p = ViewMath::OrthoProjection::For(kZoomIndex, rotation);
         const ViewMath::TileGrid refGrid = Grid(p, reference, 512);
         const MapMath::Point refAt =
             MapMath::PlaceCity(p, reference, reference, refGrid.originCanvas.fX, refGrid.originCanvas.fY);
@@ -90,7 +92,7 @@ TEST_CASE(MapPlacementMatchesNeighborRenderer)
 TEST_CASE(MapOutlineFollowsTheCity)
 {
     const CityInfo c = City(0, 0, 1, "a");
-    const ViewMath::OrthoProjection p = ViewMath::OrthoProjection::For(MapMath::kZoomIndex, 0);
+    const ViewMath::OrthoProjection p = ViewMath::OrthoProjection::For(kZoomIndex, 0);
     const ViewMath::TileGrid grid = Grid(p, c, 512);
     const auto outline = MapMath::Outline(p, c, grid.originCanvas.fX, grid.originCanvas.fY, {100, 50}, 400.0f);
     // Every corner lies inside the tile grid of the city, shifted to (100, 50).
@@ -303,7 +305,7 @@ namespace
             }
             std::vector<uint8_t> encoded;
             CHECK(WebpCodec::Encode(rgba.data(), size, size, 90, encoded));
-            const fs::path file = TileStore::TilePathIn(renders, {c.key, rotation, MapMath::kZoomIndex, tx, ty});
+            const fs::path file = TileStore::TilePathIn(renders, {c.key, rotation, kZoomIndex, tx, ty});
             fs::create_directories(file.parent_path());
             std::ofstream(file, std::ios::binary)
                 .write(reinterpret_cast<const char*>(encoded.data()), static_cast<std::streamsize>(encoded.size()));
@@ -349,16 +351,17 @@ TEST_CASE(MapExportEndToEnd)
     const CityInfo east = City(1, 0, 1, "East");     // in front of West at rotation 0
     const CityInfo bare = City(0, 1, 1, "Bare");     // founded, no render
     const CityInfo turned = City(1, 1, 1, "Turned"); // render in rotation 2 only
-    const ViewMath::OrthoProjection p = ViewMath::OrthoProjection::For(MapMath::kZoomIndex, 0);
+    const CityInfo smallCity = City(2, 0, 1, "Small");   // rendered up to zoom 3 only
+    const ViewMath::OrthoProjection p = ViewMath::OrthoProjection::For(kZoomIndex, 0);
 
     const auto metaFor = [&](const CityInfo& c, const int rotation) {
-        const ViewMath::TileGrid g = Grid(ViewMath::OrthoProjection::For(MapMath::kZoomIndex, rotation), c, kSource);
+        const ViewMath::TileGrid g = Grid(ViewMath::OrthoProjection::For(kZoomIndex, rotation), c, kSource);
         CityRenderMeta m;
         m.cellX = c.cellX;
         m.cellZ = c.cellZ;
         m.tileSize = kSource;
         m.groundHeight = 300.0f;
-        m.levels.push_back({rotation, MapMath::kZoomIndex, g.originCanvas.fX, g.originCanvas.fY, g.tilesX, g.tilesY});
+        m.levels.push_back({rotation, kZoomIndex, g.originCanvas.fX, g.originCanvas.fY, g.tilesX, g.tilesY});
         m.levels.push_back({rotation, 1, 0.0f, 0.0f, 1, 1});
         return m;
     };
@@ -367,6 +370,11 @@ TEST_CASE(MapExportEndToEnd)
     region.WriteMeta(west, westMeta);
     region.WriteMeta(east, eastMeta);
     region.WriteMeta(turned, metaFor(turned, 2));
+    CityRenderMeta smallMeta;
+    smallMeta.cellX = smallCity.cellX;
+    smallMeta.tileSize = kSource;
+    smallMeta.levels.push_back({0, 2, 0.0f, 0.0f, 1, 1});
+    region.WriteMeta(smallCity, smallMeta);
     region.WriteTile(turned, 2, 0, 0, kSource, {0, 0, 255, 255});
 
     // Where the exporter puts both cities (West is the reference, the first rendered city).
@@ -394,12 +402,15 @@ TEST_CASE(MapExportEndToEnd)
     request.rendersDir = region.renders;
     request.regionName = "Test \xc3\xa9";  // UTF-8
     request.dateText = "2026-11-19";
-    request.cities = {west, east, bare, turned};
+    request.cities = {west, east, bare, turned, smallCity};
     MapExport::Progress progress;
     std::atomic<int> stop{MapExport::kRun};
     const MapExport::Result result = MapExport::Run(request, progress, stop);
     CHECK(result.ok);
     CHECK(result.cities == 2);
+    CHECK(result.sourceZoom == kZoomIndex && progress.sourceZoom == kZoomIndex);  // the highest every city has
+    CHECK(progress.estimateBytes > 0);
+    CHECK(result.message.find("Small") != std::string::npos);  // left out, and named
     CHECK(progress.done == progress.total && progress.total > 0);
     CHECK(result.tilesWritten > 0 && result.tilesWritten <= progress.total);
     const fs::path map = region.renders / L"map";
@@ -449,4 +460,29 @@ TEST_CASE(MapExportEndToEnd)
     const MapExport::Result none = MapExport::Run(request, progress, stop);
     CHECK(!none.ok && !none.cancelled && !none.message.empty());
     CHECK(fs::is_regular_file(map / L"index.html"));
+
+    // A zoom no city has, asked for: a clear failure, the map stays.
+    request.rotation = 0;
+    request.sourceZoom = 4;
+    const MapExport::Result noZoom5 = MapExport::Run(request, progress, stop);
+    CHECK(!noZoom5.ok && !noZoom5.cancelled && !noZoom5.message.empty());
+    CHECK(fs::is_regular_file(map / L"index.html"));
+}
+
+// The map's default source zoom: the highest that every rendered city has, else the one most
+// cities have, with the higher one on a tie. Zoom 1 and 2 never count.
+TEST_CASE(MapSourceZoomChoice)
+{
+    constexpr uint32_t z3 = 1u << 2, z4 = 1u << 3, z5 = 1u << 4, low = 0b11;
+    CHECK(MapMath::ChooseSourceZoom({}) == -1);
+    CHECK(MapMath::ChooseSourceZoom({low, low}) == -1);
+    CHECK(MapMath::ChooseSourceZoom({low | z3 | z4, low | z3 | z4}) == 3);
+    CHECK(MapMath::ChooseSourceZoom({low | z3 | z4 | z5, low | z3 | z4 | z5}) == 4);
+    // One city rendered up to zoom 3 only: zoom 3 is the highest that all have.
+    CHECK(MapMath::ChooseSourceZoom({low | z3 | z4 | z5, low | z3, low | z3 | z4}) == 2);
+    // No zoom shared by all: the one most cities have.
+    CHECK(MapMath::ChooseSourceZoom({z4, z4, z5}) == 3);
+    CHECK(MapMath::ChooseSourceZoom({z5, z5, z4, low}) == 4);
+    // A tie goes to the higher zoom.
+    CHECK(MapMath::ChooseSourceZoom({z4, z5}) == 4);
 }
