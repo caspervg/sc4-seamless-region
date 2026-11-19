@@ -11,7 +11,10 @@
 
 #include "GZServPtrs.h"
 #include "capture/SnapshotReader.hpp"
+#include "cISC4RegionalCity.h"
 #include "cISC4Simulator.h"
+#include "cRZBaseString.h"
+#include "core/GameAccess.hpp"
 #include "core/Guard.hpp"
 #include "core/IdleScheduler.hpp"
 #include "core/Messages.hpp"
@@ -434,6 +437,33 @@ void RegionBatchRenderer::StepSwitch_()
             return;
         }
         if (cityReady_) {
+            // The game's own regional city decides. When it is the wanted cell, the region
+            // index is behind: read it again.
+            const BatchQueue::Entry& target = back ? run_.start : current_;
+            int gameX = -1, gameZ = -1;
+            std::string gamePath;
+            if (cISC4RegionalCity* regional = GameAccess::RegionalCity()) {
+                regional->GetPosition(gameX, gameZ);
+                cRZBaseString path;
+                regional->GetCitySaveFilePath(path);
+                gamePath = path.ToChar() ? path.ToChar() : "";
+            }
+            LOG_WARN("Batch: after the switch the region index names {} (key '{}', cell {}, {}). Wanted '{}' (key '{}', "
+                     "cell {}, {}). The game's city is at cell {}, {}, save '{}'. Switcher error: '{}'",
+                     open ? open->name : std::string("no city"), open ? open->key : std::string(),
+                     open ? open->cellX : -1, open ? open->cellZ : -1, target.name, wanted, target.cellX, target.cellZ,
+                     gameX, gameZ, gamePath, ctx_.switcher->LastError());
+            if (gameX == target.cellX && gameZ == target.cellZ) {
+                ctx_.region->Refresh();
+                open = ctx_.region->Current();
+                if (open && open->key == wanted) {
+                    LOG_WARN("Batch: the region index was behind. It is up to date now.");
+                    Arrived_();
+                    return;
+                }
+                LOG_WARN("Batch: reading the region again names {} (key '{}')", open ? open->name : std::string("no city"),
+                         open ? open->key : std::string());
+            }
             // Still in the old city: the switch did not happen (for example the save failed).
             failure = ctx_.switcher->LastError();
             if (failure.empty()) {
