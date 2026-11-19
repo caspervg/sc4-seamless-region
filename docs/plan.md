@@ -30,7 +30,8 @@ database, with plate comments that start with "RE 2026-11-18".
 | 5 | 146 | 6.984 | 45 |
 
 - Pixel table `kSC4ViewportCellPixelWidth` at `0x00abace0`. Pitch table at `0x00abaccc`.
-- Zoom 4 is zoom 5 at half size. Render zooms 1, 2, 3 and 4. Show zoom 4 scaled 2x at zoom 5.
+- Zoom 4 is zoom 5 at half size. Render zooms 1 up to the chosen max (3, 4 or 5, default 4).
+  Show zoom 4 scaled 2x at zoom 5 when a city has no zoom 5 tiles.
 - The view is trimetric, not isometric. The yaw offset at camera +0x118 and the table at
   `0x00abcfc4` are -pi/8 (-22.5 degrees).
 - `GetCityWidthFromOrthoView` (`0x007f8300`) returns 16 * (cos 22.5 + sin 22.5) = 20.905.
@@ -146,7 +147,8 @@ region position and size, the anchor for each zoom and rotation, tile size, and 
 save file time for spotting stale renders.
 
 Lossy WebP with alpha. Rough sizes for all zooms and rotations: about 200 MB for a large
-city, 12 MB for a small one. Zoom 5 is never stored.
+city, 12 MB for a small one, up to zoom 4. Zoom 5 is stored only when the player renders up to
+zoom 5 (about 4 times as much).
 
 ## Phases
 
