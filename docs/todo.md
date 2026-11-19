@@ -3,6 +3,41 @@
 Open work after the first in-game sessions (2026-11-19). Most important first within each
 group. Notes on the reverse engineering are in `docs/re-notes/`.
 
+## Camera angle mods (do first)
+
+`sc4-modern-camera` (installed in the dev Plugins) writes the game's global angle tables (yaw
+`0x00ABCFC4`, pitch `0x00ABCFD8` and `0x00ABACCC`) and the camera control's yaw and pitch, and
+keeps doing so every frame. A render started while the player has a free angle draws with that
+angle while the capture math assumes the native one, so the tiles come out wrong. The capture
+must check the tables at start and put the native angles back for the render (and stop the
+mod's per-frame update, or ask it to hand back, as its `PrepareForSave` does for a save), then
+restore. Same check for the batch.
+
+## Vector layers and a top-down plan view (idea)
+
+Not started. Considered on 2026-11-19:
+
+- **Vectors from the game:** during the batch, export per city: network cells (type and the
+  sides they connect to, as line pieces), zones (cells merged into polygons), lots (rectangle,
+  building name, kind, height from the bounding box), water and city borders, in world metres
+  plus the city's region offset. Offline parsing of the `.sc4` saves is the other option.
+- **On the slanted map:** project the vectors with the same camera math and the ground height.
+  Lines then sit on the roads, but they show through buildings and hills: fine for a toggle
+  or highlight layer.
+- **Top-down plan view:** a separate capture mode at about 85 degrees pitch (the most
+  sc4-modern-camera allows, "the camera looks wrong" above it) and yaw 0, north up. Buildings,
+  props and flora hidden (their models only have the walls the normal view shows): terrain,
+  water, network textures and lot ground textures only, through a view filter (see
+  `re-notes/transport-view.md` for how data views set filters). Rebuild the render grid after
+  the angle change (`RebuildRenderGridNative` `0x007CAB30`, as sc4-modern-camera does), and
+  put the native tables back around saves. With vectors projected using the ground height,
+  the 5 degree tilt does not matter. Tiles become a square grid in metres, so standard map
+  tooling fits.
+- **Tiling:** MVT in our own tile grid (small own encoder) or a fake latitude and longitude
+  near 0,0 for tippecanoe. PMTiles for one-file hosting. MapLibre GL or Leaflet.VectorGrid.
+- **Unknowns:** culling, the terrain's visible edges, clip planes, scroll limits and the model
+  loader margin at 85 degrees and yaw 0. Needs RE and tests.
+
 ## Look of the renders
 
 1. **Thin lines at city borders.** The ground edge pixel of a city is only partly covered, so
