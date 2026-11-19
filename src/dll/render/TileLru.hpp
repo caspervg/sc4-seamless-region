@@ -22,7 +22,7 @@ struct TileKeyHash
     size_t operator()(const TileKey& k) const noexcept
     {
         size_t h = std::hash<std::string_view>{}(k.cityKey);
-        for (const int v : {k.rotation, k.zoom, k.tx, k.ty}) {
+        for (const int v : {k.rotation, k.zoom, k.tx, k.ty, k.transport ? 1 : 0}) {
             h ^= static_cast<size_t>(v) + 0x9e3779b9u + (h << 6) + (h >> 2);
         }
         return h;
@@ -34,7 +34,7 @@ struct TileKeyEqual
     bool operator()(const TileKey& a, const TileKey& b) const noexcept
     {
         return a.tx == b.tx && a.ty == b.ty && a.zoom == b.zoom && a.rotation == b.rotation &&
-               a.cityKey == b.cityKey;
+               a.transport == b.transport && a.cityKey == b.cityKey;
     }
 };
 

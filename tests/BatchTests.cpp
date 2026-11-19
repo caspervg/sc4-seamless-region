@@ -219,3 +219,36 @@ TEST_CASE(BatchUpToDateNeedsEveryLevelUpToTheMaxZoom)
     CHECK(!CityMeta::NeedsRender(meta, 1000, 4));
     CHECK(CityMeta::HasLevelsUpTo(meta, 4));
 }
+
+// With the transport layer on, a city also needs every transport level up to the max zoom. With
+// it off, transport levels do not count either way.
+TEST_CASE(BatchUpToDateWithTheTransportLayer)
+{
+    CityRenderMeta meta;
+    meta.saveFileTime = 1000;
+    for (int r = 0; r < 4; ++r) {
+        for (int z = 0; z < 4; ++z) {
+            meta.levels.push_back({r, z, 0.0f, 0.0f, 1, 1});
+        }
+    }
+    CHECK(!CityMeta::NeedsRender(meta, 1000, 3, false));
+    CHECK(CityMeta::NeedsRender(meta, 1000, 3, true));  // no transport level yet
+    for (int r = 0; r < 4; ++r) {
+        for (int z = 0; z < 4; ++z) {
+            meta.levels.push_back({r, z, 0.0f, 0.0f, 1, 1, 1.0f, true});
+        }
+    }
+    CHECK(!CityMeta::NeedsRender(meta, 1000, 3, true));
+    CHECK(!CityMeta::NeedsRender(meta, 1000, 3, false));
+    CHECK(CityMeta::NeedsRender(meta, 1001, 3, true));  // saved after the render
+    // One transport level missing (cancelled in the transport pass).
+    CityRenderMeta part = meta;
+    part.levels.pop_back();
+    CHECK(CityMeta::NeedsRender(part, 1000, 3, true));
+    CHECK(!CityMeta::NeedsRender(part, 1000, 3, false));
+    // Transport levels never stand in for normal ones.
+    CityRenderMeta onlyTransport = meta;
+    std::erase_if(onlyTransport.levels, [](const CityRenderMeta::Level& l) { return !l.transport; });
+    CHECK(CityMeta::NeedsRender(onlyTransport, 1000, 3, false));
+    CHECK(CityMeta::NeedsRender(onlyTransport, 1000, 3, true));
+}
