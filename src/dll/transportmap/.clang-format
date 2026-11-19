@@ -1,0 +1,3 @@
+# nam-dll code style (tabs), see .editorconfig. Do not reformat with the style of this project.
+DisableFormat: true
+SortIncludes: Never
