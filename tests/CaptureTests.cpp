@@ -125,7 +125,7 @@ TEST_CASE(CaptureTwoPassesWorkWithQuantizedKeys)
 TEST_CASE(CaptureOutlineHoldsTheCityAndRejectsFarTiles)
 {
     for (int rotation = 0; rotation < 4; ++rotation) {
-        for (int zoom = 0; zoom < 4; ++zoom) {
+        for (int zoom = 0; zoom < ViewMath::kZoomCount; ++zoom) {
             const ViewMath::OrthoProjection p = ViewMath::OrthoProjection::For(zoom, rotation);
             const float size = 1024.0f;
             const CaptureMath::CityOutline outline = CaptureMath::CityOutline::For(p, size, size, 0.0f, 300.0f);
@@ -344,7 +344,7 @@ TEST_CASE(CaptureTargetPutsTheTileOnWholeScreenPixels)
     // the wanted screen pixel, for every zoom, rotation, tile and window size.
     const float sizeX = 2048.0f, sizeZ = 4096.0f;
     for (int rotation = 0; rotation < 4; ++rotation) {
-        for (int zoom = 0; zoom < 4; ++zoom) {
+        for (int zoom = 0; zoom < ViewMath::kZoomCount; ++zoom) {
             const ViewMath::OrthoProjection p = ViewMath::OrthoProjection::For(zoom, rotation);
             const ViewMath::TileGrid grid = ViewMath::TileGrid::ForCity(p, sizeX, sizeZ, 0.0f, 900.0f, 512);
             const cS3DVector3 base = ViewMath::BaseCorner(rotation, sizeX, sizeZ);
@@ -363,4 +363,24 @@ TEST_CASE(CaptureTargetPutsTheTileOnWholeScreenPixels)
             }
         }
     }
+}
+
+// The levels of a render per max zoom: rotation outer, zoom inner, zoom 1 up to the max.
+TEST_CASE(CaptureLevelOrderPerMaxZoom)
+{
+    for (int maxZoom = 2; maxZoom <= 4; ++maxZoom) {
+        const std::vector<std::array<int, 2>> order = CaptureMath::LevelOrder(maxZoom, {});
+        CHECK(order.size() == static_cast<size_t>(4 * (maxZoom + 1)));
+        size_t i = 0;
+        for (int r = 0; r < 4; ++r) {
+            for (int z = 0; z <= maxZoom; ++z, ++i) {
+                CHECK(i < order.size() && order[i][0] == r && order[i][1] == z);
+            }
+        }
+    }
+    // Only some rotations, and limits.
+    const auto two = CaptureMath::LevelOrder(3, {2, 0, 7});
+    CHECK(two.size() == 8 && two.front()[0] == 0 && two.back()[0] == 2 && two.back()[1] == 3);
+    CHECK(CaptureMath::LevelOrder(9, {1}).size() == 5);
+    CHECK(CaptureMath::LevelOrder(0, {1}).size() == 1);
 }

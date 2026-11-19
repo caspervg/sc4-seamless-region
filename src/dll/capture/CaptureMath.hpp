@@ -16,6 +16,28 @@
 
 namespace CaptureMath
 {
+    // The levels of a render, in render order: rotation outer, zoom inner, zoom index 0 up to
+    // maxZoom (clamped to 0..4). rotations: 0..3, empty means all. Each entry is {rotation, zoom}.
+    [[nodiscard]] inline std::vector<std::array<int, 2>> LevelOrder(const int maxZoom,
+                                                                    const std::vector<int>& rotations)
+    {
+        std::array<bool, ViewMath::kRotationCount> wanted{};
+        wanted.fill(rotations.empty());
+        for (const int r : rotations) {
+            if (ViewMath::IsValidRotation(r)) {
+                wanted[r] = true;
+            }
+        }
+        const int top = std::clamp(maxZoom, 0, ViewMath::kZoomCount - 1);
+        std::vector<std::array<int, 2>> order;
+        for (int r = 0; r < ViewMath::kRotationCount; ++r) {
+            for (int z = 0; z <= top && wanted[r]; ++z) {
+                order.push_back({r, z});
+            }
+        }
+        return order;
+    }
+
     // An opaque color as the snapshot reader gives it back.
     struct Rgb
     {

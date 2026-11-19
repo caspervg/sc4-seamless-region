@@ -47,6 +47,10 @@ public:
     // Turn the game's kRenderSnapshot render property on during a render, like its region
     // thumbnail does. It makes water a flat plane. INI only.
     bool captureSnapshotFlag = false;
+    // The highest zoom a render makes, as the game counts zooms: 3, 4 or 5. Zoom 5 has 4 times
+    // the pixels of zoom 4. Without zoom 5 tiles, zoom 5 shows zoom 4 at twice the size. Without
+    // zoom 4 tiles neighbors do not show at zoom 4 and 5.
+    int maxRenderZoom = 4;
     // GPU tile cache limit in megabytes.
     int tileCacheMB = 96;
     // Texture uploads per frame: at most this many tiles...
@@ -72,6 +76,10 @@ public:
     static constexpr int kMinWebpQuality = 0, kMaxWebpQuality = 100;
     static constexpr int kMinMapCacheMB = 8, kMaxMapCacheMB = 48;
     static constexpr int kMinMapUpscale = 0, kMaxMapUpscale = 3;
+    static constexpr int kMinRenderZoom = 3, kMaxRenderZoom = 5;
+
+    // maxRenderZoom as a zoom index (2..4).
+    [[nodiscard]] int MaxRenderZoomIndex() const { return maxRenderZoom - 1; }
 
 private:
     uint32_t revision_ = 0;

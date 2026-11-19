@@ -410,54 +410,31 @@ bool CityCapturer::Begin_(const bool testTile, const CaptureRequest& request)
                  levels_[0].zoom + 1, testTx_, testTy_);
     }
     else {
-        LOG_INFO("Capture: started for city '{}', {} levels, {} tiles of {} px, heights {:.0f} to {:.0f} m", cityKey_,
-                 levels_.size(), total, tileSize_, minHeight_, maxHeight_);
+        LOG_INFO(
+            "Capture: started for city '{}', {} levels up to zoom {}, {} tiles of {} px, heights {:.0f} to {:.0f} m",
+            cityKey_, levels_.size(), maxZoom_ + 1, total, tileSize_, minHeight_, maxHeight_);
     }
     return true;
 }
 
 void CityCapturer::BuildLevels_(const CaptureRequest& request)
 {
-    // Zoom 5 (index 4) is never captured: the renderer shows zoom 4 at twice the size.
-    constexpr int kCaptureZooms = ViewMath::kZoomCount - 1;
-    std::array<bool, ViewMath::kRotationCount> rotations{};
-    std::array<bool, kCaptureZooms> zooms{};
-    if (request.rotations.empty()) {
-        rotations.fill(true);
-    }
-    for (const int r : request.rotations) {
-        if (ViewMath::IsValidRotation(r)) {
-            rotations[r] = true;
-        }
-    }
-    if (request.allZooms) {
-        zooms.fill(true);
-    }
-    else {
-        for (const int z : request.zooms) {
-            if (z >= 0 && z < kCaptureZooms) {
-                zooms[z] = true;
+    maxZoom_ = request.maxZoom >= 0 ? request.maxZoom : ctx_.settings ? ctx_.settings->MaxRenderZoomIndex() : 3;
+    maxZoom_ = std::clamp(maxZoom_, Settings::kMinRenderZoom - 1, Settings::kMaxRenderZoom - 1);
+    for (const auto& [r, z] : CaptureMath::LevelOrder(maxZoom_, request.rotations)) {
+        Level level;
+        level.rotation = r;
+        level.zoom = z;
+        level.projection = ViewMath::OrthoProjection::For(z, r);
+        level.grid =
+            ViewMath::TileGrid::ForCity(level.projection, citySizeX_, citySizeZ_, minHeight_, maxHeight_, tileSize_);
+        level.outline = CaptureMath::CityOutline::For(level.projection, citySizeX_, citySizeZ_, minHeight_, maxHeight_);
+        for (int ty = 0; ty < level.grid.tilesY; ++ty) {
+            for (int tx = 0; tx < level.grid.tilesX; ++tx) {
+                level.tiles += TileTouchesCity_(level, tx, ty) ? 1 : 0;
             }
         }
-    }
-    for (int r = 0; r < ViewMath::kRotationCount; ++r) {
-        for (int z = 0; z < kCaptureZooms; ++z) {
-            if (!rotations[r] || !zooms[z]) {
-                continue;
-            }
-            Level level;
-            level.rotation = r;
-            level.zoom = z;
-            level.projection = ViewMath::OrthoProjection::For(z, r);
-            level.grid = ViewMath::TileGrid::ForCity(level.projection, citySizeX_, citySizeZ_, minHeight_, maxHeight_, tileSize_);
-            level.outline = CaptureMath::CityOutline::For(level.projection, citySizeX_, citySizeZ_, minHeight_, maxHeight_);
-            for (int ty = 0; ty < level.grid.tilesY; ++ty) {
-                for (int tx = 0; tx < level.grid.tilesX; ++tx) {
-                    level.tiles += TileTouchesCity_(level, tx, ty) ? 1 : 0;
-                }
-            }
-            levels_.push_back(level);
-        }
+        levels_.push_back(level);
     }
 }
 
@@ -1080,24 +1057,40 @@ bool CityCapturer::WriteMeta_(const bool final)
                             level.grid.tilesX, level.grid.tilesY});
         }
     }
-    meta.levels = CityMeta::MergeLevels(usable ? earlier->levels : std::vector<CityRenderMeta::Level>(), rendered,
-                                        dropped);
+    // Levels above the zoom of this render (zoom 5 of an earlier render, now up to zoom 4) stay
+    // while they still show the city as it is. When the city was saved after them, they go at
+    // the end: meta.json first stops naming them, then their tiles are deleted.
+    std::vector<CityRenderMeta::Level> higher;
     if (final) {
         if (!CameraAdapter::StoreTimes(savePath_, meta.saveFileTime, meta.renderTime)) {
             meta.saveFileTime = SaveFileTime(savePath_);
             meta.renderTime = NowFileTime();
         }
+        if (usable) {
+            higher = CityMeta::HigherLevelsToDrop(*earlier, maxZoom_, meta.saveFileTime);
+            dropped.insert(dropped.end(), higher.begin(), higher.end());
+        }
     }
-    else if (usable) {
+    meta.levels =
+        CityMeta::MergeLevels(usable ? earlier->levels : std::vector<CityRenderMeta::Level>(), rendered, dropped);
+    if (!final && usable) {
         // Not complete: the times of the earlier render stay.
         meta.saveFileTime = earlier->saveFileTime;
         meta.renderTime = earlier->renderTime;
     }
-    else if (!earlier && meta.levels.empty()) {
+    else if (!final && !earlier && meta.levels.empty()) {
         return true;  // the first render of this city, nothing on disk to describe yet
     }
     // Else the times stay 0: a first render that is not complete counts as out of date.
-    return ctx_.tileStore->WriteMeta(cityKey_, meta);
+    if (!ctx_.tileStore->WriteMeta(cityKey_, meta)) {
+        return false;
+    }
+    for (const CityRenderMeta::Level& level : higher) {
+        LOG_INFO("Capture: rotation {} zoom {} of the earlier render is out of date and is deleted", level.rotation,
+                 level.zoom + 1);
+        ctx_.tileStore->DeleteLevel(cityKey_, level.rotation, level.zoom);
+    }
+    return true;
 }
 
 // ---- blocks ------------------------------------------------------------------------------------
@@ -1544,6 +1537,29 @@ void CityCapturer::CancelRenderOnSave_()
 
 // ---- panel -------------------------------------------------------------------------------------
 
+void CityCapturer::DrawMaxZoomChoice(Settings& settings)
+{
+    static constexpr const char* kZooms[] = {"Zoom 3", "Zoom 4", "Zoom 5"};
+    int choice = std::clamp(settings.maxRenderZoom, Settings::kMinRenderZoom, Settings::kMaxRenderZoom) -
+                 Settings::kMinRenderZoom;
+    ImGui::SetNextItemWidth(100.0f);
+    if (ImGui::Combo("Render up to", &choice, kZooms, IM_ARRAYSIZE(kZooms))) {
+        settings.maxRenderZoom = choice + Settings::kMinRenderZoom;
+        settings.MarkChanged();
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::BeginItemTooltip()) {
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+        ImGui::TextUnformatted("The highest zoom that a render makes. Zoom 5 gives the most detail. It takes about 4 "
+                               "times the time and disk space of zoom 4. Zoom 3 is the fastest. Then neighbors do not "
+                               "show at zoom 4 and 5. When a neighbor has no zoom 5 render, zoom 5 shows its zoom 4 "
+                               "pictures at twice the size. Save the settings to keep your choice.");
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+    }
+}
+
 void CityCapturer::DrawPanelSection()
 {
     const bool cityOpen = GameAccess::City() && GameAccess::View3D();
@@ -1574,13 +1590,19 @@ void CityCapturer::DrawPanelSection()
 
     // The region render starts the render of each city itself.
     const bool batchRuns = ctx_.batch && ctx_.batch->IsRunning();
+    if (ctx_.settings) {
+        ImGui::BeginDisabled(batchRuns);
+        DrawMaxZoomChoice(*ctx_.settings);
+        ImGui::EndDisabled();
+    }
     ImGui::BeginDisabled(!cityOpen || !readback || batchRuns);
     if (ImGui::Button("Render this city")) {
         Start(CaptureRequest());
     }
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
         ImGui::SetTooltip("Makes the pictures of this city that its neighbors show.\n"
-                          "It renders 4 rotations and zooms 1 to 4. A large city takes some minutes.");
+                          "It renders 4 rotations and zooms 1 to %d. A large city takes some minutes.",
+                          ctx_.settings ? ctx_.settings->maxRenderZoom : 4);
     }
     ImGui::SameLine();
     if (ImGui::Button("Render one test tile")) {
