@@ -283,8 +283,8 @@ Per block switching would cost two full occupant passes per block.
 
 ### Risks
 
-- NAM/RHW: dirt road (11) is not in the map, so RHW is missing from the transport layer.
-  Same as the game's region view. Pipes, power lines and subway are not shown either.
+- NAM/RHW: dirt road (11) is not in the map of the game. The patch of section 10 adds it.
+  Pipes, power lines and subway are not shown, the same as in the game's region view.
 - Plugins can replace exemplar `0x4A0B68F3` or the colour table `0x0B9EC13D`. The layer then
   follows them (good, but colors are not fixed).
 - The map view UI flickers (two buttons, legend) while the view is pushed.
@@ -441,6 +441,9 @@ Mac +0x154), which `cSC4WinMapView::Update` fills.
 
 ### 9.2 The fix: dirt roads in the game's network map
 
+**Replaced by section 10** (own code and colour, real shapes). Kept as the record of the first
+patch and of its checks, which still hold for the loop.
+
 The NAM route needs the overlay. A direct fix in `RebuildMap` works for any NAM and also for
 the game's own region transport thumbnails, so that was built.
 
@@ -468,7 +471,7 @@ The patch:
 - A detour on `RebuildMap` (`0x0060acd0`, `void __thiscall`, plain `RET`) fills the table just
   before the game builds the map: `1 << type`, plus `0x800` on type 2 (highway) when the
   highway color (layout view +0x24 + 8 * 4, ARGB) has alpha > 0, else on type 0 (road, +0x24 +
-  3 * 4) when that one is visible, else nothing (`CaptureMath::TransportTypeFlags`, tested).
+  3 * 4) when that one is visible, else nothing (`CaptureMath::TransportTypeFlags`, removed with section 10).
   Reason: the NAM of the development install sets the highway color to 0 (colour table
   `0B9EC13D` in `770-network-addon-mod_001.dat`, read again: entries 7 and 8 are 0). With the
   highway entry, RHW would be invisible there, and a road crossing the RHW would lose its color.
@@ -497,6 +500,182 @@ code hook that also asks `GetEdgeTypesFlag(11)` when the highway lookup gives 0 
 `0x0060aee0..0x0060aeec` to a stub). Not built. The NAM's own overlay is unchanged: with the
 development NAM, RHW is grey from the map and dark from the overlay when the overlay is filled.
 
+## 10. Dirt roads with their own colour (built, replaces the patch of 9.2)
+
+Module: `src/dll/transportmap/DirtRoadTransportColor.{h,cpp}` and
+`DirtRoadTransportColorTables.h` (pure part, tested in `tests/TransportMapTests.cpp`). It is
+written in the style of the NAM DLL (https://github.com/NAMTeam/nam-dll) so that it can move
+there: see 10.5. The flag table patch and the `RebuildMap` detour of 9.2 are gone.
+
+### 10.1 The table map
+
+Everything that knows about the per-cell code is in `RebuildMap` (`0x0060acd0`). `Update`
+(`0x0060a920`) only draws the finished vertex list (16 bytes per vertex: x, y, z, colour) in
+batches of 384. It reads no code and no colour. `Init` (`0x0060aaf0`) only loads the colours.
+Confirmed (Windows disassembly of the three functions).
+
+The scratch grid: `new(0x100000)` = 256 x 256 cells x 4 dwords, one dword per quarter of the
+cell (the triangle toward one edge). A dword is `(z << 16) | (x << 8) | code`
+(`0x0060af07..0x0060af24`: `SHL EDX,8 / ADD EDX,ECX / SHL EDX,8 / LEA EAX,[EDX+EDI+1]`). The x
+and z are those of the cell the code comes from: after widening, a quarter can hold the code of
+a neighbour, and the vertex pass uses x and z to get that network occupant again for the height
+(`0x0060bdab..0x0060bdc6`). Code = map index + 1, one byte (`AND EDI,0xff` at `0x0060bd8b`),
+0 = nothing. Lots and zones have **no** code: a cell with four empty quarters goes to the zone
+switch (`0x0060b335`), which reads its colour straight from the view (`+0x48` .. `+0x58`).
+
+| Address | Element, count | Meaning (Mac name) | Readers (all in `RebuildMap`) |
+|---|---|---|---|
+| `0x00aa76b8` | uint32 x 9 (3, 1, 10, 0, 6, 9, 8, 12, 2), then a 0 dword | network type by map index (`sMapIndexToNetworkType`) | `0x0060aed0` `MOV EAX,[EDI*4+0xaa76b8]` `8B 04 BD B8 76 AA 00`. The loop ends at `0x0060af27` `CMP EDI,9` `83 FF 09`, `JC 0x0060aed0` `72 A4` |
+| `0x00aa7540` | uint32 x 13 (1 << type) | flag by network type (`kFlagForNetworkType`) | `0x0060aed7` `TEST [EAX*4+0xaa7540],EBX` `85 1C 85 40 75 AA 00` (EBX = cell flags & `0x1f4f`) |
+| `0x00aa7670` | uint8 x 16 (1 at 5, 8, 9, else 0) | widen by code (`kShouldWidenForColorType`): avenue and the two highways | `0x0060b0fe` and `0x0060b1d3`, both `MOV BL,[ECX+0xaa7670]` `8A 99 70 76 AA 00` |
+| `0x00aa7680` | 4 x uint8, 14 entries | widen pass 1 (neighbour row x - 1): source pointer index, source quarter, target pointer index, target quarter | `0x0060b0c0..0x0060b0dd` (`MOVZX` of `+0`, `+1`, `+2`, `+3`), loop to `0x38` |
+| `0x00aa7638` | 4 x uint8, 14 entries | widen pass 2 (neighbour z - 1), same layout | `0x0060b195..0x0060b1b2`, loop to `0x38` |
+| `0x00aa7620` | 3 x uint16, 4 entries | corner indices of the four triangles (3,4,0 / 0,4,1 / 1,4,2 / 2,4,3: 4 is the cell middle) | `0x0060bd69` (start), `0x0060bfba` (`CMP EAX,0xaa7638`, end) |
+| view `+0x20 + code * 4` | uint32 ARGB | colour by code: code 1 is `+0x24`, code 9 is `+0x44` | `0x0060be17` `MOV ECX,[EBP+EDI*4+0x20]` `8B 4C BD 20` |
+| view `+0x48, +0x4c, +0x50, +0x54, +0x58` | uint32 ARGB | airport, seaport, park (group `0x1006`), group `0x1300`, every other zone | `0x0060b386`, `0x0060b379`, `0x0060b3c6`, `0x0060b3e3`, `0x0060b3f8` (`MOV EDI,[EBP+disp8]`, for example `8B 7D 4C`) |
+| `0x00aa7574` | uint32 x 14 | default colours, copied to view `+0x24` by the constructor `0x0060ac10` | constructor only |
+
+A byte search of the whole program for each displacement (`B8 76 AA 00`, `40 75 AA 00`,
+`70 76 AA 00`) finds only the sites above, and the references of the other tables are the ones
+listed. So no other function indexes these tables. Confirmed.
+
+Widening (`0x0060b0ea..0x0060b108`): a quarter takes the dword of its neighbour quarter when
+`neighbour code > own code` and `kShouldWidenForColorType[neighbour code]` is set. So the code
+is also a priority.
+
+The view (`cSC4NetworkLayoutView`, `new(0x5c)` in `InitCustomView`, constructor `0x0060ac10`):
+
+| Offset | Meaning | Confidence |
+|---|---|---|
+| `+0x00`, `+0x04` | vtables `0x00aa760c` and `0x00aa75f4` | confirmed |
+| `+0x0c`, `+0x10`, `+0x14` | vertex vector: begin, end, end of capacity | confirmed |
+| `+0x18` (uint8) | Init done | confirmed |
+| `+0x1c` (8 bytes) | packed render state | strong |
+| `+0x24` .. `+0x5b` | 14 colours (ARGB). The object ends here | confirmed |
+
+`RebuildMap` keeps `this` in `EBP` and uses it only for the vector (`+0x0c`, `+0x10`, `+0x14`)
+and the colours. It never passes `this` on and makes no virtual call on it. Confirmed (every
+instruction with `EBP` in the function was read).
+
+The colour loader is in `Init`: `GetResource(6534284A-690F693F-0B9EC13D, 0xA52160F5)`,
+`AsISCPropertyHolder`, `GetProperty(0xAB9EC143)` (`PUSH 0xab9ec143` at `0x0060ab97`, bytes
+`68 43 C1 9E AB`), `RefUint32` and `GetCount`, then a copy of `min(count, 14)` values to `+0x24`
+(`0x0060abc0..0x0060abe7`). A 15th value in the property is ignored. A byte search for
+`C1 9E AB` finds only this one property ID in the program. Confirmed.
+
+So the code space is: 0 nothing, 1 to 9 networks, and that is all. A tenth map index would get
+code 10 and the colour at `+0x48`, the airport colour. Codes 10 to 14 fall on the lot and zone
+colours. **Code 15 is the first free one**: its colour slot is `+0x5c`, the first byte after
+the view. It still fits the code byte and the 16-entry widen table (entry 15 is 0: no
+widening).
+
+### 10.2 The patch
+
+| # | Address | Original bytes | New | What |
+|---|---|---|---|---|
+| 1 | `0x0060c107` (in `InitCustomView`) | `E8 C4 EB FF FF` (`CALL 0x0060acd0`) | `E8` + offset of `Hook_RebuildMap` | the only call of `RebuildMap` goes to the hook |
+| 2 | `0x0060aed3` (4 bytes in the `MOV` at `0x0060aed0`, checked as `8B 04 BD B8 76 AA 00`) | `B8 76 AA 00` | address of the module's table | `sMapIndexToNetworkType` becomes a 15-entry table |
+| 3 | `0x0060af29` (1 byte in the `CMP` at `0x0060af27`, checked as `83 FF 09 72 A4`) | `09` | `0F` | the loop runs over 15 map indices |
+
+The module's table: the 9 game entries, then 5 entries of type 4 (water pipe), then 11 (dirt
+road). The cell flags are masked with `0x1f4f`, which has no water pipe bit (`0x10`), so the 5
+filler entries never match: codes 10 to 14 are never stored. Dirt road is map index 14, code 15.
+The flag table `0x00aa7540` is not changed (all types in the table are below 13).
+
+The hook (`void __fastcall Hook_RebuildMap(void* view)`, the view in `ECX` like the call it
+replaces):
+
+1. Copies the 0x5c bytes of the view to a local block that has one more uint32 after it. That
+   uint32 is at `+0x5c`, the colour slot of code 15.
+2. Chooses the dirt road colour (10.3) and puts it there. When the colour is not visible
+   (alpha 0), the last table entry is set to the filler too, so the map is built exactly as the
+   game builds it.
+3. Calls `RebuildMap` (`0x0060acd0`) on the copy.
+4. Copies the three vector pointers (`+0x0c` .. `+0x17`) back to the real view. `RebuildMap`
+   changes nothing else, and the vector has no pointer into the view itself.
+
+The copy avoids a fourth patch (the `new(0x5c)` size in `InitCustomView`) and a code hook at the
+colour read (`0x0060be17` has a disp8, there is no room for another table address).
+
+Install order: all three sites are compared with the original bytes first. When one differs
+(another plugin, or a NAM DLL that already has this), nothing is patched and one warning is
+logged. Then 1, 2, 3: after each step the map is still the game's (the hook alone changes
+nothing, the new table starts with the 9 game entries). `CityCapturer::Initialize` installs.
+`CityCapturer::Shutdown` and `Hooking::Shutdown` put the bytes back.
+
+Shapes: dirt road is now a real table entry, so the loop asks `GetEdgeTypesFlag(11)`
+(`CALL [EDX+0x98]` at `0x0060aee7`, `0x0061af80` -> `cSC4EdgeTypeStore::GetEdgeTypeConfig`
+`0x00619b70`: the edge flags when the primary type or one of the extra types is the asked
+type). A dirt road occupant answers with its own edges, and the shape path at `0x0060afe2`
+draws the quarters toward the connected edges, the same as for every other network. So diagonal
+RHW is drawn like a diagonal road, not as steps. Strong (code read, not seen in the game yet).
+When the answer is 0 and the occupant does not have network flag `0x100000`, the cell is a full
+square, also as for the other networks.
+
+Mixed cells: dirt road is the last entry, so in a quarter that two networks claim, dirt road
+wins. A road that crosses an RHW keeps its own quarters. Code 15 is the highest, so the widening
+of avenues and highways never goes over a dirt road quarter, and dirt roads do not widen.
+
+### 10.3 The colour
+
+New property in the colour exemplar `6534284A-690F693F-0B9EC13D`:
+
+| | |
+|---|---|
+| ID | `0xAB9EC144` (proposed name: "DV/RegionalTransport: Dirt road colour") |
+| Type | Uint32, one value (a Uint32 array is also read, the first value counts) |
+| Value | ARGB, as the entries of the colour table `0xAB9EC143`. Example: `0xFFE08020` |
+
+The ID is the one after the colour table. It is not used by the game (no `44 C1 9E AB` in the
+program) and it is not in the property list of the dbpf tools. The NAM team may want an ID from
+their own range: it is one constant (`kDirtRoadColorPropertyID`). The game and older plugins
+ignore the property.
+
+Order: the property when it exists (a value with alpha 0 hides dirt roads on purpose), else
+the highway colour (table entry 8) when its alpha is not 0, else the road colour (entry 3) when
+its alpha is not 0, else dirt roads are not drawn. The two table colours come from the view
+(`+0x24`), so a colour table from a plugin counts. The property is read on every
+`PushView(0xF3)` with the game's resource manager, the same calls as `Init`.
+
+Game data read for this (dbpf tools): `SimCity_1.dat` has highway `0xFE9F3E41` and road
+`0xFFA5A2A0`. `770-network-addon-mod_001.dat` of the development install has highway 0 and road
+`0xFFA5A2A0`. Neither has `0xAB9EC144`. So today dirt roads are highway red with the game's
+table and road grey with that NAM table, as with the patch of 9.2, but with real shapes.
+
+### 10.4 Risks
+
+- Not run in the game yet (`docs/testing.md`, Transport layer, step 12).
+- A dirt road piece whose edge store has no entry for type 11 is a full square (the same rule
+  as for the other networks). With the patch of 9.2 every dirt road cell was a full square, so
+  this cannot be worse.
+- The NAM overlay of data source `0x4C` (9.1) is not changed. Where it is filled, it draws
+  dark cells over the coloured dirt roads.
+- The hook relies on `RebuildMap` using the view only for the vector and the colours (checked
+  for 1.1.641, the only version the patch is installed on).
+
+### 10.5 Porting to the NAM DLL
+
+The three module files follow the nam-dll conventions: tabs, a `Feature.h` with
+`namespace Feature { void Install(); }`, constants and the hook in an anonymous namespace,
+`Patching::` calls, game functions as `__thiscall` function pointer types, a failure throws a
+`wil::ResultException` (the `InstallWhen` of the director logs it), no logger in the module.
+
+1. Copy `DirtRoadTransportColor.h`, `DirtRoadTransportColor.cpp` and
+   `DirtRoadTransportColorTables.h` to `src/` and add them to `NAM.vcxproj`. Do **not** copy
+   `Patching.h` and `Patching.cpp`: they are the stand-in of this project for the nam-dll files
+   of the same name (same signatures, on top of `Hooking::BytePatch` so the patches can be
+   removed).
+2. `NAMDllDirector.cpp`: `InstallWhen(settings.enableDirtRoadTransportColorPatch, "DirtRoad/RHW
+   Transport Map Color patch", DirtRoadTransportColor::Install);` with a new setting in
+   `Settings.h`, `Settings.cpp` and `NAM.ini`.
+3. The module uses only `Patching::InstallCallHook`, `PatchImmediate32` and
+   `OverwriteMemory(void*, uint8_t)`, which nam-dll has. nam-dll does not restore patches, and
+   this patch needs no restore there.
+4. Game data: add property `0xAB9EC144` to the `0B9EC13D` exemplar of the NAM (and to the
+   property list of the Reader) when the RHW gets its own colour. Without it the fallback
+   applies.
+5. The tests in `tests/TransportMapTests.cpp` need only the tables header.
+
 ## Proposed Windows names (not applied)
 
 | Address | Name | Mac source | Confidence | Evidence |
@@ -522,3 +701,8 @@ development NAM, RHW is grey from the map and dark from the overlay when the ove
 | `0x0079fb20` | `cSC4WinMapView::UnhookUpdateMessages` | `0x0027c1fa` | probable | call position in SetDataView (after the custom view release) |
 | `0x007dcd00` | `SC4MarkedCellView::ClearMarkedCells` | `0x0051af30` | probable | called with map view +0x13c where the Mac calls it |
 | `0x007dc1c0` | `SC4MarkedCellView::SetShouldUseNetworkAltitude` | `0x0051a47e` | probable | called with +0x13c and (source == 9 or `0x4C`) |
+| `0x00aa76b8` | `sMapIndexToNetworkType` (data, uint32[9]) | `0x0084ffc0` | confirmed | the 9 type values, read by the map index loop |
+| `0x00aa7540` | `kFlagForNetworkType` (data, uint32[13]) | `_kFlagForNetworkType` | confirmed | 1 << type, tested in the same loop |
+| `0x00aa7670` | `kShouldWidenForColorType` (data, uint8[16]) | same name | confirmed | read by code in both widen passes |
+| `0x00aa7574` | `kDefaultTransportMapColors` (data, uint32[14], own name) | - | confirmed | copied to view +0x24 by the constructor |
+| `0x0061af80` | `cSC4NetworkOccupant::GetEdgeTypesFlag` (adjusts `this` by 0x108, then `0x00619b70`) | - | strong | vtable slot +0x98 of the network occupant, called by the map index loop |

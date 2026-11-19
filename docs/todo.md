@@ -70,11 +70,14 @@ city a few ticks later. Saves that leave the city (switch, region view, quit) do
 Built (`CaptureTransportLayer`, `docs/re-notes/transport-view.md` sections 7 and 8), not run in
 the game yet (`docs/testing.md`, Capture, Transport layer). Left:
 
-1. **RHW on the transport map.** Built: dirt roads take the highway (or road) entry of the
-   game's network map (`docs/re-notes/transport-view.md` section 9). Check in game
-   (`docs/testing.md`, Transport layer, step 12). Left, if wanted:
-   - Smooth diagonal RHW: the cells are full squares because the edge lookup asks for the
-     highway edges. Needs a code hook in the loop (section 9).
+1. **RHW on the transport map.** Built: dirt roads are a network of their own in the network
+   map of the game, with their own color (property `0xAB9EC144` in the colour exemplar, else the
+   highway or road color) and real diagonal shapes (`docs/re-notes/transport-view.md` section
+   10, module `src/dll/transportmap`). Check in game (`docs/testing.md`, Transport layer, step
+   12). Left:
+   - Offer the module to the NAM DLL (section 10.5). The NAM team chooses the property ID and
+     the color. Take the module out of this plugin when the NAM DLL has it (until then the byte
+     check keeps the two apart).
    - The NAM's data overlay (source `0x4C`) stays empty until a data view was opened by hand.
      Probable cause: `cSC4WinMapView::Update` needs the map view panel child window `0x4203`.
      Confirm with the UI data, then decide if a trigger is worth it (section 9).

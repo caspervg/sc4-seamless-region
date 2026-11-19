@@ -583,19 +583,28 @@ city with roads, rail, a highway and zones.
 11. Turn the option off, save the city and render again: the `t` folders are deleted at the end,
     and `meta.json` names only the 16 normal levels. Without a save in between the `t` folders
     stay.
-12. Dirt roads (RHW) on the transport map (`docs/re-notes/transport-view.md` section 9). At game
-    start the log shows `Hooking: applied patch TransportMapTypeFlags` and `Capture: dirt roads
-    (RHW) are drawn on the transport map`. Use a city with RHW and do not open a data view:
-    - With a NAM that keeps the game's highway color (no `0B9EC13D` override, for example the
-      sc4pac NAM): the RHW shows in highway red on the transport tiles. Diagonal RHW shows as
-      steps of full cells, not as smooth lines.
-    - With a NAM that sets the highway color to 0 (the development install): the RHW shows in
-      road grey. Highways stay as the NAM draws them.
-    - Roads, streets, rail and highways look as before. With highway red, a cell where a road
-      crosses the RHW is a full red cell.
+12. Dirt roads (RHW) on the transport map (`docs/re-notes/transport-view.md` section 10). At game
+    start the log shows three lines `Hooking: applied patch TransportMap` and `Capture: dirt roads
+    (RHW) are drawn on the transport map`. Use a city with straight and diagonal RHW and do not
+    open a data view:
+    - Without the color property, with a NAM that keeps the highway color of the game (no
+      `0B9EC13D` override, for example the sc4pac NAM): the RHW shows in highway red on the
+      transport tiles.
+    - Without the color property, with a NAM that sets the highway color to 0 (the development
+      install): the RHW shows in road grey. Highways stay as that NAM draws them.
+    - With the color property: make a small .dat that overrides exemplar
+      `6534284A-690F693F-0B9EC13D` (copy it from the NAM or from `SimCity_1.dat`) and add property
+      `0xAB9EC144`, Uint32, value `0xFFE08020`. Put it late in the load order. The RHW shows in
+      orange. Change the value to `0x00000000`: the RHW is not drawn at all.
+    - Shapes: straight and diagonal RHW have the same shapes as a road in the same place. A
+      diagonal is a smooth line, not steps of full cells. RHW puzzle pieces can show as full
+      cells.
+    - A cell where a road crosses the RHW shows the two colors, each toward its own edges.
+    - Streets, roads, avenues, rail, monorail, highways, airports, seaports, parks and zones look
+      the same as without the plugin (compare with a tile from before, or take the DLL out).
     - Save the city and go to the region view. Turn on the transport map there: the RHW of this
-      city shows, also when you did not open a data view.
-    - Exit the game: the log shows `Hooking: restored patch TransportMapTypeFlags`.
+      city shows in its color, also when you did not open a data view.
+    - Exit the game: the log shows three lines `Hooking: restored patch TransportMap`.
 
 ### Render at noon
 
