@@ -200,13 +200,13 @@ lines. Every switch logs one line per step with its time in ms.
    - (debug) `Switching: the old city shuts down`, then the other modules' city shutdown lines
    - `Switching: step 4, CloseCity returned true in N ms`
    - `Switching: step 5, loading '<path of B>.sc4'`
-   - `Switching: step 6, LoadCity returned true in N ms`
-   - `Switching: done, '<B>' is loaded, N ms in total. Its modules start at PostCityInit.`
    - `RegionIndex: region '<region>' at '<folder>', N cities, current <B>`, then the city load
      lines of the modules (`Camera: region extent ...`, `Interaction: click control added ...`)
-   The RegionIndex line must come **after** the `done` line: the game posts PostCityInit, so the
-   modules start in the new city after the switch has ended. If it comes before step 6, report
-   it (the notes in `docs/re-notes/switching.md` would be wrong for your game).
+   - `Switching: step 6, LoadCity returned true in N ms`
+   - `Switching: done, '<B>' is loaded, N ms in total`
+   The game posts PostCityInit and LoadCity pumps the queues at its end, so the RegionIndex line
+   normally comes before step 6. On a busy game it can come after the `done` line. Both are
+   correct.
 4. Open city A again from the region view: the changes you made before the switch are there.
 5. Switch back and forth five times. Every switch ends with the `done` line. The time per switch
    stays about the same.
@@ -595,14 +595,14 @@ the batch saves every city. The log lines start with `Batch:` in the plugin log.
 ### Kill the game and continue
 
 1. Start a batch. While the second city renders, end SimCity 4 in the Task Manager.
-2. Start the game and open a city of the region. The window "Continue rendering the region?"
-   comes. Log: `Run <id> did not finish, <n> cities left. Asking whether to continue.`
+2. Start the game. The window "Continue rendering the region?" comes in the region view of
+   that region already. Click "Not now" and open a city of the region: it comes again. Log: `Run <id> did not finish, <n> cities left. Asking whether to continue.`
 3. Click Continue. When the open city is in the queue it is rendered first. The city that was
    rendering when the game stopped gets one more try (attempt 2). At the end the game goes to
    the start city of the first start. Log: `Run <id> continues in '<city>'`.
 4. Kill the game again while that same city renders, restart and continue. Now that city fails
    with "The game stopped twice while it rendered this city." and the batch goes on.
-5. "Not now" hides the window until the next city load. "Stop this render" sets batch.json to
+5. "Not now" hides the window until the next city load or region view. "Stop this render" sets batch.json to
    `"stopped"` and the offer does not come again.
 
 ### A city that fails
@@ -614,10 +614,44 @@ the batch saves every city. The log lines start with `Batch:` in the plugin log.
   (the game shows its own message). Expected: the run stops, you stay in the city. Log:
   `The region render stopped: Saving '<name>' failed...`.
 - A city that does not load sends the game to the region view. Log: `Failed '<name>': It could
-  not be loaded...`, then `Run <id> interrupted: ...`. Open a city of the region: the offer to
-  continue comes.
+  not be loaded...`, then `Opening '<next>'` from the region view. The run goes on.
 - Go to the region view yourself while the batch runs. Log: `Run <id> interrupted: The city
-  closed ...`. The offer comes at the next city load.
+  closed ...`. The offer to continue comes in the region view at once.
+
+### From the region view
+
+Start the game and stay in the region view. Open the panel with Ctrl+Shift+F9.
+
+1. Tools tab: a line says that no city is open and that the region render works here. The other
+   sections say "Open a city to ..." where they need a city. Status tab: the region and its
+   cities, "Current city: none". Log: `RegionIndex: region '<region>' at '<folder>', N cities,
+   current (none)` and `Store: renders folder is '...'`.
+2. Batch: "Render the region" is on. The popup says "The game opens, renders and saves each city
+   in turn" and "At the end the game goes back to the region view". The count is every founded
+   city that needs a render (no city is skipped as the start city).
+3. Start. Log: `Run <id> started in the region view: ...`, `Switching: start, from the region view
+   to '<A>' ...`, then steps 5 and 6 (no save, no close), `Opening '<A>' (attempt 1)`, `'<A>' is
+   open after <s> s`, `Rendered '<A>' ...`. The first city is the top left one of the queue.
+   The window shows "Opening the city" while the first city loads.
+4. At the end: `Going back to the region view`, `Switching: step 3, RequestGoToRegionView returned
+   true ...`, `Switching: done, the region view is open ...`, `Run <id> done: ...`. The game is in
+   the region view. The region thumbnails of the rendered cities are new. The panel shows
+   "Started ... in the region view, done." batch.json has `"regionView": true`.
+5. Start again. The popup says 0 cities need a render: the last city was saved on the way to the
+   region view and its render stays up to date (`'<key>' was saved after its render ...`).
+6. Cancel: start, then click Cancel while the second city renders. The game goes back to the
+   region view, not to a city. Log: `Cancel requested. ... goes back to the region view.`,
+   `Run <id> cancelled: ...`.
+7. Kill and continue: start, end SimCity 4 in the Task Manager while the second city renders.
+   Start the game. In the region view the window "Continue rendering the region?" comes ("It
+   started ... in the region view"). Continue: `Run <id> continues in the region view`, the
+   cities left open in their saved order, the run ends in the region view. Kill it once more,
+   then open a city of the region instead: the offer comes there too, and the run still ends in
+   the region view.
+8. A run started in a city and interrupted (kill the game) can continue from the region view:
+   it opens the next city from there and at the end opens its start city.
+9. A city that cannot be saved (for example a tutorial city) in a region view run: the run goes
+   on to the next city without a save of it.
 
 
 
