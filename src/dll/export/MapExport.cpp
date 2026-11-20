@@ -4,6 +4,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <condition_variable>
+#include <deque>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <thread>
 #include <cstdio>
 #include <cwchar>
 #include <fstream>
@@ -31,8 +37,10 @@ namespace
     // ponytail: fixed width. With a very small cache some city tiles are decoded twice. Derive
     // it from the cache size if that shows.
     constexpr int kStripTiles = 8;
-    // Output buffers, child tiles, file and encode buffers: everything but the cache and flags.
-    constexpr size_t kFixedBytes = 8u * 1024 * 1024;
+    // Output buffers, child tiles, file and encode buffers of the export thread and the workers
+    // (WorkPool), and the queued tiles: everything but the cache and flags.
+    constexpr size_t kFixedBytes = 24u * 1024 * 1024;
+    constexpr int kMaxWorkers = 8;
     constexpr size_t kMinCacheBytes = 4u * 1024 * 1024;
     constexpr uint64_t kMaxFileBytes = 64ull * 1024 * 1024;
 
@@ -68,6 +76,112 @@ namespace
                used == static_cast<int>(name.size()) && tx >= 0 && ty >= 0;
     }
 
+    // Runs tasks on worker threads. Submit blocks while the queue is full, so the export thread
+    // never gets far ahead of the encoders. A task returns false on failure: Wait then returns
+    // false, and the tasks still queued are dropped.
+    class WorkPool
+    {
+    public:
+        WorkPool(const int threads, const size_t capacity) : capacity_(capacity)
+        {
+            for (int i = 0; i < threads; ++i) {
+                threads_.emplace_back([this] { Main_(); });
+            }
+        }
+
+        WorkPool(const WorkPool&) = delete;
+        WorkPool& operator=(const WorkPool&) = delete;
+
+        ~WorkPool()
+        {
+            {
+                std::lock_guard lock(mutex_);
+                quit_ = true;
+                queue_.clear();
+            }
+            work_.notify_all();
+            for (std::thread& t : threads_) {
+                t.join();
+            }
+        }
+
+        void Submit(std::function<bool()> task)
+        {
+            std::unique_lock lock(mutex_);
+            room_.wait(lock, [&] { return queue_.size() < capacity_ || failed_; });
+            if (failed_) {
+                return;
+            }
+            queue_.push_back(std::move(task));
+            work_.notify_one();
+        }
+
+        [[nodiscard]] bool Failed() const
+        {
+            std::lock_guard lock(mutex_);
+            return failed_;
+        }
+
+        // Drops the queued tasks. Wait still waits for the ones that run.
+        void Cancel()
+        {
+            std::lock_guard lock(mutex_);
+            queue_.clear();
+            room_.notify_all();
+        }
+
+        // Until no task is queued or runs. False when a task failed since the last Wait.
+        bool Wait()
+        {
+            std::unique_lock lock(mutex_);
+            room_.wait(lock, [&] { return queue_.empty() && running_ == 0; });
+            const bool ok = !failed_;
+            failed_ = false;
+            return ok;
+        }
+
+    private:
+        void Main_()
+        {
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+            std::unique_lock lock(mutex_);
+            while (true) {
+                work_.wait(lock, [&] { return quit_ || !queue_.empty(); });
+                if (quit_) {
+                    return;
+                }
+                std::function<bool()> task = std::move(queue_.front());
+                queue_.pop_front();
+                ++running_;
+                room_.notify_all();
+                lock.unlock();
+                bool ok = false;
+                try {
+                    ok = task();
+                }
+                catch (const std::exception& e) {
+                    LOG_WARN("Export: a map tile task failed: {}", e.what());
+                }
+                lock.lock();
+                --running_;
+                if (!ok) {
+                    failed_ = true;
+                    queue_.clear();
+                }
+                room_.notify_all();
+            }
+        }
+
+        const size_t capacity_;
+        mutable std::mutex mutex_;
+        std::condition_variable work_, room_;
+        std::deque<std::function<bool()>> queue_;
+        std::vector<std::thread> threads_;
+        int running_ = 0;
+        bool failed_ = false;
+        bool quit_ = false;
+    };
+
     // Map layers: the normal view and the transport view, each with its own tile pyramid.
     constexpr int kNormal = 0;
     constexpr int kTransport = 1;
@@ -79,6 +193,7 @@ namespace
         CityInfo info;
         CityRenderMeta::Level level;
         float groundHeight = MapMath::kDefaultGroundHeight;
+        CityRenderMeta::Edges edges;
         MapMath::Source source;
         std::array<fs::path, 2> levelDir;  // per layer
         // Per layer: tilesX * tilesY, 1 when the tile file exists. Empty for a city without that
@@ -145,11 +260,19 @@ namespace
                 return result;
             }
 
+            // Encoding is the slow part: one worker per spare core, like the tile store.
+            workers_ = std::clamp(static_cast<int>(std::thread::hardware_concurrency()) - 2, 1, kMaxWorkers);
+            pool_ = std::make_unique<WorkPool>(workers_, static_cast<size_t>(workers_) * 2);
             bool done = ReadCities_(result) && Layout_(result);
             for (layer_ = kNormal; done && layer_ < layers_; ++layer_) {
                 progress_.layer = layer_;
                 MarkCandidates_();
                 done = Base_(result) && Pyramid_(result);
+            }
+            if (!done) {
+                // No worker may still write into map.tmp when it is removed below.
+                pool_->Cancel();
+                pool_->Wait();
             }
             done = done && Page_(result) && Swap_(result);
             if (!done) {
@@ -260,6 +383,7 @@ namespace
                 p.info = city;
                 p.level = *level;
                 p.groundHeight = meta.groundHeight.value_or(MapMath::kDefaultGroundHeight);
+                p.edges = meta.edges;
                 p.source.tilesX = level->tilesX;
                 p.source.tilesY = level->tilesY;
                 p.source.tileSize = meta.tileSize;
@@ -407,8 +531,9 @@ namespace
             }
             layer_ = kNormal;
             progress_.total = total;
-            LOG_INFO("Export: canvas {} x {} px, zoom 0 to {}, {} tiles to make in {} layers, cache {} MB", width_,
-                     height_, maxZoom_, total, layers_, cacheBudget_ / (1024 * 1024));
+            LOG_INFO("Export: canvas {} x {} px, zoom 0 to {}, {} tiles to make in {} layers, cache {} MB, {} encode "
+                     "workers", width_,
+                     height_, maxZoom_, total, layers_, cacheBudget_ / (1024 * 1024), workers_);
             return true;
         }
 
@@ -492,37 +617,44 @@ namespace
             return &cache_.Insert(key, std::move(scratch_), bytes, stamp_);
         }
 
+        // On a worker: encodes and writes one map tile of layer_. The flags and counts are shared
+        // with the other workers, under writeMutex_.
         bool WriteTile_(const int z, const int tx, const int ty, uint8_t* premultiplied)
         {
+            thread_local std::vector<uint8_t> encoded;
             MapMath::Unpremultiply(premultiplied, static_cast<size_t>(kTile) * kTile);
-            if (!WebpCodec::Encode(premultiplied, kTile, kTile, req_.quality, encoded_)) {
+            if (!WebpCodec::Encode(premultiplied, kTile, kTile, req_.quality, encoded)) {
                 LOG_WARN("Export: encoding tile {}/{}/{} failed", z, tx, ty);
                 return false;
             }
             LevelFlags& l = levels_[z];
             const fs::path column = tmpDir_ / kTilesDir[layer_] / std::to_wstring(z) / std::to_wstring(tx);
-            if (!l.columnMade[tx]) {
-                std::error_code ec;
-                fs::create_directories(column, ec);
-                l.columnMade[tx] = 1;
+            {
+                std::lock_guard lock(writeMutex_);
+                if (!l.columnMade[tx]) {
+                    std::error_code ec;
+                    fs::create_directories(column, ec);
+                    l.columnMade[tx] = 1;
+                }
             }
             // A virus scanner or the search indexer can hold a new folder for a moment: try again
             // a few times before giving up (seen in Documents on a first export).
             const fs::path file = column / (std::to_wstring(ty) + L".webp");
-            bool written = WriteFile(file, encoded_.data(), encoded_.size());
+            bool written = WriteFile(file, encoded.data(), encoded.size());
             for (int attempt = 1; !written && attempt <= 5; ++attempt) {
                 Sleep(20 * attempt);
                 std::error_code ec;
                 fs::create_directories(column, ec);
-                written = WriteFile(file, encoded_.data(), encoded_.size());
+                written = WriteFile(file, encoded.data(), encoded.size());
             }
             if (!written) {
                 LOG_WARN("Export: writing '{}' failed", Logger::PathText(file));
                 return false;
             }
+            std::lock_guard lock(writeMutex_);
             l.written[l.Index(tx, ty)] = 1;
             ++tilesWritten_;
-            bytesWritten_ += encoded_.size();
+            bytesWritten_ += encoded.size();
             return true;
         }
 
@@ -540,8 +672,8 @@ namespace
                         if (!base.candidate[base.Index(tx, ty)]) {
                             continue;
                         }
-                        if (Stopped_()) {
-                            return false;
+                        if (Stopped_() || pool_->Failed()) {
+                            break;
                         }
                         std::fill(out_.begin(), out_.end(), uint8_t{0});
                         const int px = tx * kTile;
@@ -566,15 +698,22 @@ namespace
                                 }
                             }
                         }
-                        if (!MapMath::IsTransparent(out_.data(), static_cast<size_t>(kTile) * kTile) &&
-                            !WriteTile_(maxZoom_, tx, ty, out_.data())) {
-                            return Fail_(result, "Writing a map tile failed. Check that the disk has free space.");
+                        if (!MapMath::IsTransparent(out_.data(), static_cast<size_t>(kTile) * kTile)) {
+                            pool_->Submit([this, z = maxZoom_, tx, ty, pixels = out_]() mutable {
+                                return WriteTile_(z, tx, ty, pixels.data());
+                            });
                         }
                         ++progress_.done;
                     }
                 }
             }
             cache_.Clear([](Decoded&) {});
+            if (!pool_->Wait()) {
+                return Fail_(result, "Writing a map tile failed. Check that the disk has free space.");
+            }
+            if (Stopped_()) {
+                return false;
+            }
             LOG_INFO("Export: full size level of the {} layer done, {} city tiles decoded so far",
                      layer_ == kTransport ? "transport" : "normal", decodes_);
             return true;
@@ -582,56 +721,64 @@ namespace
 
         // ---- pyramid -----------------------------------------------------------------------
 
+        // On a worker: one tile of zoom z from its four children of zoom z + 1, which are all
+        // written (the export waits for a zoom before it starts the next).
+        bool MakeParent_(const int z, const int tx, const int ty)
+        {
+            thread_local std::array<std::vector<uint8_t>, 4> children;
+            thread_local std::vector<uint8_t> out, fileBytes;
+            const LevelFlags& below = levels_[z + 1];
+            std::array<const uint8_t*, 4> parts{};
+            bool any = false;
+            for (int q = 0; q < 4; ++q) {
+                const int cx = tx * 2 + (q & 1);
+                const int cy = ty * 2 + (q >> 1);
+                if (cx >= below.tilesX || cy >= below.tilesY || !below.written[below.Index(cx, cy)]) {
+                    continue;
+                }
+                const fs::path file = tmpDir_ / kTilesDir[layer_] / std::to_wstring(z + 1) / std::to_wstring(cx) /
+                                      (std::to_wstring(cy) + L".webp");
+                children[q].resize(kTileBytes);
+                int w = 0;
+                int h = 0;
+                if (!ReadFile(file, fileBytes) ||
+                    !WebpCodec::DecodeInto(fileBytes, children[q].data(), static_cast<int>(kTileBytes), w, h) ||
+                    w != kTile || h != kTile) {
+                    LOG_WARN("Export: reading back map tile {}/{}/{} failed", z + 1, cx, cy);
+                    return false;
+                }
+                MapMath::Premultiply(children[q].data(), static_cast<size_t>(kTile) * kTile);
+                parts[q] = children[q].data();
+                any = true;
+            }
+            if (!any) {
+                return true;
+            }
+            out.resize(kTileBytes);
+            MapMath::Downscale2x(parts, kTile, out.data());
+            return MapMath::IsTransparent(out.data(), static_cast<size_t>(kTile) * kTile) ||
+                   WriteTile_(z, tx, ty, out.data());
+        }
+
         bool Pyramid_(MapExport::Result& result)
         {
             progress_.phase = static_cast<int>(MapExport::Phase::Pyramid);
-            std::array<std::vector<uint8_t>, 4> children;
-            for (std::vector<uint8_t>& c : children) {
-                c.resize(kTileBytes);
-            }
             for (int z = maxZoom_ - 1; z >= 0; --z) {
                 progress_.zoom = z;
-                const LevelFlags& below = levels_[z + 1];
                 const LevelFlags& level = levels_[z];
-                for (int ty = 0; ty < level.tilesY; ++ty) {
+                for (int ty = 0; ty < level.tilesY && !Stopped_() && !pool_->Failed(); ++ty) {
                     for (int tx = 0; tx < level.tilesX; ++tx) {
-                        if (!level.candidate[level.Index(tx, ty)]) {
-                            continue;
+                        if (level.candidate[level.Index(tx, ty)]) {
+                            pool_->Submit([this, z, tx, ty] { return MakeParent_(z, tx, ty); });
+                            ++progress_.done;
                         }
-                        if (Stopped_()) {
-                            return false;
-                        }
-                        std::array<const uint8_t*, 4> parts{};
-                        bool any = false;
-                        for (int q = 0; q < 4; ++q) {
-                            const int cx = tx * 2 + (q & 1);
-                            const int cy = ty * 2 + (q >> 1);
-                            if (cx >= below.tilesX || cy >= below.tilesY || !below.written[below.Index(cx, cy)]) {
-                                continue;
-                            }
-                            const fs::path file = tmpDir_ / kTilesDir[layer_] / std::to_wstring(z + 1) /
-                                                  std::to_wstring(cx) / (std::to_wstring(cy) + L".webp");
-                            int w = 0;
-                            int h = 0;
-                            if (!ReadFile(file, fileBytes_) ||
-                                !WebpCodec::DecodeInto(fileBytes_, children[q].data(), static_cast<int>(kTileBytes), w,
-                                                       h) ||
-                                w != kTile || h != kTile) {
-                                return Fail_(result, "Reading back a map tile failed.");
-                            }
-                            MapMath::Premultiply(children[q].data(), static_cast<size_t>(kTile) * kTile);
-                            parts[q] = children[q].data();
-                            any = true;
-                        }
-                        if (any) {
-                            MapMath::Downscale2x(parts, kTile, out_.data());
-                            if (!MapMath::IsTransparent(out_.data(), static_cast<size_t>(kTile) * kTile) &&
-                                !WriteTile_(z, tx, ty, out_.data())) {
-                                return Fail_(result, "Writing a map tile failed. Check that the disk has free space.");
-                            }
-                        }
-                        ++progress_.done;
                     }
+                }
+                if (!pool_->Wait()) {
+                    return Fail_(result, "Making a map tile failed. Check that the disk has free space.");
+                }
+                if (Stopped_()) {
+                    return false;
                 }
             }
             return true;
@@ -655,7 +802,7 @@ namespace
             for (const Placed& c : cities_) {
                 page.cities.push_back({c.info.name.empty() ? c.info.key : c.info.name,
                                        MapMath::Outline(projection_, c.info, c.level.originX, c.level.originY,
-                                                        {c.source.x, c.source.y}, c.groundHeight)});
+                                                        {c.source.x, c.source.y}, c.groundHeight, c.edges)});
             }
             const std::string html = MapExport::BuildPage(page);
             if (!WriteFile(tmpDir_ / L"index.html", html.data(), html.size())) {
@@ -711,8 +858,13 @@ namespace
         Decoded scratch_;
         bool decodeWarned_ = false;
         int64_t decodes_ = 0;
-        std::vector<uint8_t> fileBytes_, encoded_, out_;
+        std::vector<uint8_t> fileBytes_, out_;
 
+        // Encodes and writes the map tiles. writeMutex_ guards the written and columnMade flags
+        // of levels_ and the two counts below, which the workers change.
+        std::unique_ptr<WorkPool> pool_;
+        int workers_ = 1;
+        std::mutex writeMutex_;
         int64_t tilesWritten_ = 0;
         uint64_t bytesWritten_ = 0;
     };
@@ -759,6 +911,14 @@ namespace
   .leaflet-tooltip.city-label { background: rgba(22, 24, 28, 0.75); color: #fff; border: 0; border-radius: 4px;
     box-shadow: none; padding: 2px 7px; font-weight: 600; pointer-events: none; }
   .leaflet-tooltip.city-label::before { display: none; }
+  /* No focus box around a city outline after a click. */
+  .leaflet-container path.leaflet-interactive:focus { outline: none; }
+  .legend { font-size: 12px; line-height: 1.2; }
+  .legend div { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
+  .legend i { position: relative; flex: none; width: 28px; height: 12px; border-radius: 2px; background: #8c9478; }
+  .legend i b { position: absolute; left: 3px; right: 3px; top: 4px; height: 4px; }
+  .legend i b.area { top: 2px; bottom: 2px; height: auto; }
+  .legend i b.dash { top: 4px; height: 0; border-top: 4px dashed; background: none; }
   .map-box { background: rgba(22, 24, 28, 0.88); color: #e4e6ea; border-radius: 6px; padding: 6px 8px;
     box-shadow: 0 1px 5px rgba(0, 0, 0, 0.5); }
   .map-box label { display: block; font-size: 12px; color: #9aa1aa; margin-bottom: 3px; }
@@ -777,7 +937,7 @@ namespace
 <body>
 <header>
 <h1>@REGION@</h1>
-<p>Exported on @DATE@. Rotation @ROTATION@, made from the zoom @ZOOM@ renders. Put the pointer on a city to see its name. Click a city to zoom to it.</p>
+<p>Exported @DATE@, rotation @ROTATION@, zoom @ZOOM@</p>
 </header>
 <div id="map"></div>
 <script type="application/json" id="region-data">@DATA@</script>
@@ -817,7 +977,7 @@ namespace
       attribution: attribution ? 'Made with SC4 Seamless Region' : ''
     });
   }
-  var NORMAL = 'Normal view', TRANSPORT = 'Transport view';
+  var NORMAL = 'Map', TRANSPORT = 'Transport';
   var bases = {};
   bases[NORMAL] = tiles('tiles', true);
   if (data.transport) {
@@ -852,6 +1012,7 @@ namespace
     mini.removeLayer(miniBases[current]);
     current = name;
     miniBases[current].addTo(mini);
+    showLegend();
   }
   function showBase(name) {
     if (name === current || !bases[name]) {
@@ -875,12 +1036,53 @@ namespace
     map.fitBounds(ground, { padding: [16, 16] });
     map.options.zoomSnap = 0.25;
   }
-  if (data.transport) {
-    L.control.layers(bases, null, { collapsed: false, position: 'topright' }).addTo(map);
+  // City outlines and names can be turned off. The choice is kept in this browser.
+  var outlines = L.layerGroup(), names = L.layerGroup();
+  var overlays = { 'Outlines': outlines, 'Names': names };
+  function stored(key) {
+    try { return localStorage.getItem('sc4-map-' + key) !== 'off'; } catch (e) { return true; }
   }
+  function store(key, on) {
+    try { localStorage.setItem('sc4-map-' + key, on ? 'on' : 'off'); } catch (e) { }
+  }
+  if (stored('outlines')) { outlines.addTo(map); }
+  if (stored('names')) { names.addTo(map); }
+  L.control.layers(data.transport ? bases : null, overlays, { collapsed: false, position: 'topright' }).addTo(map);
+  map.on('overlayadd overlayremove', function (e) {
+    store(e.layer === outlines ? 'outlines' : 'names', e.type === 'overlayadd');
+    updateLabels();
+  });
+
+  // The colors of the transport view, as in the legend of the game's region view.
+  var legend = L.control({ position: 'bottomleft' });
+  legend.onAdd = function () {
+    var box = L.DomUtil.create('div', 'map-box legend');
+    [['Highway', '#000000', ''], ['RHW', '#e08020', ''], ['Road', '#a5a2a0', ''], ['Rail', '#9f1f20', ''],
+     ['Elevated rail', '#201fbf', ''], ['Monorail', '#780094', ''], ['Ferry', '#30306f', 'dash'],
+     ['Airport, seaport', '#30306f', 'area'], ['Park', '#306d30', 'area']].forEach(function (row) {
+      var line = L.DomUtil.create('div', '', box);
+      var chip = L.DomUtil.create('i', '', line);
+      var mark = L.DomUtil.create('b', row[2], chip);
+      if (row[2] === 'dash') {
+        mark.style.borderTopColor = row[1];
+      } else {
+        mark.style.background = row[1];
+      }
+      L.DomUtil.create('span', '', line).textContent = row[0];
+    });
+    return box;
+  };
+  function showLegend() {
+    if (current === TRANSPORT) {
+      legend.addTo(map);
+    } else {
+      legend.remove();
+    }
+  }
+  showLegend();
 
   // City outlines: a highlight on hover, the name, click to zoom. Names show on the map once a
-  // city is large enough on the screen.
+  // city is large enough on the screen, else on hover.
   var idle = { color: '#ffd75e', weight: 2, opacity: 0, fillColor: '#ffd75e', fillOpacity: 0 };
   var hover = { opacity: 1, fillOpacity: 0.15 };
   function zoomTo(city) {
@@ -889,19 +1091,19 @@ namespace
     setTimeout(function () { city.shape.setStyle(idle); }, 1500);
   }
   var cities = data.cities.map(function (entry) {
-    var shape = L.polygon(entry.outline.map(toLatLng), idle).addTo(map);
+    var shape = L.polygon(entry.outline.map(toLatLng), idle);
+    outlines.addLayer(shape);
     var area = shape.getBounds();
     var name = document.createElement('span');
     name.textContent = entry.name;
     var tip = document.createElement('span');
     tip.textContent = entry.name;
     var city = {
-      name: entry.name, shape: shape, tip: tip, labelShown: false,
+      name: entry.name, shape: shape, tip: tip, labelShown: false, tipShown: false,
       width: (area.getEast() - area.getWest()) * scale,
       label: L.tooltip({ permanent: true, direction: 'center', className: 'city-label', interactive: false })
         .setLatLng(area.getCenter()).setContent(name)
     };
-    shape.bindTooltip(tip, { sticky: true, direction: 'top' });
     shape.on('mouseover', function () { shape.setStyle(hover); });
     shape.on('mouseout', function () { shape.setStyle(idle); });
     shape.on('click', function () { zoomTo(city); });
@@ -909,18 +1111,25 @@ namespace
   });
   function updateLabels() {
     var factor = Math.pow(2, map.getZoom() - data.maxZoom);
+    var namesOn = map.hasLayer(names);
     cities.forEach(function (city) {
-      var show = city.width * factor >= 180;
-      if (show === city.labelShown) {
-        return;
+      var show = namesOn && city.width * factor >= 180;
+      var tip = namesOn && !show;
+      if (show !== city.labelShown) {
+        city.labelShown = show;
+        if (show) {
+          names.addLayer(city.label);
+        } else {
+          names.removeLayer(city.label);
+        }
       }
-      city.labelShown = show;
-      if (show) {
-        city.label.addTo(map);
-        city.shape.unbindTooltip();
-      } else {
-        map.removeLayer(city.label);
-        city.shape.bindTooltip(city.tip, { sticky: true, direction: 'top' });
+      if (tip !== city.tipShown) {
+        city.tipShown = tip;
+        if (tip) {
+          city.shape.bindTooltip(city.tip, { sticky: true, direction: 'top' });
+        } else {
+          city.shape.unbindTooltip();
+        }
       }
     });
   }
@@ -933,7 +1142,7 @@ namespace
       form.setAttribute('role', 'search');
       var label = L.DomUtil.create('label', '', form);
       label.htmlFor = 'find-city';
-      label.textContent = 'Find a city';
+      label.textContent = 'Search';
       var input = L.DomUtil.create('input', '', form);
       input.id = 'find-city';
       input.type = 'search';
@@ -1120,7 +1329,7 @@ namespace MapExport
         ReplaceAll(dataText, "<", "\\u003c");
 
         const std::string region = page.regionName.empty() ? std::string("Region") : page.regionName;
-        return Fill(kPage, {{"@TITLE@", HtmlEscape(region + " region map")},
+        return Fill(kPage, {{"@TITLE@", HtmlEscape(region)},
                             {"@REGION@", HtmlEscape(region)},
                             {"@DATE@", HtmlEscape(page.dateText)},
                             {"@ROTATION@", std::to_string(page.rotation + 1)},

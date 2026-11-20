@@ -104,6 +104,36 @@ TEST_CASE(MapOutlineFollowsTheCity)
     const auto higher = MapMath::Outline(p, c, grid.originCanvas.fX, grid.originCanvas.fY, {100, 50}, 500.0f);
     CHECK(higher[0].fY < outline[0].fY);
     CHECK_NEAR(higher[0].fX, outline[0].fX, 1e-3);
+
+    // With edge heights: one point per sample, and two neighbors share their edge line.
+    CityRenderMeta::Edges edges;
+    edges.step = 256.0f;  // 5 samples per 1024 m edge
+    edges.north = {400.0f, 410.0f, 420.0f, 430.0f, 440.0f};
+    edges.south = {300.0f, 310.0f, 320.0f, 330.0f, 340.0f};
+    edges.west = {400.0f, 380.0f, 360.0f, 340.0f, 300.0f};
+    edges.east = {440.0f, 420.0f, 400.0f, 380.0f, 340.0f};
+    const auto shaped = MapMath::Outline(p, c, grid.originCanvas.fX, grid.originCanvas.fY, {100, 50}, 400.0f, edges);
+    CHECK(shaped.size() == 16);
+    CHECK_NEAR(shaped[0].fX, outline[0].fX, 1e-3);  // corner (0, 0) at 400 m both ways
+    CHECK_NEAR(shaped[0].fY, outline[0].fY, 1e-3);
+
+    const CityInfo south = City(0, 1, 1, "b");
+    const MapMath::Point southPlace = MapMath::PlaceCity(p, c, south, grid.originCanvas.fX, grid.originCanvas.fY);
+    CityRenderMeta::Edges southEdges = edges;
+    southEdges.north = edges.south;  // the shared edge, sampled from the other side
+    const MapMath::Point place = MapMath::PlaceCity(p, c, c, grid.originCanvas.fX, grid.originCanvas.fY);
+    const auto north = MapMath::Outline(p, c, grid.originCanvas.fX, grid.originCanvas.fY, place, 400.0f, edges);
+    const auto southShape =
+        MapMath::Outline(p, south, grid.originCanvas.fX, grid.originCanvas.fY, southPlace, 400.0f, southEdges);
+    // The south edge of a runs from (1024, 1024) back to (0, 1024): points 8..11, then the west
+    // edge starts at (0, 1024). The north edge of b runs from (0, 0): points 0..4.
+    for (int i = 0; i < 4; ++i) {
+        CHECK_NEAR(north[12 - i].fX, southShape[i].fX, 1.0);
+        CHECK_NEAR(north[12 - i].fY, southShape[i].fY, 1.0);
+    }
+    // Edges that do not fit the city: the four flat corners.
+    edges.west.pop_back();
+    CHECK(MapMath::Outline(p, c, grid.originCanvas.fX, grid.originCanvas.fY, {100, 50}, 400.0f, edges).size() == 4);
 }
 
 TEST_CASE(MapSourceRange)
@@ -253,11 +283,11 @@ TEST_CASE(MapPageIsSelfContained)
     }
     CHECK(ends == 3);
     // The human text has no semicolons (CSS and script do).
-    const size_t introAt = html.find("<p>Exported on");
+    const size_t introAt = html.find("<p>Exported");
     CHECK(introAt != std::string::npos);
     const std::string intro = html.substr(introAt, html.find("</p>", introAt) - introAt);
     CHECK(intro.find(';') == std::string::npos && intro.find("2026-11-19") != std::string::npos);
-    CHECK(intro.find("Rotation 3, made from the zoom 5 renders.") != std::string::npos);
+    CHECK(intro.find("rotation 3, zoom 5") != std::string::npos);
     CHECK(html.find("@ROTATION@") == std::string::npos && html.find("@ZOOM@") == std::string::npos);
 
     // The inline data block is valid JSON with the page values.

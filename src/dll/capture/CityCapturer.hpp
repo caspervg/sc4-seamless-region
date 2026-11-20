@@ -53,6 +53,13 @@ struct CaptureRequest
     // The highest zoom index to render (2..4). -1: Settings::maxRenderZoom.
     int maxZoom = -1;
     std::vector<int> rotations;  // 0..3, empty means all
+    // Add the transport layer to an earlier render: a normal level that the earlier render has on
+    // the same tile grid is kept as it is (CityMeta::HasSameLevel), also when the save file
+    // changed since. Its transport level is drawn on the tiles it has on disk. Also renders the
+    // transport layer when Settings::captureTransportLayer is off.
+    bool addTransport = false;
+    // Render the transport layer also when Settings::captureTransportLayer is off.
+    bool transport = false;
 };
 
 struct CaptureProgress
@@ -125,6 +132,7 @@ private:
         bool captured = false;  // every tile of this run is handed to the store
         bool transport = false; // the transport layer of the level before it
         bool skipped = false;   // left out part way: never complete
+        bool kept = false;      // a normal level of the earlier render, kept for its transport level
     };
 
     // What Prepare changed, so Restore puts back exactly that.
@@ -186,6 +194,8 @@ private:
     bool WriteTestTile_();
     // Writes meta.json for the tiles that are on disk now. final = the render is complete.
     bool WriteMeta_(bool final);
+    // Samples the terrain along the city edges for meta.json (CityRenderMeta::edges).
+    void SampleEdges_(CityRenderMeta::Edges& edges) const;
     int maxZoom_ = 3;  // zoom index, the highest this render makes
     bool transport_ = false;  // this render makes the transport layer
 
@@ -216,7 +226,8 @@ private:
     [[nodiscard]] double EtaSeconds_() const;
     void OnSaveBegin_();
     void ResumeAfterSave_();
-    void OnSaved_();
+    // fastSave: a quick save, which never starts a render.
+    void OnSaved_(bool fastSave);
     void CancelRenderOnSave_();
     [[nodiscard]] bool OtherWorkRuns_() const;
 
@@ -246,6 +257,7 @@ private:
     float citySizeX_ = 0.0f, citySizeZ_ = 0.0f;
     float minHeight_ = 0.0f, maxHeight_ = 0.0f;
     float terrainHigh_ = 0.0f;  // highest terrain or sea surface
+    CityRenderMeta::Edges edges_;  // terrain heights along the city edges, for meta.json
     int tileSize_ = 512;
 
     std::vector<Level> levels_;

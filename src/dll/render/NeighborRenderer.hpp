@@ -87,6 +87,8 @@ private:
     bool Place_(const Neighbor& neighbor, const CameraFrame& frame, NeighborMath::LevelPlacement& placement,
                 const CityRenderMeta::Level*& level) const;
     void OnTileReady_(const TileKey& key);
+    // Adds the screen rectangle of a tile that became ready to dirty_.
+    void MarkReadyTile_(const TileKey& key, const CameraFrame& frame);
     void FlushDirty_();
     void RequestFullRedraw_() const;
 
@@ -108,5 +110,6 @@ private:
     std::array<std::vector<int>, 4> back_;
     std::array<std::vector<int>, 4> front_;
     NeighborMath::DirtyRects dirty_;
+    std::vector<TileKey> ready_;  // tiles that became ready since the last PreDynamic
     std::vector<SC4WorldVertex> outline_;  // reserved once
 };

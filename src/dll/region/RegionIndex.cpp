@@ -101,6 +101,17 @@ void RegionIndex::Read_(cISC4RegionalCity* current)
                 info.savePath = std::move(path);
                 info.founded = !info.savePath.empty();
                 info.isCurrent = current && rc == current;
+                if (info.founded) {
+                    cRZBaseString mayor;
+                    rc->GetMayorName(mayor);
+                    info.mayor = std::string(View(mayor));
+                    info.population = rc->GetPopulation();
+                    info.commercialJobs = rc->GetCommercialJobs();
+                    info.industrialJobs = rc->GetIndustrialJobs();
+                    info.mayorRating = rc->GetMayorRating();
+                    info.difficulty = static_cast<int>(rc->GetDifficultyLevel());
+                    info.budget = rc->GetBudget();
+                }
                 cities.push_back(std::move(info));
             }
         }

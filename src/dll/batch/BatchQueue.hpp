@@ -51,6 +51,13 @@ namespace BatchQueue
         std::string runId;
         State state = State::Running;
         bool force = false;
+        // Adds the transport layer to the earlier renders (CaptureRequest::addTransport).
+        bool addTransport = false;
+        // The render choices at the start, so a run that continues after a restart renders the
+        // same: the transport layer (CaptureRequest::transport) and the highest zoom index
+        // (-1: the setting of now, for files of older versions).
+        bool transport = false;
+        int maxZoom = -1;
         Entry start;                 // the city the run started in, and ends in. Empty when regionView
         bool regionView = false;     // started in the region view: it ends there and renders every city
         std::vector<Entry> pending;  // in render order, the first is the next
@@ -224,6 +231,9 @@ namespace BatchQueue
             {"runId", run.runId},
             {"state", StateName(run.state)},
             {"force", run.force},
+            {"addTransport", run.addTransport},
+            {"transport", run.transport},
+            {"maxZoom", run.maxZoom},
             {"start", EntryJson(run.start)},
             {"regionView", run.regionView},
             {"pending", std::move(pending)},
@@ -282,6 +292,9 @@ namespace BatchQueue
                 return std::nullopt;
             }
             run.force = j.at("force").get<bool>();
+            run.addTransport = j.value("addTransport", false);  // not in files of older versions
+            run.transport = j.value("transport", false);
+            run.maxZoom = j.value("maxZoom", -1);
             run.start = entry(j.at("start"));
             run.regionView = j.value("regionView", false);  // not in files of older versions
             for (const nlohmann::json& e : j.at("pending")) {

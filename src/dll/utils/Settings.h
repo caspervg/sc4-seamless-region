@@ -54,8 +54,9 @@ public:
     // the pixels of zoom 4. Without zoom 5 tiles, zoom 5 shows zoom 4 at twice the size. Without
     // zoom 4 tiles neighbors do not show at zoom 4 and 5.
     int maxRenderZoom = 4;
-    // GPU tile cache limit in megabytes.
-    int tileCacheMB = 96;
+    // GPU tile cache limit in megabytes. A 512 px tile takes 2 MB (with the CPU copy). 96 MB was
+    // too little at 4K: one neighbor can show more tiles than that holds.
+    int tileCacheMB = 256;
     // Texture uploads per frame: at most this many tiles...
     int uploadTilesPerFrame = 4;
     // ...or this many milliseconds, whichever comes first.

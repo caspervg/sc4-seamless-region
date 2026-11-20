@@ -144,3 +144,27 @@ TEST_CASE(RenderAgeTextIsFriendly)
     RenderAgeText(7200, text, sizeof(text));
     CHECK(std::strcmp(text, "Rendered 2 hours ago") == 0);
 }
+
+TEST_CASE(DoubleClickNeedsTheSameNeighborSoonAndInPlace)
+{
+    using InteractionMath::Click;
+    const Click first{3, 1000, 200, 300};
+    CHECK(InteractionMath::IsDoubleClick(first, {3, 1400, 201, 302}, 500));
+    CHECK(!InteractionMath::IsDoubleClick(first, {3, 1600, 200, 300}, 500));  // too late
+    CHECK(!InteractionMath::IsDoubleClick(first, {4, 1100, 200, 300}, 500));  // another neighbor
+    CHECK(!InteractionMath::IsDoubleClick(first, {3, 1100, 210, 300}, 500));  // moved
+    CHECK(!InteractionMath::IsDoubleClick(Click(), {3, 1100, 200, 300}, 500));  // no first click
+}
+
+TEST_CASE(GroupedNumberLikeTheRegionView)
+{
+    char text[32];
+    InteractionMath::GroupedNumber(0, text, sizeof(text));
+    CHECK(std::string(text) == "0");
+    InteractionMath::GroupedNumber(999, text, sizeof(text));
+    CHECK(std::string(text) == "999");
+    InteractionMath::GroupedNumber(1234567, text, sizeof(text));
+    CHECK(std::string(text) == "1,234,567");
+    InteractionMath::GroupedNumber(-12000, text, sizeof(text));
+    CHECK(std::string(text) == "-12,000");
+}

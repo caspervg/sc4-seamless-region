@@ -52,6 +52,10 @@ private:
     {
         int cellX = 0, cellZ = 0, sizeX = 1, sizeZ = 1;
         std::string name;
+        std::string mayor;
+        int population = 0, commercialJobs = 0, industrialJobs = 0;
+        int mayorRating = 0, difficulty = 0;
+        double budget = 0.0;
         const char* sizeLabel = "";
         bool founded = false;
         bool hasRender = false;
@@ -110,6 +114,14 @@ private:
     int meshFor_ = -1;
     bool cursorInView_ = false;
     int cursorX_ = 0, cursorZ_ = 0;
+    // The pointer as the city view gives it to the input control (mouse move, button), in view
+    // window pixels. It only comes while the game gets the mouse: Render Services keeps mouse
+    // messages from the game while ImGui wants the mouse.
+    bool viewPointer_ = false;
+    int viewX_ = 0, viewZ_ = 0;
+    bool viewMovesLogged_ = false;
+    // The last click on a neighbor: a second one on the same neighbor soon after switches.
+    InteractionMath::Click firstClick_;
     float pickKey_[7] = {};
     std::vector<SC4WorldVertex> mesh_;
 

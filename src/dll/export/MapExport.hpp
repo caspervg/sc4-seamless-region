@@ -96,7 +96,7 @@ namespace MapExport
     struct PageCity
     {
         std::string name;                      // UTF-8
-        std::array<cS3DVector2, 4> outline{};  // map pixels at maxZoom
+        std::vector<cS3DVector2> outline;  // map pixels at maxZoom
     };
 
     struct Page

@@ -69,6 +69,16 @@ struct CityRenderMeta
     // Typical ground height of the city in metres, for outlines on the region map. Optional:
     // metas written before it was added have none.
     std::optional<float> groundHeight;
+    // Ground height in metres along the four city edges, for outlines on the region map that
+    // follow the terrain: the terrain, or the sea level where it is lower. One sample every
+    // `step` metres from corner to corner, so north and south have sizeX * 1024 / step + 1
+    // samples, west and east sizeZ * 1024 / step + 1. North is z = 0 and west x = 0, both from
+    // the low end. Empty (step 0) in metas written before the field existed.
+    struct Edges
+    {
+        float step = 0.0f;
+        std::vector<float> north, south, west, east;
+    } edges;
 };
 
 // meta.json text, pure and unit tested.
@@ -107,6 +117,12 @@ namespace CityMeta
     // maxZoom (zoom index) is missing. With transport, a missing transport level counts too.
     [[nodiscard]] bool NeedsRender(const std::optional<CityRenderMeta>& meta, int64_t saveFileTime, int maxZoom,
                                    bool transport = false);
+    // An earlier render has `wanted` already: a level of the same rotation, zoom and layer on the
+    // same tile grid (tile counts, origin within half a pixel, magnification). The save time is
+    // not checked: the caller decides that the city did not change.
+    [[nodiscard]] bool HasSameLevel(const std::optional<CityRenderMeta>& earlier, const CityRenderMeta::Level& wanted);
+    // True when the edges have a sample count that fits a city of sizeX by sizeZ region cells.
+    [[nodiscard]] bool EdgesFit(const CityRenderMeta::Edges& edges, int sizeX, int sizeZ);
     // The levels of an earlier render that a new render up to maxZoom (zoom index), with or
     // without the transport layer, does not make again: levels above maxZoom, and transport
     // levels when the new render has none. All of them must go when the city was saved after
@@ -121,7 +137,7 @@ class TileStore final : public Module
 public:
     // Encode queue capacity in tiles. QueueWrite returns false when it is full, and then
     // leaves the caller's rgba buffer intact so the caller can retry with it.
-    static constexpr size_t kQueueCapacity = 16;
+    static constexpr size_t kQueueCapacity = 24;
     static constexpr const char* kFolderName = "RegionRenders";
 
     TileStore() = default;

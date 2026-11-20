@@ -264,7 +264,7 @@ const char* RegionBatchRenderer::WhyNotBegin_() const
     return nullptr;
 }
 
-bool RegionBatchRenderer::Start(const bool force)
+bool RegionBatchRenderer::Start(const bool force, const bool addTransport)
 {
     if (const char* why = WhyNotBegin_()) {
         message_ = why;
@@ -274,8 +274,12 @@ bool RegionBatchRenderer::Start(const bool force)
     // Null in the region view: the run renders every city and ends in the region view.
     const CityInfo* start = ctx_.region->Current();
     run_ = BatchQueue::Build(
-        ctx_.region->Cities(), start, force, [this](const CityInfo& c) { return NeedsRender_(c); },
+        ctx_.region->Cities(), start, force,
+        [this, addTransport](const CityInfo& c) { return addTransport ? NeedsTransport_(c) : NeedsRender_(c); },
         NowText("%Y%m%d-%H%M%S"), NowText("%Y-%m-%d %H:%M:%S"));
+    run_.addTransport = addTransport;
+    run_.transport = ctx_.settings->captureTransportLayer;
+    run_.maxZoom = ctx_.settings->MaxRenderZoomIndex();
     if (run_.pending.empty()) {
         message_ = "Every city has a render that is up to date. Nothing to do.";
         LOG_INFO("Batch: not started. {}", message_);
@@ -295,7 +299,8 @@ bool RegionBatchRenderer::Start(const bool force)
         speedSaved_ = true;
     }
     Log_(std::format("Run {} started in {}{}: {} cities to render, {} skipped", run_.runId, StartName_(run_),
-                     force ? ", all cities again" : "", run_.pending.size(), run_.skipped.size()));
+                     force ? ", all cities again" : addTransport ? ", adding the transport layer" : "",
+                     run_.pending.size(), run_.skipped.size()));
     Begin_();
     return true;
 }
@@ -339,6 +344,7 @@ void RegionBatchRenderer::Begin_()
     secondsSum_ = 0.0;
     secondsCount_ = 0;
     restampKey_.clear();
+    restampOthers_.clear();
     message_.clear();
     lastRun_ = run_;
     if (GameAccess::City()) {
@@ -618,7 +624,11 @@ void RegionBatchRenderer::StepSettle_()
         return;
     }
     phase_ = Phase::Capture;
-    if (!ctx_.capturer->Start(CaptureRequest())) {
+    CaptureRequest request;
+    request.addTransport = run_.addTransport;
+    request.transport = run_.transport;
+    request.maxZoom = run_.maxZoom;
+    if (!ctx_.capturer->Start(request)) {
         const std::string error = ctx_.capturer->Progress().error;
         BatchQueue::Fail(run_, current_, "The render did not start: " + (error.empty() ? "no reason given." : error));
         Log_(std::format("Failed '{}': {}", current_.name, run_.failed.back().reason));
@@ -665,6 +675,16 @@ void RegionBatchRenderer::StepCapture_()
         if (const CityInfo* city = FindByKey_(current_.key)) {
             restampKey_ = city->key;
             restampPath_ = city->savePath;
+            restampOthers_.clear();
+            for (const CityInfo& other : ctx_.region->Cities()) {
+                const int64_t fileTime = other.savePath.empty() ? 0 : TileStore::FileTime(other.savePath);
+                const std::optional<CityRenderMeta> meta = other.key == city->key || fileTime == 0
+                                                               ? std::nullopt
+                                                               : ctx_.tileStore->LoadMeta(other.key);
+                if (meta && meta->saveFileTime == fileTime) {
+                    restampOthers_.push_back({other.key, other.savePath, fileTime});
+                }
+            }
         }
         Log_(std::format("Rendered '{}' in {} min {} s", current_.name, static_cast<int>(seconds) / 60,
                          static_cast<int>(seconds) % 60));
@@ -701,6 +721,20 @@ void RegionBatchRenderer::Restamp_()
             LOG_INFO("Batch: '{}' was saved after its render, its render stays up to date", restampKey_);
         }
     }
+    int neighbors = 0;
+    for (const UpToDate& other : restampOthers_) {
+        meta = ctx_.tileStore->LoadMeta(other.key);
+        const int64_t now = TileStore::FileTime(other.path);
+        if (meta && now != 0 && now != other.fileTime && meta->saveFileTime == other.fileTime) {
+            meta->saveFileTime = now;
+            neighbors += ctx_.tileStore->WriteMeta(other.key, *meta) ? 1 : 0;
+        }
+    }
+    if (neighbors > 0) {
+        LOG_INFO("Batch: the save of '{}' also wrote {} neighbor cities, their renders stay up to date", restampKey_,
+                 neighbors);
+    }
+    restampOthers_.clear();
     restampKey_.clear();
 }
 
@@ -799,6 +833,12 @@ bool RegionBatchRenderer::NeedsRender_(const CityInfo& city) const
                                        ctx_.settings->captureTransportLayer);
 }
 
+bool RegionBatchRenderer::NeedsTransport_(const CityInfo& city) const
+{
+    const std::optional<CityRenderMeta> meta = ctx_.tileStore->LoadMeta(city.key);
+    return !meta || !CityMeta::HasLevelsUpTo(*meta, ctx_.settings->MaxRenderZoomIndex(), true);
+}
+
 void RegionBatchRenderer::Log_(const std::string& line) const
 {
     LOG_INFO("Batch: {}", line);
@@ -828,6 +868,7 @@ void RegionBatchRenderer::DrawPanelSection()
         bool open = false;
         if (ImGui::Button("Render the region")) {
             confirmForce_ = false;
+            confirmAddTransport_ = false;
             open = true;
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
@@ -837,10 +878,21 @@ void RegionBatchRenderer::DrawPanelSection()
         ImGui::SameLine();
         if (ImGui::Button("Render all cities again")) {
             confirmForce_ = true;
+            confirmAddTransport_ = false;
             open = true;
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
             ImGui::SetTooltip("Renders every founded city, also when its render is up to date.");
+        }
+        if (ImGui::Button("Add the transport layer")) {
+            confirmForce_ = false;
+            confirmAddTransport_ = true;
+            open = true;
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("Renders only the transport layer of every city that does not have it, up to the zoom "
+                              "you chose. The normal view of the earlier render stays, also when the city was saved "
+                              "after it. Use it when the cities did not change.");
         }
         ImGui::EndDisabled();
         if (why) {
@@ -851,8 +903,10 @@ void RegionBatchRenderer::DrawPanelSection()
             confirmRegionView_ = !GameAccess::City();
             confirmCount_ = static_cast<int>(BatchQueue::Build(
                                                  ctx_.region->Cities(), ctx_.region->Current(), confirmForce_,
-                                                 [this](const CityInfo& c) { return NeedsRender_(c); }, std::string(),
-                                                 std::string())
+                                                 [this](const CityInfo& c) {
+                                                     return confirmAddTransport_ ? NeedsTransport_(c) : NeedsRender_(c);
+                                                 },
+                                                 std::string(), std::string())
                                                  .pending.size());
             ImGui::OpenPopup(kConfirmPopup);
         }
@@ -870,7 +924,7 @@ void RegionBatchRenderer::DrawPanelSection()
         ImGui::BulletText("You can cancel at any time.");
         ImGui::BeginDisabled(confirmCount_ == 0);
         if (ImGui::Button("Start")) {
-            Start(confirmForce_);
+            Start(confirmForce_, confirmAddTransport_);
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndDisabled();

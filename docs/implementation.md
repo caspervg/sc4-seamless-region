@@ -50,7 +50,7 @@ The game is a 32-bit process with a 2 to 4 GB address space and a single game th
 - **Static passes only for tiles.** Neighbor tiles are drawn in the static passes, so the
   game's backing store keeps them. Redraw comes from dirty rectangles, not from drawing
   every frame. The hover tint is the only per-frame neighbor draw.
-- **Bounded memory.** The GPU tile cache has a hard cap from settings (default 96 MB). The
+- **Bounded memory.** The GPU tile cache has a hard cap from settings (default 256 MB). The
   decode queue and the encode queue are bounded. Back-pressure, never unbounded growth.
 - **Bounded main-thread work.** Texture uploads per frame have a budget (default 4 tiles
   or 3 ms, whichever comes first). Capture readback is one block per frame at most: one
@@ -521,7 +521,7 @@ degrees), so only zoom 4 can stand in for zoom 5 (same pitch, exactly 2x).
   rotations. Zooms 1 to 4 together have about 3,100. So a render up to zoom 5 takes and stores
   about 4 times what a render up to zoom 4 does: about 800 MB instead of 200 MB. The key packing
   (16 bits per tile column and row) and the store index cope with that.
-- **Tile cache**: unchanged at `TileCacheMB` (96 MB, 48 tiles of 512 px with the CPU copy). Zoom 5
+- **Tile cache**: unchanged at `TileCacheMB` (256 MB, 128 tiles of 512 px with the CPU copy). Zoom 5
   tiles are drawn 1:1, so a screen needs as many of them as of zoom 4 tiles at zoom 4 (at
   1920 x 1080 at most 5 x 4 per level). The cache works per screen, not per city.
 

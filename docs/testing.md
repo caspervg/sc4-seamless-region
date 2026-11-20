@@ -367,7 +367,7 @@ driver, SCD3D11 and scvk. Panel: Tools, group "Neighbors".
 
 ### Start and city load
 
-1. Log at start: `Tile cache: ready, limit 96 MB` and
+1. Log at start: `Tile cache: ready, limit 256 MB` and
    `Neighbors: draw callbacks registered (back at the start of PreStatic, front at the end of PostStatic)`.
 2. Open a city with rendered neighbors. Log: `Neighbors: N of M founded neighbor cities have a render`.
 3. The neighbors appear around the city once the store has indexed the renders folder (a second or
@@ -783,7 +783,7 @@ cities" unless a step says otherwise.
 7. "Made with SC4 Seamless Region" is in the lower right corner. Above it, the overview map
    shows the whole region with a yellow frame on the part the big map shows. The frame follows
    when you drag or zoom. Click the overview map: the big map moves there.
-8. "Find a city" (top right): type a part of a name, pick a name from the list or press Enter.
+8. "Search" (top right): type a part of a name, pick a name from the list or press Enter.
    The map zooms to the city and its outline shows for a moment. A name that no city has
    shows "No city has this name."
 9. The full screen button (below the zoom buttons) shows the map on the whole screen and back.
@@ -791,13 +791,32 @@ cities" unless a step says otherwise.
 10. The address of the page ends in `#zoom/x/y`. It changes when you move the map. Copy the
     address, close the page and open the address: the same place and zoom. Edit the numbers in
     the address bar: the map moves there.
-11. With transport tiles (see Capture, Transport layer): "Normal view" and "Transport view" in
-    the top right corner. The transport view lines up with the normal view, also in the overview
-    map, and the address ends in `/transport`. Without transport tiles the switch is not there.
+11. With transport tiles (see Capture, Transport layer): "Map" and "Transport" in the top right
+    corner. The transport view lines up with the normal view, also in the overview map, and the
+    address ends in `/transport`. The transport view has a color legend at the bottom left, as
+    in the game's region view. Without transport tiles the switch is not there.
+    "Outlines" and "Names" turn the city outlines and names off and on. The browser keeps the
+    choice.
 12. Files: `map\index.html`, `map\tiles\<z>\<x>\<y>.webp` and, with the transport layer,
     `map\tiles-transport\<z>\<x>\<y>.webp`. No `map.tmp` and no `map.old` folder stays. Empty
     areas have no tile files.
 13. Put the `map` folder on a web server (for example GitHub Pages): the page works the same.
+
+### Hosting
+
+A map of a large region has tens of thousands of files and can be near 1 GB. That is too much
+for GitHub Pages and Cloudflare Pages. Cloudflare R2 takes it, with free traffic:
+
+1. In the Cloudflare dashboard, make an R2 bucket (for example `sc4-maps`). In its settings,
+   connect a custom domain of your Cloudflare account (for example `maps.example.com`).
+2. Make an R2 API token with "Object Read & Write" for that bucket. Keep the access key ID, the
+   secret and the account ID.
+3. Install rclone (`winget install Rclone.Rclone`) and make the remote once:
+   `rclone config create r2 s3 provider=Cloudflare access_key_id=<id> secret_access_key=<secret>
+   endpoint=https://<account id>.r2.cloudflarestorage.com no_check_bucket=true`
+4. Upload: `tools\upload-map-r2.ps1 -MapFolder "<region>\RegionRenders\map" -Bucket sc4-maps
+   -Path <region name>`. Run it again after a new export: it sends only what changed.
+5. Open `https://maps.example.com/<region name>/index.html`.
 
 ### Rotation, cancel and refusal
 

@@ -203,6 +203,21 @@ namespace CityMeta
         if (meta.groundHeight) {
             j["groundHeight"] = *meta.groundHeight;
         }
+        if (meta.edges.step > 0.0f) {
+            // Tenths of a metre are far below a pixel and keep the file small.
+            const auto heights = [](const std::vector<float>& edge) {
+                json out = json::array();
+                for (const float h : edge) {
+                    out.push_back(std::round(h * 10.0f) / 10.0f);
+                }
+                return out;
+            };
+            j["edges"] = {{"step", meta.edges.step},
+                          {"north", heights(meta.edges.north)},
+                          {"south", heights(meta.edges.south)},
+                          {"west", heights(meta.edges.west)},
+                          {"east", heights(meta.edges.east)}};
+        }
         return j.dump(2);
     }
 
@@ -275,6 +290,27 @@ namespace CityMeta
         if (float ground = 0.0f; Float(j, "groundHeight", ground) && std::isfinite(ground)) {
             m.groundHeight = ground;
         }
+        // Optional: a bad "edges" is left out, the outline then uses groundHeight.
+        if (const auto edges = j.find("edges"); edges != j.end() && edges->is_object()) {
+            CityRenderMeta::Edges e;
+            const auto heights = [&](const char* name, std::vector<float>& out) {
+                const auto it = edges->find(name);
+                if (it == edges->end() || !it->is_array()) {
+                    return false;
+                }
+                for (const json& h : *it) {
+                    if (!h.is_number() || !std::isfinite(h.get<float>())) {
+                        return false;
+                    }
+                    out.push_back(h.get<float>());
+                }
+                return true;
+            };
+            if (Float(*edges, "step", e.step) && heights("north", e.north) && heights("south", e.south) &&
+                heights("west", e.west) && heights("east", e.east) && EdgesFit(e, m.sizeX, m.sizeZ)) {
+                m.edges = std::move(e);
+            }
+        }
         const auto levels = j.find("levels");
         if (levels == j.end() || !levels->is_array()) {
             return fail("missing levels");
@@ -306,6 +342,29 @@ namespace CityMeta
             m.levels.push_back(l);
         }
         return m;
+    }
+
+    bool EdgesFit(const CityRenderMeta::Edges& edges, const int sizeX, const int sizeZ)
+    {
+        if (!(edges.step >= 1.0f) || !std::isfinite(edges.step)) {
+            return false;
+        }
+        const auto count = [&](const int cells) {
+            return static_cast<size_t>(std::lround(cells * ViewMath::kRegionUnitMetres / edges.step)) + 1;
+        };
+        return edges.north.size() == count(sizeX) && edges.south.size() == count(sizeX) &&
+               edges.west.size() == count(sizeZ) && edges.east.size() == count(sizeZ);
+    }
+
+    bool HasSameLevel(const std::optional<CityRenderMeta>& earlier, const CityRenderMeta::Level& wanted)
+    {
+        constexpr float kMaxShift = 0.5f;  // canvas pixels
+        return earlier && std::ranges::any_of(earlier->levels, [&](const CityRenderMeta::Level& l) {
+                   return l.rotation == wanted.rotation && l.zoom == wanted.zoom && l.transport == wanted.transport &&
+                          l.tilesX == wanted.tilesX && l.tilesY == wanted.tilesY &&
+                          l.magnification == wanted.magnification && std::abs(l.originX - wanted.originX) <= kMaxShift &&
+                          std::abs(l.originY - wanted.originY) <= kMaxShift;
+               });
     }
 
     bool IsStale(const std::optional<CityRenderMeta>& meta, const int64_t saveFileTime)
@@ -505,9 +564,11 @@ bool TileStore::Initialize(const ModuleContext& ctx)
         stop_ = false;
         running_ = true;
     }
-    // WebP encoding is the slowest part of a render: one worker per spare core, at most 4.
+    // WebP encoding is the slowest part of a render: one worker per spare core, at most 8. With
+    // 4, a large city (about 3000 tiles a layer) spent most of its render waiting for them.
+    // ponytail: fixed cap, each worker needs some MB of encoder memory in a 32-bit process.
     const unsigned cores = std::thread::hardware_concurrency();
-    const int count = std::clamp(static_cast<int>(cores) - 2, 1, 4);
+    const int count = std::clamp(static_cast<int>(cores) - 2, 1, 8);
     for (int i = 0; i < count; ++i) {
         workers_.emplace_back([this] { WorkerMain(); });
     }

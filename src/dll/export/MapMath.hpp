@@ -17,6 +17,7 @@
 
 #include "region/RegionLayout.hpp"
 #include "render/NeighborMath.hpp"
+#include "store/TileStore.hpp"
 #include "view/ViewMath.hpp"
 
 namespace MapMath
@@ -69,22 +70,46 @@ namespace MapMath
         return {static_cast<int>(p.originX), static_cast<int>(p.originY)};
     }
 
-    // The ground outline of a city on the map: its four corners at groundHeight, in map pixels.
-    // place is where the city's tile (0,0) is on the map.
-    [[nodiscard]] inline std::array<cS3DVector2, 4> Outline(const ViewMath::OrthoProjection& projection,
-                                                            const CityInfo& city, const float levelOriginX,
-                                                            const float levelOriginY, const Point place,
-                                                            const float groundHeight)
+    // The ground outline of a city on the map, in map pixels. place is where the city's tile
+    // (0,0) is on the map. With edges that fit the city (CityMeta::EdgesFit) it follows the edge
+    // heights, one point per sample, so two neighbors share the line between them. Else the four
+    // corners at groundHeight. Clockwise from the corner at (0, 0): north, east, south, west.
+    [[nodiscard]] inline std::vector<cS3DVector2> Outline(const ViewMath::OrthoProjection& projection,
+                                                          const CityInfo& city, const float levelOriginX,
+                                                          const float levelOriginY, const Point place,
+                                                          const float groundHeight,
+                                                          const CityRenderMeta::Edges& edges = {})
     {
         const float sx = static_cast<float>(city.sizeX) * ViewMath::kRegionUnitMetres;
         const float sz = static_cast<float>(city.sizeZ) * ViewMath::kRegionUnitMetres;
-        const cS3DVector3 corners[4] = {
-            {0.0f, groundHeight, 0.0f}, {sx, groundHeight, 0.0f}, {sx, groundHeight, sz}, {0.0f, groundHeight, sz}};
-        std::array<cS3DVector2, 4> out;
-        for (int i = 0; i < 4; ++i) {
-            const cS3DVector2 c = projection.WorldToCanvas(corners[i]);
-            out[i] = {static_cast<float>(place.x + (static_cast<double>(c.fX) - levelOriginX)),
-                      static_cast<float>(place.y + (static_cast<double>(c.fY) - levelOriginY))};
+        std::vector<cS3DVector2> out;
+        const auto add = [&](const float x, const float y, const float z) {
+            const cS3DVector2 c = projection.WorldToCanvas(cS3DVector3(x, y, z));
+            out.push_back({static_cast<float>(place.x + (static_cast<double>(c.fX) - levelOriginX)),
+                           static_cast<float>(place.y + (static_cast<double>(c.fY) - levelOriginY))});
+        };
+        if (!CityMeta::EdgesFit(edges, city.sizeX, city.sizeZ)) {
+            add(0.0f, groundHeight, 0.0f);
+            add(sx, groundHeight, 0.0f);
+            add(sx, groundHeight, sz);
+            add(0.0f, groundHeight, sz);
+            return out;
+        }
+        // Each edge without its last sample: that is the first of the next edge.
+        const float step = edges.step;
+        const size_t nx = edges.north.size() - 1, nz = edges.west.size() - 1;
+        out.reserve(2 * (nx + nz));
+        for (size_t i = 0; i < nx; ++i) {
+            add(static_cast<float>(i) * step, edges.north[i], 0.0f);
+        }
+        for (size_t i = 0; i < nz; ++i) {
+            add(sx, edges.east[i], static_cast<float>(i) * step);
+        }
+        for (size_t i = nx; i > 0; --i) {
+            add(static_cast<float>(i) * step, edges.south[i], sz);
+        }
+        for (size_t i = nz; i > 0; --i) {
+            add(0.0f, edges.west[i], static_cast<float>(i) * step);
         }
         return out;
     }

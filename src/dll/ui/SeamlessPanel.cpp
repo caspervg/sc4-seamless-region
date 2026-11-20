@@ -219,9 +219,10 @@ void SeamlessPanel::DrawSettings_()
     changed |= ImGui::Checkbox("Show neighbors in front", &s->showFrontNeighbors);
     HelpMarker("Also draw the neighbors between the camera and your city. They can hide the edge of your city.");
     changed |= ImGui::Checkbox("Tint the neighbor under the pointer", &s->hoverTint);
-    changed |= ImGui::Checkbox("Click a neighbor to play it", &s->clickToSwitch);
+    changed |= ImGui::Checkbox("Double-click a neighbor to play it", &s->clickToSwitch);
     HelpMarker("The game saves your city first, if saving is allowed.");
     changed |= ImGui::Checkbox("Render the city after each save", &s->renderOnSave);
+    HelpMarker("A quick save (Ctrl+Alt+S) and the fast saves of SC4AutoSave do not start a render.");
     changed |= ImGui::Checkbox("Render at noon", &s->captureAtNoon);
     changed |= ImGui::Checkbox("Sun glare on water", &s->captureWaterGlare);
     HelpMarker("The game puts the glare on each city by itself. Neighbors then show hard seams on water.");

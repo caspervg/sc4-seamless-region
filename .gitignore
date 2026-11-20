@@ -25,3 +25,4 @@ __pycache__/
 *.pyo
 *.pyd
 *.iml
+tools/upload-map-r2.ps1

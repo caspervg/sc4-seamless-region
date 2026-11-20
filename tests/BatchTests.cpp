@@ -109,6 +109,9 @@ TEST_CASE(BatchJsonRoundTrip)
     BatchQueue::Fail(run, run.pending[0], "It could not be opened: \"quoted\"");
     run.state = BatchQueue::State::Cancelled;
     run.finishedAt = "later";
+    run.addTransport = true;
+    run.transport = true;
+    run.maxZoom = 3;
 
     std::string error;
     const auto back = BatchQueue::Parse(BatchQueue::ToJson(run), &error);
@@ -119,6 +122,7 @@ TEST_CASE(BatchJsonRoundTrip)
     CHECK(back->runId == run.runId);
     CHECK(back->state == BatchQueue::State::Cancelled);
     CHECK(back->force == run.force);
+    CHECK(back->addTransport && back->transport && back->maxZoom == 3);
     CHECK(back->start.key == "b" && back->start.cellX == 1);
     CHECK(!back->regionView);
     CHECK(Keys(back->pending) == Keys(run.pending));

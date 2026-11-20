@@ -4,6 +4,8 @@
 #include <cmath>
 #include <format>
 
+#include <Windows.h>
+
 #include "GZServPtrs.h"
 #include "batch/RegionBatchRenderer.hpp"
 #include "cIGZWin.h"
@@ -79,7 +81,7 @@ namespace
 {
     constexpr float kEdgeStepMetres = 16.0f;
     constexpr float kRegionCellMetres = 1024.0f;
-    constexpr uint32_t kTintColor = SC4WorldColor(0.55f, 0.80f, 1.0f, 0.38f);
+    constexpr uint32_t kTintColor = SC4WorldColor(0.55f, 0.80f, 1.0f, 0.2f);
     constexpr size_t kMeshReserve = 2048;
     constexpr const char* kConfirmPopup = "Leave this city?##SeamlessRegionConfirm";
 
@@ -208,6 +210,9 @@ void NeighborPicker::OnCityShutdown()
     }
     cityActive_ = false;
     press_ = {};
+    firstClick_ = {};
+    viewPointer_ = false;
+    viewMovesLogged_ = false;
     confirmNeighbor_ = -1;
     confirmOpenRequested_ = false;
     SetHover_(-1);
@@ -318,6 +323,13 @@ void NeighborPicker::Rebuild_()
         n.sizeX = city.sizeX;
         n.sizeZ = city.sizeZ;
         n.name = city.name;
+        n.mayor = city.mayor;
+        n.population = city.population;
+        n.commercialJobs = city.commercialJobs;
+        n.industrialJobs = city.industrialJobs;
+        n.mayorRating = city.mayorRating;
+        n.difficulty = city.difficulty;
+        n.budget = city.budget;
         n.sizeLabel = SizeLabel(std::max(city.sizeX, city.sizeZ));
         n.founded = city.founded;
         if (city.founded) {
@@ -377,19 +389,30 @@ void NeighborPicker::Tick_()
         Rebuild_();
     }
 
-    // The cursor counts only when the window under it is the city view itself, not a game
-    // panel or an ImGui window on top of it.
+    // The cursor counts when the city view itself had it last: its input control got a mouse
+    // move or button, the same events a click uses, and no ImGui window wants the mouse now.
+    // Without those events (none yet in this city), only when the window under the cursor is
+    // the city view itself. That test alone missed the city view in the game.
     cursorInView_ = false;
     cISC4View3DWin* view = GameAccess::View3D();
     cIGZWin* viewWin = view ? view->AsIGZWin() : nullptr;
     cIGZWinMgrPtr winMgr;
-    if (viewWin && winMgr && !ImGuiWantsMouse(ctx_)) {
+    const bool imguiMouse = ImGuiWantsMouse(ctx_);
+    const cIGZWin* under = nullptr;
+    if (viewWin && winMgr) {
         int32_t sx = 0, sz = 0;
         winMgr->GetCursorScreenPosition(sx, sz);
-        const cIGZWin* under = winMgr->GetWindowFromPoint(sx, sz);
+        under = winMgr->GetWindowFromPoint(sx, sz);
         windowUnderCursor_ = under == viewWin ? "the city view" : under ? "a game window" : "none";
+    }
+    if (viewPointer_ && !imguiMouse) {
+        cursorInView_ = true;
+        cursorX_ = viewX_;
+        cursorZ_ = viewZ_;
+    }
+    else if (!viewPointer_ && !imguiMouse && under && under == viewWin) {
         int32_t x = 0, z = 0;
-        if (under == viewWin && winMgr->GetCursorRelativePosition(viewWin, x, z)) {
+        if (winMgr->GetCursorRelativePosition(viewWin, x, z)) {
             cursorInView_ = true;
             cursorX_ = x;
             cursorZ_ = z;
@@ -527,6 +550,9 @@ void NeighborPicker::UpdateLayer_()
 bool NeighborPicker::OnMouseDownL(const int x, const int z)
 {
     press_ = {};
+    viewPointer_ = true;
+    viewX_ = x;
+    viewZ_ = z;
     if (ClickBlocker_() != nullptr || !ctx_.cameraReader->Update() ||
         ctx_.cameraReader->Frame().magnification != 1.0f) {
         return false;
@@ -541,6 +567,13 @@ bool NeighborPicker::OnMouseDownL(const int x, const int z)
 
 void NeighborPicker::OnMouseMove(const int x, const int z)
 {
+    viewPointer_ = true;
+    viewX_ = x;
+    viewZ_ = z;
+    if (!viewMovesLogged_) {
+        viewMovesLogged_ = true;
+        LOG_INFO("Interaction: the city view sends mouse moves (window under the pointer: {})", windowUnderCursor_);
+    }
     if (press_.active && InteractionMath::IsDrag(press_.x, press_.z, x, z)) {
         press_.dragged = true;
     }
@@ -561,11 +594,23 @@ bool NeighborPicker::OnMouseUpL(const int x, const int z)
     if (ClickBlocker_() != nullptr || press.neighbor < 0 || press.neighbor >= static_cast<int>(neighbors_.size())) {
         return true;
     }
-    Activate_(press.neighbor);
+    // A double click switches: a single click is too easy to make by accident.
+    const InteractionMath::Click click{press.neighbor, NowMs(), x, z};
+    if (InteractionMath::IsDoubleClick(firstClick_, click, GetDoubleClickTime())) {
+        firstClick_ = {};
+        Activate_(press.neighbor);
+    }
+    else {
+        firstClick_ = click;
+    }
     return true;
 }
 
-void NeighborPicker::OnMouseExit() { press_ = {}; }
+void NeighborPicker::OnMouseExit()
+{
+    press_ = {};
+    viewPointer_ = false;
+}
 
 void NeighborPicker::Activate_(const int neighbor)
 {
@@ -651,13 +696,46 @@ void NeighborPicker::DrawOverlay_()
 void NeighborPicker::DrawTooltip_(const Neighbor& n)
 {
     ImGui::BeginTooltip();
+    // As the region view shows a city: name, mayor and difficulty stars, then the mayor rating,
+    // the treasury and the residents, commercial jobs and industrial jobs in green, blue and yellow.
     ImGui::TextUnformatted(n.name.empty() ? "Unnamed city" : n.name.c_str());
-    ImGui::TextDisabled("%s", n.sizeLabel);
+    if (n.founded) {
+        if (!n.mayor.empty()) {
+            ImGui::TextUnformatted(n.mayor.c_str());
+            ImGui::SameLine();
+        }
+        static constexpr const char* kStars[] = {"*", "**", "***"};
+        ImGui::TextDisabled("%s", kStars[std::clamp(n.difficulty, 0, 2)]);
+        ImGui::TextDisabled("%s", n.sizeLabel);
+        ImGui::Separator();
+
+        ImGui::TextUnformatted("Mayor rating");
+        const float rating = static_cast<float>(std::clamp(n.mayorRating, -100, 100));
+        const float t = (rating + 100.0f) / 200.0f;
+        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(1.0f - t, 0.35f + 0.5f * t, 0.25f, 1.0f));
+        ImGui::ProgressBar(t, ImVec2(ImGui::GetFontSize() * 10.0f, ImGui::GetFontSize() * 0.6f), "");
+        ImGui::PopStyleColor();
+
+        char number[32];
+        InteractionMath::GroupedNumber(static_cast<int>(std::lround(std::clamp(n.budget, -2e9, 2e9))), number,
+                                       sizeof(number));
+        ImGui::Text("\xC2\xA7%s", number);  // the simoleon sign
+        InteractionMath::GroupedNumber(n.population, number, sizeof(number));
+        ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.4f, 1.0f), "R  %s", number);
+        InteractionMath::GroupedNumber(n.commercialJobs, number, sizeof(number));
+        ImGui::TextColored(ImVec4(0.45f, 0.65f, 1.0f, 1.0f), "C  %s", number);
+        InteractionMath::GroupedNumber(n.industrialJobs, number, sizeof(number));
+        ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "I  %s", number);
+        ImGui::Separator();
+    }
+    else {
+        ImGui::TextDisabled("%s", n.sizeLabel);
+    }
     const char* blocker = ClickBlocker_();
     if (!n.founded) {
         ImGui::TextUnformatted("Not founded");
         if (!blocker) {
-            ImGui::TextUnformatted("Click: opens the region view to found this city");
+            ImGui::TextUnformatted("Double-click: opens the region view to found this city");
         }
     }
     else {
@@ -674,7 +752,7 @@ void NeighborPicker::DrawTooltip_(const Neighbor& n)
             ImGui::TextUnformatted("No render yet");
         }
         if (!blocker) {
-            ImGui::TextUnformatted("Click to play this city");
+            ImGui::TextUnformatted("Double-click to play this city");
         }
     }
     if (blocker && blocker[0] != '\0') {
@@ -689,7 +767,7 @@ void NeighborPicker::DrawPanelSection()
     bool changed = ImGui::Checkbox("Tint the neighbor under the pointer", &settings->hoverTint);
     changed |= ImGui::Checkbox("Click a neighbor to play it", &settings->clickToSwitch);
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Click a neighbor city to save this city and open the neighbor.");
+        ImGui::SetTooltip("Double-click a neighbor city to save this city and open the neighbor.");
     }
     if (changed) {
         settings->MarkChanged();
@@ -712,6 +790,7 @@ void NeighborPicker::DrawPanelSection()
         ImGui::Text("Click control in the city view: %s", controlAdded_ ? "yes" : "no");
         ImGui::Text("Window under the pointer: %s", windowUnderCursor_);
         ImGui::Text("Pointer in the city view: %s (%d, %d)", cursorInView_ ? "yes" : "no", cursorX_, cursorZ_);
+        ImGui::Text("Mouse moves from the city view: %s", viewPointer_ ? "yes" : "no");
         ImGui::Text("Mean edge height: %.1f m", profile_.mean);
         ImGui::Text("Tint triangles: %d", static_cast<int>(mesh_.size() / 3));
         const char* blocker = ClickBlocker_();

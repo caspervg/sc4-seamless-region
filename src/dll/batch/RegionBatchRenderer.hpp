@@ -46,7 +46,9 @@ public:
     // Starts rendering the region, in a city or in the region view. force renders cities whose
     // render is up to date too. False (the panel shows why) when the city or the region is not
     // ready, a render or a switch runs, the city cannot be saved, or nothing needs a render.
-    bool Start(bool force);
+    // addTransport: the cities without the transport layer, keeping their normal levels
+    // (CaptureRequest::addTransport).
+    bool Start(bool force, bool addTransport = false);
     // Stops after the current step and goes back to the start city or the region view.
     void Cancel();
     [[nodiscard]] bool IsRunning() const;
@@ -91,6 +93,9 @@ private:
     void Log_(const std::string& line) const;
     // No render, out of date, or a level up to Settings::maxRenderZoom is missing.
     [[nodiscard]] bool NeedsRender_(const CityInfo& city) const;
+    // Adding the transport layer: no render yet, or a transport level up to the chosen zoom is
+    // missing. The save time does not count.
+    [[nodiscard]] bool NeedsTransport_(const CityInfo& city) const;
     [[nodiscard]] const CityInfo* FindByKey_(const std::string& key) const;
 
     void DrawProgress_();
@@ -132,6 +137,16 @@ private:
     // file time, because the city did not change in between (the game was paused).
     std::string restampKey_;
     std::filesystem::path restampPath_;
+    // The other cities with a render that is up to date, before the switch saves the rendered
+    // city. That save also writes the save files of its neighbors (neighbor data only), which
+    // must not make their renders out of date.
+    struct UpToDate
+    {
+        std::string key;
+        std::filesystem::path path;
+        int64_t fileTime = 0;
+    };
+    std::vector<UpToDate> restampOthers_;
 
     // City times for the ETA.
     double secondsSum_ = 0.0;
@@ -146,6 +161,7 @@ private:
     std::optional<BatchQueue::Run> lastRun_;  // from batch.json, for the summary and the offer
     bool offerResume_ = false;
     bool confirmForce_ = false;
+    bool confirmAddTransport_ = false;
     bool confirmRegionView_ = false;  // the popup opened in the region view
     int confirmCount_ = 0;
     std::string message_;

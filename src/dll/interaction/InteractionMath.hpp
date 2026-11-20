@@ -143,6 +143,45 @@ namespace InteractionMath
 // either axis is a drag, not a click.
     constexpr int kDragPixels = 4;
 
+// A click on a neighbor that did not switch yet.
+    struct Click
+    {
+        int neighbor = -1;
+        uint64_t timeMs = 0;
+        int x = 0, z = 0;
+    };
+
+// The second click of a double click: the same neighbor, within the Windows double-click time,
+// and not a drag away from the first.
+    [[nodiscard]] inline bool IsDoubleClick(const Click& first, const Click& second, const uint32_t maxMs)
+    {
+        return first.neighbor >= 0 && first.neighbor == second.neighbor && second.timeMs >= first.timeMs &&
+               second.timeMs - first.timeMs <= maxMs && std::abs(second.x - first.x) < kDragPixels &&
+               std::abs(second.z - first.z) < kDragPixels;
+    }
+
+// 1234567 -> "1,234,567", as the region view writes numbers.
+    inline void GroupedNumber(const int value, char* out, const size_t size)
+    {
+        char digits[16];
+        const int n = std::snprintf(digits, sizeof(digits), "%d", value < 0 ? -value : value);
+        size_t at = 0;
+        if (value < 0 && at + 1 < size) {
+            out[at++] = '-';
+        }
+        for (int i = 0; i < n && at + 1 < size; ++i) {
+            if (i > 0 && (n - i) % 3 == 0 && at + 1 < size) {
+                out[at++] = ',';
+            }
+            if (at + 1 < size) {
+                out[at++] = digits[i];
+            }
+        }
+        if (size > 0) {
+            out[at] = '\0';
+        }
+    }
+
     [[nodiscard]] inline bool IsDrag(const int x0, const int z0, const int x1, const int z1)
     {
         return std::abs(x1 - x0) >= kDragPixels || std::abs(z1 - z0) >= kDragPixels;

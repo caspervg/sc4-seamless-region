@@ -21,6 +21,14 @@ struct CityInfo
     std::string key;                 // stable cache key: save file stem, sanitized
     bool founded = false;
     bool isCurrent = false;
+    // From the region, as the region view shows them. 0 or empty for an unfounded city.
+    std::string mayor;  // UTF-8
+    int population = 0;
+    int commercialJobs = 0;
+    int industrialJobs = 0;
+    int mayorRating = 0;  // -100 (worst) to 100 (best)
+    int difficulty = 0;   // cISC4City::DifficultyLevel: 0 easy, 1 medium, 2 hard
+    double budget = 0.0;  // the treasury, in simoleons
 };
 
 namespace RegionLayout

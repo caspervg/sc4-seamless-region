@@ -147,6 +147,7 @@ void NeighborRenderer::OnCityInit()
 {
     cityActive_ = true;
     dirty_.Clear();
+    ready_.clear();
     Rebuild_();
 }
 
@@ -154,6 +155,7 @@ void NeighborRenderer::OnCityShutdown()
 {
     cityActive_ = false;
     dirty_.Clear();
+    ready_.clear();
     neighbors_.clear();
     for (int r = 0; r < 4; ++r) {
         back_[r].clear();
@@ -168,6 +170,7 @@ void NeighborRenderer::SetEnabled(const bool enabled)
     }
     enabled_ = enabled;
     dirty_.Clear();
+    ready_.clear();
     RequestFullRedraw_();
     LOG_INFO("Neighbors: drawing {}", enabled ? "on" : "off");
 }
@@ -179,6 +182,7 @@ void NeighborRenderer::InvalidateAll()
     }
     ctx_.tileCache->Clear();
     dirty_.Clear();
+    ready_.clear();
     if (cityActive_) {
         Rebuild_();
         RequestFullRedraw_();
@@ -334,6 +338,7 @@ void NeighborRenderer::Tick_()
     }
     if (redraw) {
         dirty_.Clear();
+    ready_.clear();
         RequestFullRedraw_();
         return;
     }
@@ -342,10 +347,14 @@ void NeighborRenderer::Tick_()
 
 void NeighborRenderer::OnTileReady_(const TileKey& key)
 {
-    if (!ShouldDraw_() || !ctx_.cameraReader->Update()) {
-        return;
-    }
-    const CameraFrame& frame = ctx_.cameraReader->Frame();
+    // Only noted here: the screen rectangle comes from the camera at PreDynamic (FlushDirty_).
+    // While the view scrolls, a rectangle from the camera of now would be one scroll step off,
+    // and the strip it misses stays empty until the view changes again.
+    ready_.push_back(key);
+}
+
+void NeighborRenderer::MarkReadyTile_(const TileKey& key, const CameraFrame& frame)
+{
     if (key.rotation != frame.rotation) {
         return;
     }
@@ -368,6 +377,14 @@ void NeighborRenderer::OnTileReady_(const TileKey& key)
 
 void NeighborRenderer::FlushDirty_()
 {
+    if (!ready_.empty()) {
+        if (ShouldDraw_() && ctx_.cameraReader->Update()) {
+            for (const TileKey& key : ready_) {
+                MarkReadyTile_(key, ctx_.cameraReader->Frame());
+            }
+        }
+        ready_.clear();
+    }
     if (dirty_.Empty()) {
         return;
     }
@@ -387,6 +404,7 @@ void NeighborRenderer::FlushDirty_()
         }
     }
     dirty_.Clear();
+    ready_.clear();
 }
 
 void NeighborRenderer::BeginState_(const SC4DrawContextHandle context, const bool front, const bool linear,

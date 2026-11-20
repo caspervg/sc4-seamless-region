@@ -801,6 +801,47 @@ TEST_CASE(MetaTransportLayerRoundTrip)
     CHECK(merged.size() == 1 && !merged[0].transport);
 }
 
+// Adding the transport layer keeps a level only on the same grid.
+TEST_CASE(MetaHasSameLevel)
+{
+    const std::optional<CityRenderMeta> meta = SampleMeta();
+    CityRenderMeta::Level wanted{0, 1, -1024.2f, 300.5f, 6, 4};
+    CHECK(CityMeta::HasSameLevel(meta, wanted));
+    wanted.originX = -1025.0f;  // the grid moved
+    CHECK(!CityMeta::HasSameLevel(meta, wanted));
+    wanted.originX = -1024.0f;
+    wanted.tilesY = 5;
+    CHECK(!CityMeta::HasSameLevel(meta, wanted));
+    wanted.tilesY = 4;
+    wanted.transport = true;  // only the normal level is there
+    CHECK(!CityMeta::HasSameLevel(meta, wanted));
+    wanted.transport = false;
+    wanted.rotation = 1;
+    CHECK(!CityMeta::HasSameLevel(meta, wanted));
+    CHECK(!CityMeta::HasSameLevel(std::nullopt, {0, 1, -1024.0f, 300.5f, 6, 4}));
+}
+
+// Edge heights are optional, and only kept when the counts fit the city size.
+TEST_CASE(MetaEdgesRoundTrip)
+{
+    CityRenderMeta meta = SampleMeta();  // 2 x 2 cells: 2048 m
+    CHECK(CityMeta::Parse(CityMeta::ToJson(meta))->edges.step == 0.0f);
+    meta.edges.step = 512.0f;
+    meta.edges.north = {1.0f, 2.04f, 3.0f, 4.0f, 5.0f};
+    meta.edges.south = meta.edges.west = meta.edges.east = {6.0f, 7.0f, 8.0f, 9.0f, 10.0f};
+    CHECK(CityMeta::EdgesFit(meta.edges, 2, 2));
+    CHECK(!CityMeta::EdgesFit(meta.edges, 1, 2));
+    const auto back = CityMeta::Parse(CityMeta::ToJson(meta));
+    CHECK(back && back->edges.step == 512.0f && back->edges.north.size() == 5);
+    if (back && back->edges.north.size() == 5) {
+        CHECK_NEAR(back->edges.north[1], 2.0, 1e-4);
+        CHECK(back->edges.east == meta.edges.east);
+    }
+    meta.edges.west.pop_back();  // does not fit: left out, the rest of the file is fine
+    const auto bad = CityMeta::Parse(CityMeta::ToJson(meta));
+    CHECK(bad && bad->edges.step == 0.0f && bad->levels.size() == 2);
+}
+
 // Transport tiles live in t<rot>z<zoom>/, apart from the normal tiles of the same level.
 TEST_CASE(StoreTransportLayerFolders)
 {

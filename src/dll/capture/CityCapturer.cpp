@@ -23,6 +23,8 @@
 #include "cISC4ViewManager.h"
 #include "cISTETerrain.h"
 #include "cISTETerrainView.h"
+#include "cIGZMessage2Standard.h"
+#include "public/cIGZWorldDrawService.h"
 #include "capture/CameraAdapter.hpp"
 #include "capture/CaptureAddresses.hpp"
 #include "capture/ModelLoadMonitor.hpp"
@@ -65,6 +67,8 @@ namespace
     // Room above the terrain for trees, and above the tallest occupant for parts of models
     // outside their bounding box.
     constexpr float kMinHeadroomMetres = 40.0f;
+    // Samples along the city edges for the region map outline: every 4 cells.
+    constexpr float kEdgeStepMetres = 64.0f;
     constexpr float kOccupantTopMarginMetres = 10.0f;
     constexpr uint32_t kFloraOccupantType = 0x74758926u;
     // Work per idle tick while steps make progress. The window repaints between ticks.
@@ -191,7 +195,12 @@ bool CityCapturer::Initialize(const ModuleContext& ctx)
     }
     if (ctx_.messages) {
         preSaveToken_ = ctx_.messages->Subscribe(Messages::kPreSave, [this](cIGZMessage2*) { OnSaveBegin_(); });
-        saveToken_ = ctx_.messages->Subscribe(Messages::kPostSave, [this](cIGZMessage2*) { OnSaved_(); });
+        saveToken_ = ctx_.messages->Subscribe(Messages::kPostSave, [this](cIGZMessage2* message) {
+            // Data4 of the save messages is the fast save flag of cSC4App::SaveCity: the quick
+            // save (Ctrl+Alt+S) and SC4AutoSave with FastSave=true. Those skip the region
+            // picture on purpose, so they get no render either.
+            OnSaved_(message && static_cast<cIGZMessage2Standard*>(message)->GetData4() != 0);
+        });
     }
     return true;
 }
@@ -334,7 +343,8 @@ bool CityCapturer::Begin_(const bool testTile, const CaptureRequest& request)
     tileSize_ = CityRenderMeta().tileSize;
 
     testTile_ = testTile;
-    transport_ = !testTile && ctx_.settings && ctx_.settings->captureTransportLayer;
+    transport_ = !testTile && ((ctx_.settings && ctx_.settings->captureTransportLayer) || request.transport ||
+                               request.addTransport);
     levels_.clear();
     if (testTile) {
         Level level;
@@ -370,7 +380,11 @@ bool CityCapturer::Begin_(const bool testTile, const CaptureRequest& request)
         largestGrid = std::max(largestGrid, static_cast<size_t>(level.grid.tilesX) * level.grid.tilesY);
     }
     if (levels_.empty() || total == 0) {
-        return refuse("There is no zoom or rotation to render.");
+        return refuse(request.addTransport ? "Every zoom and rotation has its transport layer already."
+                                           : "There is no zoom or rotation to render.");
+    }
+    if (!testTile) {
+        SampleEdges_(edges_);
     }
 
     // The block buffers and the read buffer grow on the first block (and when the window
@@ -416,9 +430,10 @@ bool CityCapturer::Begin_(const bool testTile, const CaptureRequest& request)
                  levels_[0].zoom + 1, testTx_, testTy_);
     }
     else {
-        LOG_INFO("Capture: started for city '{}', {} levels up to zoom {}{}, at most {} tiles of {} px, heights "
-                 "{:.0f} to {:.0f} m",
-                 cityKey_, levels_.size(), maxZoom_ + 1, transport_ ? " with the transport layer" : "", total,
+        const auto kept = std::ranges::count_if(levels_, [](const Level& l) { return l.kept; });
+        LOG_INFO("Capture: started for city '{}', {} levels up to zoom {}{} ({} kept from the earlier render), at "
+                 "most {} tiles of {} px, heights {:.0f} to {:.0f} m",
+                 cityKey_, levels_.size(), maxZoom_ + 1, transport_ ? " with the transport layer" : "", kept, total,
                  tileSize_, minHeight_, maxHeight_);
     }
     return true;
@@ -428,6 +443,15 @@ void CityCapturer::BuildLevels_(const CaptureRequest& request)
 {
     maxZoom_ = request.maxZoom >= 0 ? request.maxZoom : ctx_.settings ? ctx_.settings->MaxRenderZoomIndex() : 3;
     maxZoom_ = std::clamp(maxZoom_, Settings::kMinRenderZoom - 1, Settings::kMaxRenderZoom - 1);
+    // Adding the transport layer: the normal levels of the earlier render stay where the grid is
+    // the same. Another tile size means another grid, so nothing is kept.
+    std::optional<CityRenderMeta> earlier;
+    if (request.addTransport) {
+        earlier = ctx_.tileStore->LoadMeta(cityKey_);
+        if (earlier && earlier->tileSize != tileSize_) {
+            earlier.reset();
+        }
+    }
     for (const auto& [r, z] : CaptureMath::LevelOrder(maxZoom_, request.rotations)) {
         Level level;
         level.rotation = r;
@@ -439,6 +463,28 @@ void CityCapturer::BuildLevels_(const CaptureRequest& request)
         for (int ty = 0; ty < level.grid.tilesY; ++ty) {
             for (int tx = 0; tx < level.grid.tilesX; ++tx) {
                 level.tiles += TileTouchesCity_(level, tx, ty) ? 1 : 0;
+            }
+        }
+        if (transport_ && earlier) {
+            CityRenderMeta::Level wanted;
+            wanted.rotation = r;
+            wanted.zoom = z;
+            wanted.originX = level.grid.originCanvas.fX;
+            wanted.originY = level.grid.originCanvas.fY;
+            wanted.tilesX = level.grid.tilesX;
+            wanted.tilesY = level.grid.tilesY;
+            if (CityMeta::HasSameLevel(earlier, wanted)) {
+                wanted.transport = true;
+                if (CityMeta::HasSameLevel(earlier, wanted)) {
+                    continue;  // both layers are there
+                }
+                Level kept = level;
+                kept.kept = true;
+                kept.tiles = 0;
+                levels_.push_back(kept);
+                level.transport = true;
+                levels_.push_back(level);
+                continue;
             }
         }
         levels_.push_back(level);
@@ -522,6 +568,13 @@ bool CityCapturer::Step_()
             return false;
         }
         ResumeAfterSave_();
+        // The model maker clears its synchronous flag at every post-save, also for a save inside
+        // the render (an autosave). Without it, every later level waited the full level timeout.
+        if (saved_.synchronousModels && !saveInsideRender_ && ctx_.modelLoadMonitor &&
+            !ctx_.modelLoadMonitor->IsSynchronous()) {
+            ctx_.modelLoadMonitor->SetSynchronous(true);
+            LOG_INFO("Capture: models load at once again after the save");
+        }
         bool more = false;
         switch (phase_) {
         case Phase::Prepare: more = StepPrepare_(); break;
@@ -726,6 +779,21 @@ bool CityCapturer::StepLevelBegin_()
 {
     if (levelIndex_ >= levels_.size()) {
         phase_ = Phase::Finish;
+        return true;
+    }
+    if (levels_[levelIndex_].kept) {
+        // The tiles of the earlier render stay. Its transport level draws where they are.
+        const Level& kept = levels_[levelIndex_];
+        drawn_.assign(static_cast<size_t>(kept.grid.tilesX) * kept.grid.tilesY, 0);
+        for (int ty = 0; ty < kept.grid.tilesY; ++ty) {
+            for (int tx = 0; tx < kept.grid.tilesX; ++tx) {
+                drawn_[static_cast<size_t>(ty) * kept.grid.tilesX + tx] =
+                    ctx_.tileStore->HasTile({cityKey_, kept.rotation, kept.zoom, tx, ty, false}) ? 1 : 0;
+            }
+        }
+        drawnLevel_ = levelIndex_;
+        LOG_INFO("Capture: rotation {} zoom {}: the tiles of the earlier render stay", kept.rotation, kept.zoom + 1);
+        NextLevel_();
         return true;
     }
     Game game;
@@ -1146,6 +1214,48 @@ bool CityCapturer::StepFinish_()
 // an earlier render that this run has not started yet. A level that is being rendered is left
 // out. So a render that is cancelled or fails keeps every complete level and never leaves
 // tiles of two renders under one level.
+void CityCapturer::SampleEdges_(CityRenderMeta::Edges& edges) const
+{
+    edges = CityRenderMeta::Edges();
+    cISC4City* city = GameAccess::City();
+    cISTETerrain* terrain = city ? city->GetTerrain() : nullptr;
+    if (!ctx_.worldDraw || !terrain) {
+        return;
+    }
+    const float sea = terrain->GetSeaLevel();
+    // Just inside the edge: GetTerrainHeight is false outside the city. The neighbor samples the
+    // same line from its side, so the outlines of both meet on the map.
+    constexpr float kInside = 0.01f;
+    bool ok = std::isfinite(sea);
+    auto sample = [&](const float x, const float z) {
+        float h = 0.0f;
+        if (!ctx_.worldDraw->GetTerrainHeight(std::clamp(x, kInside, citySizeX_ - kInside),
+                                              std::clamp(z, kInside, citySizeZ_ - kInside), h) ||
+            !std::isfinite(h)) {
+            ok = false;
+        }
+        return std::max(h, sea);
+    };
+    edges.step = kEdgeStepMetres;
+    const auto countX = static_cast<size_t>(std::lround(sizeX_ * ViewMath::kRegionUnitMetres / kEdgeStepMetres)) + 1;
+    const auto countZ = static_cast<size_t>(std::lround(sizeZ_ * ViewMath::kRegionUnitMetres / kEdgeStepMetres)) + 1;
+    for (size_t i = 0; i < countX && ok; ++i) {
+        const float t = static_cast<float>(i) * kEdgeStepMetres;
+        edges.north.push_back(sample(t, 0.0f));
+        edges.south.push_back(sample(t, citySizeZ_));
+    }
+    for (size_t i = 0; i < countZ && ok; ++i) {
+        const float t = static_cast<float>(i) * kEdgeStepMetres;
+        edges.west.push_back(sample(0.0f, t));
+        edges.east.push_back(sample(citySizeX_, t));
+    }
+    if (!ok || !CityMeta::EdgesFit(edges, sizeX_, sizeZ_)) {
+        LOG_WARN("Capture: the terrain heights along the city edges are not available. The region map outline "
+                 "of this city is flat.");
+        edges = CityRenderMeta::Edges();
+    }
+}
+
 bool CityCapturer::WriteMeta_(const bool final)
 {
     // Tiles first, then meta.json: a meta.json on disk means the tiles it names are there.
@@ -1158,6 +1268,7 @@ bool CityCapturer::WriteMeta_(const bool final)
     meta.sizeZ = sizeZ_;
     meta.tileSize = tileSize_;
     meta.groundHeight = 0.5f * (minHeight_ + terrainHigh_);  // terrain middle
+    meta.edges = edges_;
     const std::optional<CityRenderMeta> earlier = ctx_.tileStore->LoadMeta(cityKey_);
     const bool usable = earlier && earlier->tileSize == meta.tileSize && earlier->formatVersion == meta.formatVersion;
 
@@ -1627,9 +1738,12 @@ void CityCapturer::ResumeAfterSave_()
     }
 }
 
-void CityCapturer::OnSaved_()
+void CityCapturer::OnSaved_(const bool fastSave)
 {
     ResumeAfterSave_();
+    if (fastSave) {
+        return;
+    }
     // Inside the save message: only note it. The render starts some idle ticks later, when
     // the save is over. A save that is part of leaving the city (a switch, the region view, a
     // quit) is followed by OnCityShutdown, which drops the note. So only the city that was
