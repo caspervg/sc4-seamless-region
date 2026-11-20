@@ -10,6 +10,10 @@
 // into <RegionRenders>/map.tmp, which replaces <RegionRenders>/map only at the end. When the
 // cities have transport levels at the source zoom, the same is done again from them into
 // tiles-transport/, on the same canvas.
+//
+// Mosaic mode makes the same canvas, halves it only down to the zoom that fits
+// mosaicMaxPixels, stitches that level into <RegionRenders>/mosaic.png (WIC, one tile row at a
+// time) and removes map.tmp. The map folder is not touched.
 
 #include <array>
 #include <atomic>
@@ -29,8 +33,17 @@ namespace MapExport
     // A map with more files than this gets a warning in the panel, the log and the tool.
     inline constexpr int64_t kLargeMapBytes = 1024ll * 1024 * 1024;
 
+    enum class Mode : int
+    {
+        Map,     // the interactive map: map/index.html and its tile pyramid
+        Mosaic,  // one picture of the whole region: mosaic.png, normal view only
+    };
+
     struct Request
     {
+        Mode mode = Mode::Map;
+        // Mosaic: the largest map zoom whose longest side is at most this many pixels.
+        int mosaicMaxPixels = 16384;
         std::filesystem::path rendersDir;  // <Region>/RegionRenders
         std::string regionName;            // UTF-8
         std::string dateText;              // shown in the page
@@ -88,6 +101,7 @@ namespace MapExport
         int64_t cityTilesDecoded = 0;  // decodes of city tiles, cache misses included
         uint64_t bytesWritten = 0;
         std::filesystem::path indexHtml;  // map/index.html after a good export
+        std::filesystem::path mosaic;     // mosaic.png after a good mosaic export
     };
 
     [[nodiscard]] Result Run(const Request& request, Progress& progress, const std::atomic<int>& stop);

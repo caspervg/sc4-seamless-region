@@ -74,6 +74,13 @@ void HtmlMapExporter::Stop_(const MapExport::StopRequest how)
     running_ = false;
 }
 
+namespace
+{
+    // Longest side of a mosaic. The PNG is written one row of tiles at a time: 16384 px takes
+    // 16 MB of the export's memory cap.
+    constexpr int kMosaicSizes[] = {4096, 8192, 16384};
+}
+
 void HtmlMapExporter::Collect_()
 {
     if (running_.load(std::memory_order_acquire) || !worker_.joinable()) {
@@ -81,7 +88,10 @@ void HtmlMapExporter::Collect_()
     }
     worker_.join();
     message_ = result_.message;
-    if (result_.ok) {
+    if (result_.ok && !result_.mosaic.empty()) {
+        mosaicPng_ = result_.mosaic;
+    }
+    else if (result_.ok) {
         indexHtml_ = result_.indexHtml;
     }
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started_).count();
@@ -124,6 +134,8 @@ bool HtmlMapExporter::Start()
     request.cacheBytes = static_cast<size_t>(ctx_.settings->mapCacheMB) * 1024 * 1024;
     request.upscaleLevels = ctx_.settings->mapUpscaleLevels;
     request.transport = transport_;
+    request.mode = mosaic_ ? MapExport::Mode::Mosaic : MapExport::Mode::Map;
+    request.mosaicMaxPixels = kMosaicSizes[mosaicSize_];
 
     stop_ = MapExport::kRun;
     progress_.phase = static_cast<int>(MapExport::Phase::Reading);
@@ -225,8 +237,26 @@ void HtmlMapExporter::DrawPanelSection()
         return;
     }
 
-    ImGui::TextWrapped("Make one map of the whole region. You open it in a web browser. It uses the renders of "
-                       "the cities at one zoom.");
+    ImGui::TextWrapped("Make one map of the whole region from the renders of the cities at one zoom: a map you "
+                       "open in a web browser, or one picture (mosaic).");
+    int mode = mosaic_ ? 1 : 0;
+    ImGui::RadioButton("Interactive map", &mode, 0);
+    ImGui::SameLine();
+    ImGui::RadioButton("Mosaic picture", &mode, 1);
+    mosaic_ = mode == 1;
+    if (mosaic_) {
+        static constexpr const char* kSizes[] = {"4096 px", "8192 px", "16384 px"};
+        ImGui::SetNextItemWidth(120.0f);
+        ImGui::Combo("Largest side", &mosaicSize_, kSizes, IM_ARRAYSIZE(kSizes));
+        if (ImGui::BeginItemTooltip()) {
+            ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+            ImGui::TextUnformatted("The picture is the map at the largest size whose longest side fits this, saved "
+                                   "as mosaic.png in the RegionRenders folder. Only the normal view, no transport "
+                                   "view. For a bigger picture use SC4RegionMap.exe --mosaic.");
+            ImGui::PopTextWrapPos();
+            ImGui::EndTooltip();
+        }
+    }
     static constexpr const char* kRotations[] = {"1", "2", "3", "4"};
     ImGui::SetNextItemWidth(80.0f);
     ImGui::Combo("Rotation", &rotation_, kRotations, IM_ARRAYSIZE(kRotations));
@@ -264,7 +294,7 @@ void HtmlMapExporter::DrawPanelSection()
 
     const char* why = WhyNotStart_();
     ImGui::BeginDisabled(why != nullptr);
-    if (ImGui::Button("Make the region map")) {
+    if (ImGui::Button(mosaic_ ? "Make the mosaic" : "Make the region map")) {
         Start();
     }
     ImGui::EndDisabled();
@@ -284,6 +314,14 @@ void HtmlMapExporter::DrawPanelSection()
         if (ImGui::BeginItemTooltip()) {
             ImGui::TextUnformatted("Opens the map in your web browser. The map needs an internet connection.");
             ImGui::EndTooltip();
+        }
+    }
+    if (!mosaicPng_.empty()) {
+        if (!indexHtml_.empty()) {
+            ImGui::SameLine();
+        }
+        if (ImGui::Button("Open mosaic")) {
+            ShellExecuteW(nullptr, L"open", mosaicPng_.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         }
     }
 }
