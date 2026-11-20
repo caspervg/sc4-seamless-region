@@ -17,6 +17,7 @@
 #include "cISTETerrain.h"
 #include "cSC4BaseViewInputControl.h"
 #include "capture/CityCapturer.hpp"
+#include "core/GameAddresses.hpp"
 #include "core/Guard.hpp"
 #include "imgui.h"
 #include "interaction/InteractionAddresses.hpp"
@@ -454,14 +455,15 @@ int NeighborPicker::Pick_(const int x, const int z)
     // The centre of the pixel under the cursor.
     const cS3DVector2 screen{static_cast<float>(x) + 0.5f, static_cast<float>(z) + 0.5f};
     const CameraReader& reader = *ctx_.cameraReader;
-    const cS3DVector3 ground = InteractionMath::PickGround(
+    pickGround_ = InteractionMath::PickGround(
         [&](const float h) {
             cS3DVector3 p;
             reader.ScreenToGround(screen, h, p);
             return p;
         },
         profile_);
-    const CityInfo* city = InteractionMath::NeighborAt(ctx_.region->Cities(), *current, ground.fX, ground.fZ);
+    const CityInfo* city =
+        InteractionMath::NeighborAt(ctx_.region->Cities(), *current, pickGround_.fX, pickGround_.fZ);
     if (!city) {
         return -1;
     }
@@ -561,7 +563,7 @@ bool NeighborPicker::OnMouseDownL(const int x, const int z)
     if (neighbor < 0) {
         return false;
     }
-    press_ = {true, x, z, neighbor, false};
+    press_ = {true, x, z, neighbor, false, pickGround_};
     return true;
 }
 
@@ -598,7 +600,7 @@ bool NeighborPicker::OnMouseUpL(const int x, const int z)
     const InteractionMath::Click click{press.neighbor, NowMs(), x, z};
     if (InteractionMath::IsDoubleClick(firstClick_, click, GetDoubleClickTime())) {
         firstClick_ = {};
-        Activate_(press.neighbor);
+        Activate_(press.neighbor, press.ground);
     }
     else {
         firstClick_ = click;
@@ -612,9 +614,15 @@ void NeighborPicker::OnMouseExit()
     viewPointer_ = false;
 }
 
-void NeighborPicker::Activate_(const int neighbor)
+void NeighborPicker::Activate_(const int neighbor, const cS3DVector3& ground)
 {
     const Neighbor& n = neighbors_[neighbor];
+    // The camera of the new city opens where the player clicked.
+    if (const CityInfo* current = ctx_.region->Current()) {
+        constexpr float kUnit = GameAddresses::Region::kGridUnitMetres;
+        arrival_ = {ground.fX + static_cast<float>(current->cellX - n.cellX) * kUnit,
+                    ground.fZ + static_cast<float>(current->cellZ - n.cellZ) * kUnit};
+    }
     LOG_INFO("Interaction: click on '{}' at cell ({}, {})", n.name, n.cellX, n.cellZ);
     if (!ctx_.switcher->CanSaveCurrentCity()) {
         if (overlayRegistered_) {
@@ -629,7 +637,7 @@ void NeighborPicker::Activate_(const int neighbor)
         }
         return;
     }
-    if (ctx_.switcher->RequestSwitch(n.cellX, n.cellZ)) {
+    if (ctx_.switcher->RequestSwitch(n.cellX, n.cellZ, false, &arrival_)) {
         lastClick_ = std::format("Switching to {}.", n.name);
         LOG_INFO("Interaction: switch to '{}' requested", n.name);
     }
@@ -664,7 +672,7 @@ void NeighborPicker::DrawOverlay_()
             ImGui::Text("You go to %s.", n.name.empty() ? "an unnamed city" : n.name.c_str());
             ImGui::Spacing();
             if (ImGui::Button("Leave without saving")) {
-                if (ctx_.switcher->RequestSwitch(n.cellX, n.cellZ, true)) {
+                if (ctx_.switcher->RequestSwitch(n.cellX, n.cellZ, true, &arrival_)) {
                     lastClick_ = std::format("Switching to {} without saving.", n.name);
                     LOG_INFO("Interaction: switch to '{}' without saving requested", n.name);
                 }

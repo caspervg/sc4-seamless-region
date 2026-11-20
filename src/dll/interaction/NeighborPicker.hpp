@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 
+#include "cS3DVector2.h"
 #include "core/GameAccess.hpp"
 #include "interaction/InteractionMath.hpp"
 #include "public/cIGZDrawService.h"
@@ -73,6 +74,7 @@ private:
         int x = 0, z = 0;
         int neighbor = -1;
         bool dragged = false;
+        cS3DVector3 ground;  // the picked ground point, current city metres
     };
 
     static void PassCallback_(DrawServicePass pass, bool begin, void* userData);
@@ -88,7 +90,7 @@ private:
     [[nodiscard]] int Pick_(int x, int z);
     void SetHover_(int neighbor);
     void UpdateLayer_();
-    void Activate_(int neighbor);
+    void Activate_(int neighbor, const cS3DVector3& ground);
     void DrawOverlay_();
     void DrawTooltip_(const Neighbor& n);
 
@@ -126,8 +128,10 @@ private:
     std::vector<SC4WorldVertex> mesh_;
 
     Press press_;
+    cS3DVector3 pickGround_;  // set by Pick_
     // Confirm popup for a city that cannot be saved.
     int confirmNeighbor_ = -1;
+    cS3DVector2 arrival_;  // the clicked point (x, z) in the target city's metres
     bool confirmOpenRequested_ = false;
 
     // Panel.

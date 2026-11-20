@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <string>
 
+#include "cS3DVector2.h"
 #include "core/GameAccess.hpp"
 #include "switching/NeighborDirection.hpp"
 
@@ -41,7 +42,9 @@ public:
     // LastError) when a switch is already running, no city is open, no city covers the cell,
     // the cell is the current city, or the current city cannot be saved and allowWithoutSave
     // is false. Ask CanSaveCurrentCity first and confirm with the player before passing true.
-    bool RequestSwitch(int cellX, int cellZ, bool allowWithoutSave = false);
+    // arrival: a ground point (x, z) in metres of the target city. The camera of the new city
+    // then looks at it, on the first idle tick after its OnCityInit.
+    bool RequestSwitch(int cellX, int cellZ, bool allowWithoutSave = false, const cS3DVector2* arrival = nullptr);
     // Queues opening the city that covers the region cell from the region view: the steps of a
     // switch after CloseCity (no save, no close, there is no city). Returns false (and sets
     // LastError) when a switch runs, a city is open, or no founded city covers the cell.
@@ -84,6 +87,8 @@ private:
     int targetZ_ = 0;
     std::string targetName_;
     bool allowWithoutSave_ = false;
+    bool hasArrival_ = false;
+    cS3DVector2 arrival_;  // target city metres, (x, z)
     std::string lastError_;
 
     // Panel: the switch that waits for the "switch without saving" confirmation.
