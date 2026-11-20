@@ -88,7 +88,13 @@ Not started. Considered on 2026-11-19:
    capture, make pixels on the ground outline of the city opaque (`CaptureMath::CityOutline`),
    so each city overlaps its neighbor by at most one pixel. Not for building silhouettes.
 2. **Cracks where terrain does not meet.** When two cities have different heights at their
-   shared edge, the render shows a dark gap (the edge walls are hidden). The game's
+   shared edge, the render showed a dark gap (the edge walls were hidden). Now the capture keeps
+   the two front walls (`CameraBounds::BackEdges`, setting `CaptureEdgeWalls`, on by
+   default), so the gap shows the back city's cliff. Not
+   checked in game: render two neighbors with a height step, look at the seam on the map and in
+   game. Still open: in game, the live city hides its own front walls toward a rendered
+   neighbor (automatic choice), so a gap can show there. Optional later: a gradient fill over the
+   cliff on the map export ("Blend city seams"). The game's
    "Reconcile Edges" tool fixes the data. Options: leave it, fill small holes on the map
    export only, or draw the edge cliff where the neighbor is lower.
 3. **Blue band and lake bed below the city edge.** With the edge walls hidden, the area below

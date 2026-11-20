@@ -25,6 +25,7 @@
 #include "cISTETerrainView.h"
 #include "cIGZMessage2Standard.h"
 #include "public/cIGZWorldDrawService.h"
+#include "camera/CameraBounds.hpp"
 #include "capture/CameraAdapter.hpp"
 #include "capture/CaptureAddresses.hpp"
 #include "capture/ModelLoadMonitor.hpp"
@@ -57,7 +58,6 @@ namespace
     // never trusts these numbers: it reads both colors back from the screen (calibration).
     constexpr uint32_t kKeyColorA = 0xFF00FFFFu;  // magenta
     constexpr uint32_t kKeyColorB = 0x00FF00FFu;  // green
-    constexpr uint32_t kAllEdges = 0xF;
 
     // Room above the highest terrain for buildings. The tallest lots of the game and of
     // custom content stay below this. A larger value only adds tiles that are found empty
@@ -203,6 +203,14 @@ namespace
     // the scene. Those would land in the tiles, differ per driver and user, and a color effect
     // (bloom, vignette) breaks the key color matting. sc4-render-services hooks call sites
     // inside Draw, so its passes still run.
+    // The walls a render hides. With Settings::captureEdgeWalls the front walls stay: where the
+    // neighbor in front is lower, its tile shows this cliff instead of the background. The
+    // neighbor covers it where it is higher.
+    uint32_t HiddenWalls(const Settings* settings, const int rotation)
+    {
+        return settings && !settings->captureEdgeWalls ? CameraBounds::kAllEdges : CameraBounds::BackEdges(rotation);
+    }
+
     void DrawScene(cISC43DRender* renderer)
     {
         using Fn = bool(__thiscall*)(cISC43DRender*);
@@ -677,7 +685,7 @@ bool CityCapturer::StepPrepare_()
         saved_.clampForced = true;
     }
     if (ctx_.cameraExtender) {
-        saved_.wallMaskBefore = CameraAdapter::SetEdgeWallsHidden(ctx_.cameraExtender, kAllEdges);
+        saved_.wallMaskBefore = CameraAdapter::SetEdgeWallsHidden(ctx_.cameraExtender, HiddenWalls(ctx_.settings, frame.rotation));
         saved_.wallsHidden = true;
     }
 
@@ -887,6 +895,9 @@ bool CityCapturer::StepLevelBegin_()
         progress_.total -= level.tiles;
         NextLevel_();
         return true;
+    }
+    if (saved_.wallsHidden) {
+        CameraAdapter::SetEdgeWallsHidden(ctx_.cameraExtender, HiddenWalls(ctx_.settings, level.rotation));
     }
     if (level.transport && !saved_.transportPushed && !PushTransport_()) {
         if (phase_ == Phase::Idle) {

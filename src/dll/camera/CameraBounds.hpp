@@ -20,6 +20,15 @@ namespace CameraBounds
     constexpr uint32_t kEdgeZMax = 1u << 3;  // z = city size, the south edge
     constexpr uint32_t kAllEdges = 0xF;
 
+    // The two edges that face away from the camera in a rotation: the ones through
+    // ViewMath::BaseCorner. The game draws no cliffs there, only water walls.
+    [[nodiscard]] constexpr uint32_t BackEdges(const int rotation)
+    {
+        constexpr uint32_t kBack[4] = {kEdgeXMin | kEdgeZMin, kEdgeXMax | kEdgeZMin, kEdgeXMax | kEdgeZMax,
+                                       kEdgeXMin | kEdgeZMax};
+        return kBack[rotation & 3];
+    }
+
     // Most points SetBounds keeps, and the scratch sizes that follow from it.
     constexpr int kMaxBoundsPoints = 16;
     constexpr int kMaxPlanePoints = kMaxBoundsPoints + 4;        // plus the city corners

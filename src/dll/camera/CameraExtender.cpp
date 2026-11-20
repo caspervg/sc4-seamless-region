@@ -547,8 +547,10 @@ void CameraExtender::UpdateWallMask_()
 {
     std::array<uint32_t, kViews> masks{};
     for (int v = 0; v < kViews; ++v) {
-        const uint32_t chosen = panelWallsAuto_ ? (PolicyOn_() ? autoWalls_[v] : 0u) : panelWalls_;
-        masks[v] = cityOpen_ ? (chosen | forcedWalls_) & CameraBounds::kAllEdges : 0u;
+        const uint32_t chosen = forcedWalls_     ? forcedWalls_
+                                : panelWallsAuto_ ? (PolicyOn_() ? autoWalls_[v] : 0u)
+                                                  : panelWalls_;
+        masks[v] = cityOpen_ ? chosen & CameraBounds::kAllEdges : 0u;
     }
     if (masks == effectiveWalls_) {
         return;

@@ -283,7 +283,8 @@ transport levels when the transport layer is off. So stale tiles never show and 
 only levels that are on disk.
 
 **What stays out of the tiles.** Neighbor tiles (`NeighborRenderer::SetEnabled(false)`), the
-edge walls (`CameraExtender::SetEdgeWallsHidden(all)`), the hover tint and the map overlay (both
+back edge walls (`CameraExtender::SetEdgeWallsHidden(CameraBounds::BackEdges(rotation))`, set
+again for every level; it replaces the automatic choice), the hover tint and the map overlay (both
 check `CityCapturer::IsRunning()` themselves, the capture changes no setting for them).
 
 **A save during a render.** The game makes the region picture of the city inside the save,

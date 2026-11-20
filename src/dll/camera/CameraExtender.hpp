@@ -41,8 +41,8 @@ public:
     void SetBounds(const std::vector<cS3DVector2>& worldPolygonXZ);
     // Extra distance in metres added to the near and far clip planes. 0 removes it.
     void SetClipRange(float extraMetres);
-    // Hides the walls (brown cliffs and water walls) of the given edges, on top of the
-    // automatic choice. Bits: CameraBounds::kEdgeXMin (1, x = 0), kEdgeXMax (2), kEdgeZMin
+    // Hides the walls (brown cliffs and water walls) of exactly the given edges, in place of
+    // the automatic (or panel) choice. Bits: CameraBounds::kEdgeXMin (1, x = 0), kEdgeXMax (2), kEdgeZMin
     // (4, z = 0), kEdgeZMax (8). 0 goes back to the automatic choice alone. Returns the mask
     // of the previous call, so a caller can put it back.
     uint32_t SetEdgeWallsHidden(uint32_t edgeMask);

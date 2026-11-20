@@ -170,7 +170,11 @@ Public bits (world terms of the current city): 1 = x 0 (west), 2 = x max (east),
 Both detours hide nothing while the camera magnification is not 1.0. The region thumbnail
 writer (`0x005ddec0`) is the only code that draws the city at another magnification (0.25). The
 picture and the border masks it saves into the city file keep their walls, as in the game
-without the plugin. A render (capture) draws at magnification 1.0 and hides all four.
+without the plugin. A render (capture) draws at magnification 1.0 and hides the two back edges of each rotation
+(`CameraBounds::BackEdges`, the edges through `ViewMath::BaseCorner`). The front cliffs and water
+walls stay in the tiles: where the neighbor in front is lower at the shared edge, the cliff shows
+instead of the background. The neighbor's tile covers it where it is higher. A forced mask replaces
+the automatic and panel choice, so walls toward a rendered neighbor in front are not hidden.
 
 The cliffs only exist on the two edges that face the camera. The water walls exist on all
 four. A hidden back water wall shows what is behind the water there, which is the neighbor's
