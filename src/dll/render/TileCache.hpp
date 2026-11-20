@@ -52,7 +52,9 @@ public:
     void SetBudget(size_t bytes);
     // City change, device reset. Also forgets which tiles are missing.
     void Clear();
-    // Called on the game thread (inside the ImGui frame) when a queued tile becomes ready.
+    // Called on the game thread when a queued tile becomes ready (inside the ImGui frame), or
+    // when the cache drops a queued tile that a draw must ask for again (inside Acquire or
+    // the ImGui frame). Either way the tile's spot on screen needs drawing again.
     void SetOnTileReady(std::function<void(const TileKey&)> callback);
 
     // Starts a new draw pass for the "least recently drawn" order. Tiles acquired since the

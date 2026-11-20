@@ -53,6 +53,23 @@ The module calls `0x007c9540` with kind 3, no model, delay 0, from the begin cal
 PreDynamic (once per frame, the queue is processed in the next `Draw`). The game does the
 same from `ProcessModelChangeQueue_` inside `Draw`.
 
+While the view pans, `AttemptTranslatedViewUpdate_` `0x007cabe0` moves every queued rectangle
+by the pan step before `DoTranslatedViewUpdate`, and `Draw` returns before the queue is
+processed, so a queued rectangle waits until the pan stops and still lands on the right pixels.
+A pan of 14/16 of the view or more clears the queue and redraws everything. High (decompile).
+
+The backing store keeps an empty spot until that area is drawn again, so a tile the cache
+drops (a full decode queue, or over the memory limit when it was asked for in an older pass)
+is reported like a ready tile: the renderer queues its rectangle and the redraw asks for it
+again. Before this, fast scrolls left holes until the next full redraw.
+
+Driver audit (2026-11-20, source): scvk 0.7.1 clears, clips and copies regions within the
+scissor, the same as GL. SCD3D11 `ba5b350` `cGDriver::Clear` (`cGDriver.cpp:213`) clears the
+whole surface under a sub-viewport (`ClearRenderTargetView`/`ClearDepthStencilView` ignore the
+viewport). Every pan strip and dirty rectangle then wipes all depth, and the full save after a
+pan stores that, so dynamic objects can draw over front tiles and buildings. With the
+background picture off (`0x5000`) it wipes the colour too. A driver bug, not fixed here.
+
 ## SC4DrawContext state
 
 | Fact | Evidence | Confidence |
