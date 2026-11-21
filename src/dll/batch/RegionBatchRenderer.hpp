@@ -49,6 +49,9 @@ public:
     // addTransport: the cities without the transport layer, keeping their normal levels
     // (CaptureRequest::addTransport).
     bool Start(bool force, bool addTransport = false);
+    // Continues the unfinished run of batch.json, as the panel's "Continue" button. False (with
+    // Message()) when there is none or it cannot start.
+    bool ResumeLast();
     // Stops after the current step and goes back to the start city or the region view.
     void Cancel();
     [[nodiscard]] bool IsRunning() const;

@@ -30,5 +30,5 @@ private:
 
     ModuleContext ctx_;
     bool registered_ = false;
-    std::array<uint32_t, 7> tokens_{};
+    std::array<uint32_t, 8> tokens_{};
 };

@@ -29,6 +29,7 @@ namespace
         kSet = 0x5EA1C005,
         kGet = 0x5EA1C006,
         kSaveSettings = 0x5EA1C007,
+        kResumeRegion = 0x5EA1C008,
     };
 
     cIGZCommandServer::cGZCommandInfo kCommands[] = {
@@ -39,6 +40,7 @@ namespace
         {kSet, "SeamlessSet", "<INI key> <value>"},
         {kGet, "SeamlessGet", "<INI key>"},
         {kSaveSettings, "SeamlessSaveSettings", ""},
+        {kResumeRegion, "SeamlessResumeRegion", ""},
     };
 
     std::vector<std::string> Arguments(cIGZCommandParameterSet* input)
@@ -143,6 +145,13 @@ bool RemoteCommands::Run_(const uint32_t id, cIGZCommandParameterSet* input, std
         reply = force ? "the region render started for every city" : "the region render started";
         return true;
     }
+    case kResumeRegion:
+        if (!ctx_.batch || !ctx_.batch->ResumeLast()) {
+            reply = ctx_.batch ? ctx_.batch->Message() : std::string("no region render");
+            return false;
+        }
+        reply = "the region render continues";
+        return true;
     case kRenderCity:
         if (!ctx_.capturer || !ctx_.capturer->Start(CaptureRequest())) {
             reply = ctx_.capturer ? ctx_.capturer->Progress().error : std::string("no capture");

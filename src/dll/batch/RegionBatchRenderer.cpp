@@ -309,6 +309,21 @@ bool RegionBatchRenderer::Start(const bool force, const bool addTransport)
     return true;
 }
 
+bool RegionBatchRenderer::ResumeLast()
+{
+    if (running_) {
+        message_ = "A region render runs already.";
+        return false;
+    }
+    LoadOffer_();
+    if (!offerResume_) {
+        message_ = "There is no unfinished region render.";
+        return false;
+    }
+    Resume_();
+    return running_;
+}
+
 void RegionBatchRenderer::Resume_()
 {
     if (const char* why = WhyNotBegin_()) {
