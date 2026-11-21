@@ -525,7 +525,8 @@ void NeighborRenderer::DrawGroup_(const bool front)
     const CameraFrame& frame = ctx_.cameraReader->Frame();
     // The region thumbnail writer (0x005ddec0) draws with the same renderer at magnification
     // 0.25. Neighbors do not belong in that picture.
-    if (frame.magnification != 1.0f) {
+    // Game zoom 6 is zoom 5 at magnification 2: drawn, scaled like any other view.
+    if (frame.magnification < 1.0f) {
         return;
     }
     if (!front && (frame.zoomIndex != viewZoom_ || frame.rotation != viewRotation_)) {

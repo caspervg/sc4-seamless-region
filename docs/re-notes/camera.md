@@ -167,8 +167,9 @@ Per edge for both, with one mask (bit i = game edge i, from the public bits):
 Public bits (world terms of the current city): 1 = x 0 (west), 2 = x max (east), 4 = z 0
 (north), 8 = z max (south). Region z grows to the south.
 
-Both detours hide nothing while the camera magnification is not 1.0. The region thumbnail
-writer (`0x005ddec0`) is the only code that draws the city at another magnification (0.25). The
+Game zoom 6 is model zoom 4 (game zoom 5) at magnification 2.0; the model zooms Z0-Z4 are game
+zooms 1-5. Both detours hide nothing while the camera magnification is below 1.0. The region thumbnail
+writer (`0x005ddec0`) is the only code that draws the city below 1.0 (at 0.25). The
 picture and the border masks it saves into the city file keep their walls, as in the game
 without the plugin. A render (capture) draws at magnification 1.0 and hides the two back edges of each rotation
 (`CameraBounds::BackEdges`, the edges through `ViewMath::BaseCorner`). The front cliffs and water

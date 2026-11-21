@@ -427,7 +427,8 @@ void NeighborPicker::Tick_()
     if (cursorInView_ && ctx_.cameraReader->Update()) {
         const CameraFrame& f = ctx_.cameraReader->Frame();
         // The region thumbnail writer draws at magnification 0.25: no tint in that picture.
-        if (f.magnification == 1.0f) {
+        // Game zoom 6 is zoom 5 at magnification 2.
+        if (f.magnification >= 1.0f) {
             picked = true;
             const float key[7] = {
                 static_cast<float>(cursorX_),    static_cast<float>(cursorZ_),  f.target.fX, f.target.fY, f.target.fZ,
@@ -558,7 +559,7 @@ bool NeighborPicker::OnMouseDownL(const int x, const int z)
     viewX_ = x;
     viewZ_ = z;
     if (ClickBlocker_() != nullptr || !ctx_.cameraReader->Update() ||
-        ctx_.cameraReader->Frame().magnification != 1.0f) {
+        ctx_.cameraReader->Frame().magnification < 1.0f) {
         return false;
     }
     const int neighbor = Pick_(x, z);

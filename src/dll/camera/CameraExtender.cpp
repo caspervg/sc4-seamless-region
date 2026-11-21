@@ -68,7 +68,8 @@ namespace
             return 0;
         }
         const void* camera = GameAccess::CameraControl();
-        if (!camera || ReadField<float>(camera, CC::kMagnification) != 1.0f) {
+        // Game zoom 6 (zoom 5 at magnification 2) hides them like any view.
+        if (!camera || ReadField<float>(camera, CC::kMagnification) < 1.0f) {
             return 0;
         }
         const int zoom = ReadField<int32_t>(camera, CC::kZoom, -1);
