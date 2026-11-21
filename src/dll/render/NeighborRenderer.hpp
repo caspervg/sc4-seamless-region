@@ -72,6 +72,10 @@ private:
         uint8_t frontMask = 0;     // bit r: drawn in front of the current city at rotation r
         TileKey key;               // cityKey is fixed, the rest changes per tile (no allocation)
         TileKey standInKey;        // the same for stand-in tiles
+        // The render shown before the last rebuild (another season) when it lies on the same
+        // grid in every view: its tiles still in the cache fill the spots of tiles still loading.
+        // Empty cityKey: none.
+        TileKey previousKey;
         int visibleTiles = 0;      // last draw, for the panel
         int readyTiles = 0;
     };

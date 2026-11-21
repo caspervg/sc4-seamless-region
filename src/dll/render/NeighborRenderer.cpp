@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <unordered_map>
 
 #include "cISC43DRender.h"
 #include "core/GameAddresses.hpp"
@@ -220,6 +221,12 @@ bool NeighborRenderer::ShouldDraw_() const
 
 void NeighborRenderer::Rebuild_()
 {
+    // The renders shown so far, by city name: a new season keeps showing the old one where its
+    // tiles are still loading.
+    std::unordered_map<std::string, Neighbor> previous;
+    for (Neighbor& n : neighbors_) {
+        previous.emplace(n.name, std::move(n));
+    }
     neighbors_.clear();
     season_ = Seasons::OfMonth(GameAccess::CityMonth());
     regionGeneration_ = ctx_.region->Generation();
@@ -273,6 +280,23 @@ void NeighborRenderer::Rebuild_()
                         }
                     }
                 }
+            }
+        }
+        if (const auto it = previous.find(n.name); any && it != previous.end() &&
+                                                    it->second.key.cityKey != n.key.cityKey) {
+            const Neighbor& old = it->second;
+            bool sameGrid = true;
+            for (size_t slot = 0; slot < n.levels.size() && sameGrid; ++slot) {
+                const CityRenderMeta::Level& a = n.levels[slot];
+                const CityRenderMeta::Level& b = old.levels[slot];
+                sameGrid = (n.scale[slot] > 0.0) == (old.scale[slot] > 0.0) &&
+                           (n.scale[slot] <= 0.0 ||
+                            (a.zoom == b.zoom && a.tilesX == b.tilesX && a.tilesY == b.tilesY &&
+                             std::fabs(a.originX - b.originX) < 0.5f && std::fabs(a.originY - b.originY) < 0.5f &&
+                             n.scale[slot] == old.scale[slot]));
+            }
+            if (sameGrid) {
+                n.previousKey.cityKey = old.key.cityKey;
             }
         }
         if (any) {
@@ -639,6 +663,32 @@ void NeighborRenderer::DrawGroup_(const bool front)
         }
     };
 
+    // The same tile of the render shown before a season change, when it is still in the cache.
+    auto drawPrevious = [&](Neighbor& neighbor, const double x0, const double y0, const double x1, const double y1) {
+        TileKey& key = neighbor.previousKey;
+        if (key.cityKey.empty()) {
+            return false;
+        }
+        key.rotation = neighbor.key.rotation;
+        key.zoom = neighbor.key.zoom;
+        key.tx = neighbor.key.tx;
+        key.ty = neighbor.key.ty;
+        const TileTexture* texture = store->HasTile(key) ? cache->Peek(key) : nullptr;
+        const uint32_t driverTexture = texture ? cache->DriverTexture(*texture) : 0;
+        if (driverTexture == 0) {
+            return false;
+        }
+        if (!begun) {
+            BeginState_(context, front, linear, saved);
+            begun = true;
+        }
+        plane.Quad(quad, x0, y0, x1, y1, kWhite);
+        ctx_.draw->SetTexture(context, driverTexture, 0);
+        ctx_.draw->DrawPrims(context, Drv::kPrimTriangles, Drv::kVertexFormatPositionColorUV, 6, quad);
+        ++standInDraws_;
+        return true;
+    };
+
     for (const int index : order) {
         Neighbor& neighbor = neighbors_[index];
         neighbor.visibleTiles = 0;
@@ -683,7 +733,7 @@ void NeighborRenderer::DrawGroup_(const bool front)
                     ctx_.draw->SetTexture(context, driverTexture, 0);
                     ctx_.draw->DrawPrims(context, Drv::kPrimTriangles, Drv::kVertexFormatPositionColorUV, 6, quad);
                 }
-                else {
+                else if (!drawPrevious(neighbor, x0, y0, x1, y1)) {
                     drawStandIn(neighbor, x0, y0, x1, y1);
                 }
                 if (outlineTiles_) {
