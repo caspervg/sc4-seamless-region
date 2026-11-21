@@ -134,6 +134,7 @@ bool HtmlMapExporter::Start()
     request.cacheBytes = static_cast<size_t>(ctx_.settings->mapCacheMB) * 1024 * 1024;
     request.upscaleLevels = ctx_.settings->mapUpscaleLevels;
     request.transport = transport_;
+    request.seasonLayers = seasonLayers_;
     request.season = Season::Main;
     request.mode = mosaic_ ? MapExport::Mode::Mosaic : MapExport::Mode::Map;
     request.mosaicMaxPixels = kMosaicSizes[mosaicSize_];
@@ -291,6 +292,19 @@ void HtmlMapExporter::DrawPanelSection()
                                "the normal view and the transport view.");
         ImGui::PopTextWrapPos();
         ImGui::EndTooltip();
+    }
+
+    ImGui::BeginDisabled(mosaic_);
+    ImGui::TextUnformatted("Season layers:");
+    for (int s = 1; s < static_cast<int>(Seasons::kNames.size()); ++s) {
+        static constexpr const char* kLabels[] = {"", "Spring", "Summer", "Fall", "Winter"};
+        ImGui::SameLine();
+        ImGui::Checkbox(kLabels[s], &seasonLayers_[s]);
+    }
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("A layer on the map for each of these seasons that the cities have renders of. Each "
+                          "season layer adds about the size of the normal view.");
     }
 
     const char* why = WhyNotStart_();

@@ -431,6 +431,9 @@ namespace
                 // Season layers: the season render of the city on the same grid, else the nearest
                 // season, else its main render, as the neighbors in the game.
                 for (int s = 1; !mosaic_ && s < static_cast<int>(Seasons::kNames.size()); ++s) {
+                    if (!req_.seasonLayers[s]) {
+                        continue;
+                    }
                     const std::string cityKey(Seasons::Split(p.info.key).first);
                     for (const Season fallback : Seasons::FallbackOrder(static_cast<Season>(s))) {
                         const std::string key = Seasons::StorageKey(cityKey, fallback);

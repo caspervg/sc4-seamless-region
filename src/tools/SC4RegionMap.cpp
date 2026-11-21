@@ -2,7 +2,8 @@
 // plugin stored. The same export as the "Region map" section of the in-game panel.
 //
 //   SC4RegionMap.exe <region folder> [--rotation 1..4] [--zoom 3..5] [--quality 0..100] [--upscale 0..3]
-//                    [--transport | --no-transport] [--mosaic [pixels]] [--renders <folder>] [--open]
+//                    [--transport | --no-transport] [--seasons all|none|<list>] [--mosaic [pixels]]
+//                    [--renders <folder>] [--open]
 //
 // Without --zoom the map uses the highest zoom that every rendered city has. The transport view is
 // on the map when the cities have it, unless --no-transport.
@@ -118,14 +119,16 @@ namespace
         std::fprintf(stderr,
                      "Makes the browsable map of a region from the renders of SC4 Seamless Region.\n\n"
                      "  SC4RegionMap.exe <region folder> [--rotation 1..4] [--zoom 3..5] [--quality 0..100] "
-                     "[--upscale 0..3] [--transport | --no-transport] [--mosaic [pixels]] [--renders <folder>] "
-                     "[--open]\n\n"
+                     "[--upscale 0..3] [--transport | --no-transport] [--seasons all|none|<list>] "
+                     "[--mosaic [pixels]] [--renders <folder>] [--open]\n\n"
                      "--zoom: the zoom of the city renders that the map uses. Zoom 5 gives the most detail. The\n"
                      "map is then about 4 times the size of zoom 4. Without --zoom: the highest zoom of all cities.\n\n"
                      "--transport (the default): also put the transport view on the map, when the cities have it.\n"
                      "--no-transport: only the normal view.\n\n"
                      "--season main|spring|summer|fall|winter: the season renders to use (each city falls back\n"
                      "to the nearest season it has, then its main render). Default main.\n\n"
+                     "--seasons all|none|spring,summer,fall,winter: the season layers the map may get, each\n"
+                     "only when cities have renders of it. Default all.\n\n"
                      "--renders <folder>: the RendersFolder of the plugin's INI, when it is set. The renders are\n"
                      "then in <folder>\\<region folder name> instead of <region>\\RegionRenders.\n\n"
                      "--mosaic [pixels]: one picture, RegionRenders\\mosaic.png, instead of the map. The map at\n"
@@ -172,6 +175,15 @@ int wmain(const int argc, wchar_t** argv)
                     (s == 0 && name == L"main")) {
                     request.season = static_cast<Season>(s);
                 }
+            }
+        }
+        else if (arg == L"--seasons" && hasValue) {
+            // all, none, or a comma-separated list of season names
+            const std::wstring list = argv[++i];
+            for (int s = 1; s < static_cast<int>(Seasons::kNames.size()); ++s) {
+                const std::wstring name(Seasons::kNames[s].begin(), Seasons::kNames[s].end());
+                request.seasonLayers[s] = list == L"all" || (L"," + list + L",").find(L"," + name + L",") !=
+                                                                std::wstring::npos;
             }
         }
         else if (arg == L"--renders" && hasValue) {

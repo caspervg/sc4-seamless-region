@@ -47,6 +47,9 @@ in the panel. The main ones:
 
 Tools, Export, "Make the region map" writes `RegionRenders\map\index.html`. Outside the game,
 `SC4RegionMap.exe <region folder>` does the same (run it without arguments for the options).
+A map shows one rotation and is made from one zoom of the renders; the season layers it gets can
+be chosen too (panel checkboxes, `--seasons all|none|spring,winter,...`), so it can be a lot
+smaller than the renders the game uses.
 `tools/upload-map-r2.ps1` uploads a map to a Cloudflare R2 bucket.
 
 ## Build

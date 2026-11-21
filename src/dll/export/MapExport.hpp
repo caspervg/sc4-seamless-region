@@ -61,6 +61,9 @@ namespace MapExport
         bool transport = true;
         // The season slot to show, with Seasons::FallbackOrder per city. Main: the main renders.
         Season season = Season::Main;
+        // By Season: which season layers the map may get (each only when a city has a render of
+        // that season). Main is not used.
+        std::array<bool, 5> seasonLayers{false, true, true, true, true};
     };
 
     enum class Phase : int

@@ -568,6 +568,13 @@ TEST_CASE(MapExportEndToEnd)
     CHECK(!fs::exists(map / L"tiles-summer"));
     CHECK(ReadText(map / L"index.html").find("\"seasons\":[\"winter\"]") != std::string::npos);
 
+    // The winter layer left out: no winter tiles, no season on the page.
+    request.seasonLayers[static_cast<int>(Season::Winter)] = false;
+    CHECK(MapExport::Run(request, progress, stop).ok);
+    CHECK(!fs::exists(map / L"tiles-winter"));
+    CHECK(ReadText(map / L"index.html").find("\"seasons\":[]") != std::string::npos);
+    request.seasonLayers[static_cast<int>(Season::Winter)] = true;
+
     // Rotation 2: only Turned has a render there.
     request.rotation = 2;
     const MapExport::Result turnedResult = MapExport::Run(request, progress, stop);
