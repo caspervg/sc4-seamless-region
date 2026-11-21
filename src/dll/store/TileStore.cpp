@@ -639,7 +639,9 @@ void TileStore::StopWorker()
 
 void TileStore::SetRegionDirectory(const fs::path& dir)
 {
-    const fs::path renders = dir.empty() ? fs::path() : dir / kFolderName;
+    const fs::path renders = dir.empty()   ? fs::path()
+                             : ctx_.settings ? ctx_.settings->RendersDirectoryFor(dir)
+                                             : dir / kFolderName;
     {
         std::shared_lock lock(mutex_);
         if (renders == rendersDir_) {

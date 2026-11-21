@@ -15,3 +15,12 @@ TEST_CASE(SettingsSetFromText)
     CHECK(settings.Set("RenderRotation2", "false") && !settings.renderRotation[1]);
     CHECK(!settings.Set("NoSuchKey", "1") && settings.Get("NoSuchKey").empty());
 }
+
+TEST_CASE(SettingsRendersFolder)
+{
+    Settings settings;
+    const std::filesystem::path region = L"C:/Users/me/Documents/SimCity 4/Regions/Kanto Tokai";
+    CHECK(settings.RendersDirectoryFor(region) == region / L"RegionRenders");
+    CHECK(settings.Set("RendersFolder", "D:/SC4 Renders"));
+    CHECK(settings.RendersDirectoryFor(region) == std::filesystem::path(L"D:/SC4 Renders/Kanto Tokai"));
+}

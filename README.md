@@ -38,6 +38,7 @@ in the panel. The main ones:
 | `RenderRotation1`..`4` | true | Rotations a render makes |
 | `CaptureAtDate` | true | Render every city at one date (seasonal props and trees) |
 | `CaptureAllSeasons` | false | Also render the three other seasons, so neighbors follow your city's season |
+| `RendersFolder` | (empty) | Save the renders in `<folder>\<region folder name>` instead of the region folder, e.g. on another disk or outside OneDrive. `SC4RegionMap --renders <folder>` reads them there |
 | `CaptureTransportLayer` | false | Also render the transport view, for the region map |
 | `RenderOnSave` | false | Render the city again after every save |
 | `TileCacheMB` | 512 | Memory for neighbor tiles |

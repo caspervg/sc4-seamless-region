@@ -87,6 +87,9 @@ public:
     // its mid-season date into its season slot, in the same rotations and zooms. Neighbors then
     // show the season of the open city's date. Four times the render time and disk space.
     bool captureAllSeasons = false;
+    // Where the renders go (UTF-8). Empty: the RegionRenders folder of each region. Else
+    // <rendersFolder>/<region folder name>, for example on another disk or outside a synced folder.
+    std::string rendersFolder;
     // The highest zoom a render makes, as the game counts zooms: 3, 4 or 5. Zoom 5 has 4 times
     // the pixels of zoom 4. Without zoom 5 tiles, zoom 5 shows zoom 4 at twice the size. Without
     // zoom 4 tiles neighbors do not show at zoom 4 and 5.
@@ -128,6 +131,14 @@ public:
 
     // maxRenderZoom as a zoom index (2..4).
     [[nodiscard]] int MaxRenderZoomIndex() const { return maxRenderZoom - 1; }
+    // The renders folder of the region in `regionDir` (rendersFolder).
+    [[nodiscard]] std::filesystem::path RendersDirectoryFor(const std::filesystem::path& regionDir) const
+    {
+        if (rendersFolder.empty()) {
+            return regionDir / "RegionRenders";
+        }
+        return std::filesystem::path(std::u8string(rendersFolder.begin(), rendersFolder.end())) / regionDir.filename();
+    }
     // The date a render is made at (0 and 0: the city's own) and the slot it is stored in.
     [[nodiscard]] int RenderMonth() const { return captureAtDate ? std::clamp(captureMonth, 1, 12) : 0; }
     [[nodiscard]] int RenderDay() const

@@ -140,6 +140,13 @@ void Settings::Read_(mINI::INIMap<std::string>& section, const std::filesystem::
     r.Int("CaptureDay", captureDay, 1, 31);
     r.Bool("CaptureSeasonalFlora", captureSeasonalFlora);
     r.Bool("CaptureAllSeasons", captureAllSeasons);
+    if (section.has("RendersFolder")) {
+        std::string folder = section.get("RendersFolder");
+        if (folder.size() >= 2 && folder.front() == '"' && folder.back() == '"') {
+            folder = folder.substr(1, folder.size() - 2);
+        }
+        rendersFolder = std::move(folder);
+    }
     r.Int("MaxRenderZoom", maxRenderZoom, kMinRenderZoom, kMaxRenderZoom);
     r.Bool("RenderRotation1", renderRotation[0]);
     r.Bool("RenderRotation2", renderRotation[1]);
@@ -181,6 +188,7 @@ void Settings::Write_(mINI::INIMap<std::string>& s) const
     s["CaptureDay"] = std::to_string(captureDay);
     s["CaptureSeasonalFlora"] = b(captureSeasonalFlora);
     s["CaptureAllSeasons"] = b(captureAllSeasons);
+    s["RendersFolder"] = rendersFolder;
     s["MaxRenderZoom"] = std::to_string(maxRenderZoom);
     s["RenderRotation1"] = b(renderRotation[0]);
     s["RenderRotation2"] = b(renderRotation[1]);
