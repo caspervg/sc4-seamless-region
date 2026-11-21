@@ -11,6 +11,20 @@ Windows 1.1.641. Found with the load profiler (`src/profiler`) and a read-only G
 | Type 21 scan | ~4.5 s + list | ~4.5 s |
 | first load only, at `kPostCityInit`: network RUL INI load (`cSC4NetworkTool::Init` `0x006269c0` -> `0x006253d0`, flag `0x00b452a8`; RUL2 overrides `0x0063d3e0` alone ~11 s), lot configurations (`0x0048a5e0`) ~2.4 s | 15.6 s | - |
 
+## With the DLL (2026-11-21, same plugins)
+
+Radisson, Joutel, Auclair, Joutel, Radisson after a fresh start, opened with `SeamlessOpenCity`:
+
+| load | before | with SC4LoadCache |
+|---|---|---|
+| first (cold) | 30-32 s | 23.4 s |
+| later | 11.6 s | 1.9-4.3 s |
+| `GetResourceList`, later load | 13 calls, 3.5 s | 13 calls, 30 ms |
+
+SC4DBPFLoading packs the plugins into 13 segments at start-up. Lists built per session:
+exemplars 192919 keys (11 calls per load), textures 2602374 keys (once per load, not kept
+over 500000 keys), three small ones. Scan callbacks skipped: 7.2 million, passed 288000.
+
 ## Key lists
 
 - `ResourceManager::GetResourceList` `0x009739cb`, thiscall `(list** out, filter*)` -> key count

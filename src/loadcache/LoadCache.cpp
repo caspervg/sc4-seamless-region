@@ -56,6 +56,9 @@ namespace
     constexpr size_t kResourceLock = 0x80;
     constexpr size_t kSegmentLock = 0x50;
     constexpr int kDequeBuffer = 32;
+    // Larger lists are not kept: the textures (about 2.6 million keys, 31 MB for the session)
+    // are asked for once per load and cost 0.3 s; the 32-bit game needs the address space more.
+    constexpr uint32_t kMaxKeptKeys = 500'000;
 
     struct Key
     {
@@ -243,6 +246,9 @@ namespace
         ++gListMisses;
         // The list is complete here; a failure below only means nothing is kept.
         try {
+            if (whole && size > kMaxKeptKeys) {
+                whole = false;
+            }
             if (whole) {
                 // The runs index the whole list (the keys of later segments stay in it unused).
                 entry.keys.reserve(size);
@@ -257,7 +263,7 @@ namespace
             whole = false;
         }
         Log("Key lists: type %08X built in %.0f ms (%u keys, %zu segments)%s", type, MsSince(start), count,
-            segments.size(), whole ? ", kept" : ", not kept: the list does not read back");
+            segments.size(), whole ? ", kept" : ", not kept");
         return count;
     }
 
