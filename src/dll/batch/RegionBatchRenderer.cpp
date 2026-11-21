@@ -40,10 +40,13 @@ namespace
 
     // A switch blocks while the city loads. A large city takes a minute or two.
     constexpr auto kSwitchTimeout = std::chrono::minutes(5);
-    // Ticks and time in a city before its render starts, so the game finishes the work it
-    // posts at a city load. Render on save never runs during a batch (CityCapturer).
-    constexpr int kSettleTicks = 30;
-    constexpr auto kSettleTime = std::chrono::seconds(3);
+    // Ticks and time in a city before its render starts, a margin for work other plugins post
+    // at a city load. The render itself starts after kPostCityInitComplete, pumps the message
+    // queues first, loads models at once and waits for them per level, so this stays short (it
+    // was 30 ticks and 3 s: about 2.5 s per city with nothing to wait for). Render on save never
+    // runs during a batch (CityCapturer).
+    constexpr int kSettleTicks = 10;
+    constexpr auto kSettleTime = std::chrono::milliseconds(500);
     // The render of a city shows no progress for this long: it is cancelled.
     constexpr auto kCaptureStall = std::chrono::minutes(10);
     constexpr auto kProgressReadInterval = std::chrono::milliseconds(250);
