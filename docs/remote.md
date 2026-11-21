@@ -13,6 +13,7 @@ The socket accepts connections from the network: block SimCity 4 in the firewall
 | `SeamlessStatus` | One line: view, city, region render state (`done`, `failed`, `left`, current city, phase, tiles), city render phase and ETA, date, zoom |
 | `SeamlessRenderRegion [force] [transport]` | Starts the region render (as the Batch button, without its confirmation). `force` renders the cities that are up to date too. `transport` adds the transport layer to the main renders that lack it, keeping their normal levels. In the region view it renders every city and ends there |
 | `SeamlessResumeRegion` | Continues the unfinished region render of `batch.json` (after a crash or a quit), as the panel's Continue button |
+| `SeamlessOpenCity <name>` | Opens a founded city of the region: from the region view, or a switch from the open city **without saving it** |
 | `SeamlessRenderCity` | Renders the open city |
 | `SeamlessCancel` | Stops the region render after its current step, or the city render |
 | `SeamlessSet <key> <value>` | Sets one INI setting for this session, with the INI's rules (`SeamlessSet CaptureAtDate true`) |

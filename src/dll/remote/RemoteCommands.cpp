@@ -16,6 +16,7 @@
 #include "core/Messages.hpp"
 #include "imgui.h"
 #include "region/RegionIndex.hpp"
+#include "switching/CitySwitcher.hpp"
 #include "utils/Logger.h"
 #include "utils/Settings.h"
 
@@ -31,6 +32,7 @@ namespace
         kGet = 0x5EA1C006,
         kSaveSettings = 0x5EA1C007,
         kResumeRegion = 0x5EA1C008,
+        kOpenCity = 0x5EA1C009,
     };
 
     cIGZCommandServer::cGZCommandInfo kCommands[] = {
@@ -42,6 +44,7 @@ namespace
         {kGet, "SeamlessGet", "<INI key>"},
         {kSaveSettings, "SeamlessSaveSettings", ""},
         {kResumeRegion, "SeamlessResumeRegion", ""},
+        {kOpenCity, "SeamlessOpenCity", "<city name>"},
     };
 
     std::vector<std::string> Arguments(cIGZCommandParameterSet* input)
@@ -154,6 +157,27 @@ bool RemoteCommands::Run_(const uint32_t id, cIGZCommandParameterSet* input, std
         }
         reply = "the region render continues";
         return true;
+    case kOpenCity: {
+        // A city switch without a save (or the city opens from the region view).
+        std::string name;
+        for (const std::string& part : args) {
+            name += (name.empty() ? "" : " ") + part;
+        }
+        const CityInfo* city = nullptr;
+        for (const CityInfo& c : ctx_.region ? ctx_.region->Cities() : std::vector<CityInfo>()) {
+            if (c.name == name && c.founded) {
+                city = &c;
+            }
+        }
+        if (!city || !ctx_.switcher) {
+            reply = "no founded city named " + name;
+            return false;
+        }
+        const bool started = GameAccess::City() ? ctx_.switcher->RequestSwitch(city->cellX, city->cellZ, true, nullptr, false)
+                                                : ctx_.switcher->RequestOpen(city->cellX, city->cellZ);
+        reply = started ? "opening " + name : ctx_.switcher->LastError();
+        return started;
+    }
     case kRenderCity:
         if (!ctx_.capturer || !ctx_.capturer->Start(CaptureRequest())) {
             reply = ctx_.capturer ? ctx_.capturer->Progress().error : std::string("no capture");
