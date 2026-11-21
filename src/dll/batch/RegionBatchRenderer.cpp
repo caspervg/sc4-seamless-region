@@ -49,9 +49,11 @@ namespace
     constexpr int kSettleTicks = 10;
     constexpr auto kSettleTime = std::chrono::milliseconds(500);
     // Free address space below which no further city is opened (see Next_).
-    // ponytail: thresholds from one crash; tune them with the numbers the Opening lines log.
-    constexpr uint32_t kMinFreeMB = 1600;
-    constexpr uint32_t kMinLargestFreeMB = 256;
+    // A city load needs a few hundred MB in one piece. In a 2026-11-21 run the free space
+    // stayed near 1.8 GB (largest piece 1.6 GB) for most cities, then fell by about 200 MB a city.
+    // ponytail: tuned from two runs; the Opening lines log the numbers for more tuning.
+    constexpr uint32_t kMinFreeMB = 1200;
+    constexpr uint32_t kMinLargestFreeMB = 384;
 
     struct AddressSpace
     {
