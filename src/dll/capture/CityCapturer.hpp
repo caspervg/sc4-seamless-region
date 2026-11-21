@@ -1,6 +1,6 @@
 #pragma once
 
-// Capture (W2-C): renders the current city into tiles for every rotation and the zooms from 1 up
+// Capture: renders the current city into tiles for every rotation and the zooms from 1 up
 // to Settings::maxRenderZoom (3, 4 or 5).
 //
 // Copies the pattern of SC4WriteCityRegionViewThumbnail (0x005ddec0): pause, move the view
@@ -61,6 +61,8 @@ struct CaptureRequest
     bool addTransport = false;
     // Render the transport layer also when Settings::captureTransportLayer is off.
     bool transport = false;
+    // Leave out the renders (main, season slots) that are up to date.
+    bool onlyNeeded = false;
 };
 
 struct CaptureProgress
@@ -261,6 +263,11 @@ private:
 
     ModuleContext ctx_;
     std::function<void(bool ok)> onFinished_;
+    // The renders of this Start (Seasons::RenderPasses): each pass is a capture of its own,
+    // End_ starts the next one. passIndex_ is the one running.
+    CaptureRequest request_;
+    std::vector<Seasons::Pass> passes_;
+    size_t passIndex_ = 0;
     CaptureProgress progress_;
     Phase phase_ = Phase::Idle;
     uint32_t stepId_ = 0;

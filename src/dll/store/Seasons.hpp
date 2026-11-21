@@ -1,15 +1,16 @@
 #pragma once
 
 // Season slots of a city's renders. The main render (the city's own date, or the date of
-// Render at date) lives in the city folder. With "Keep a render per season" a render at a date
-// goes to the slot of its season instead: a subfolder of the city folder, addressed by the
-// storage key "<cityKey>@<season>" wherever the store takes a city key. Neighbors prefer the
+// Render at date) lives in the city folder. With "Render all seasons" the three other seasons
+// go to slots: a subfolder of the city folder each, addressed by the storage key
+// "<cityKey>@<season>" wherever the store takes a city key. Neighbors prefer the
 // slot of the open city's season, then the nearest season, then the main render. Pure.
 
 #include <array>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 enum class Season : int
 {
@@ -69,5 +70,47 @@ namespace Seasons
         case Main: break;
         }
         return {Main, Summer, Spring, Fall, Winter};
+    }
+
+    // Mid-season dates: every seasonal pack of a typical plugins folder is in the same season
+    // there (docs/re-notes/seasons.md, Plugin audit).
+    struct Date
+    {
+        int month = 0;  // 0: the city's own date
+        int day = 0;
+    };
+    [[nodiscard]] constexpr Date PresetDate(const Season season)
+    {
+        using enum Season;
+        switch (season) {
+        case Spring: return {4, 15};
+        case Summer: return {7, 15};
+        case Fall: return {10, 15};
+        case Winter: return {1, 15};
+        case Main: break;
+        }
+        return {};
+    }
+
+    // One render of a city: the slot it goes to and the date it shows.
+    struct Pass
+    {
+        Season slot = Season::Main;
+        Date date;
+    };
+
+    // The renders "Render this city" and the region render make: the main render at `date`,
+    // then with allSeasons the three other seasons, each into its slot at its preset date.
+    [[nodiscard]] inline std::vector<Pass> RenderPasses(const Date date, const bool allSeasons)
+    {
+        std::vector<Pass> passes{{Season::Main, date}};
+        if (allSeasons && date.month > 0) {
+            for (const Season season : {Season::Spring, Season::Summer, Season::Fall, Season::Winter}) {
+                if (season != OfMonth(date.month)) {
+                    passes.push_back({season, PresetDate(season)});
+                }
+            }
+        }
+        return passes;
     }
 }

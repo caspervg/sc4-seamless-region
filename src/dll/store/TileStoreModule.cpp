@@ -70,11 +70,7 @@ void TileStore::DrawPanelSection()
                     row.state = 0;
                 }
                 else {
-                    const Settings* s = ctx_.settings;
-                    const std::string key = s && s->RenderSeasonSlots()
-                                                ? Seasons::StorageKey(city.key, Seasons::OfMonth(s->RenderMonth()))
-                                                : city.key;
-                    row.state = !LoadMeta(key) ? 1 : IsStale(city, key) ? 2 : 3;
+                    row.state = !LoadMeta(city.key) ? 1 : IsStale(city, city.key) ? 2 : 3;
                 }
                 rows_.push_back(std::move(row));
             }

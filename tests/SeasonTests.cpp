@@ -111,3 +111,18 @@ TEST_CASE(SeasonMetaDateAndNoon)
     CHECK(!CityMeta::NeedsRender(oldRead, 1000, 3, false, 0xF, 0, 0, true));
     CHECK(CityMeta::NeedsRender(oldRead, 1000, 3, false, 0xF, 7, 15, true));
 }
+
+TEST_CASE(SeasonRenderPasses)
+{
+    // One render at the date, or the city's own date.
+    auto passes = Seasons::RenderPasses({6, 15}, false);
+    CHECK(passes.size() == 1 && passes[0].slot == Season::Main && passes[0].date.month == 6);
+    CHECK(Seasons::RenderPasses({0, 0}, true).size() == 1);  // all seasons needs a date
+    // All seasons: the main render stands for summer, the other three go to their slots.
+    passes = Seasons::RenderPasses({6, 15}, true);
+    CHECK(passes.size() == 4 && passes[0].slot == Season::Main);
+    CHECK(passes[1].slot == Season::Spring && passes[1].date.month == 4 && passes[1].date.day == 15);
+    CHECK(passes[2].slot == Season::Fall && passes[3].slot == Season::Winter && passes[3].date.month == 1);
+    passes = Seasons::RenderPasses({1, 15}, true);
+    CHECK(passes.size() == 4 && passes[3].slot == Season::Fall);
+}

@@ -77,16 +77,16 @@ public:
     bool captureAsyncReadback = true;
     // Render at a date: timed props (seasonal lot and painted props) show the state of
     // captureMonth/captureDay, the same in every city of the region. The city's own date stays.
-    bool captureAtDate = false;
+    bool captureAtDate = true;
     int captureMonth = 6;
-    int captureDay = 1;
+    int captureDay = 15;
     // With captureAtDate: seasonal trees (flora with a year long cycle, planted on Sep 1 as is
     // the standard) show the stage of captureMonth. Slower in cities with many trees.
     bool captureSeasonalFlora = true;
-    // With captureAtDate: keep a render per season (spring, summer, fall, winter) next to the
-    // main one, instead of replacing the main render. Neighbors then show the season of the
-    // open city's date. Off: one render per city, at the date.
-    bool captureSeasonSlots = false;
+    // With captureAtDate: after the main render, render the three other seasons too, each at
+    // its mid-season date into its season slot, in the same rotations and zooms. Neighbors then
+    // show the season of the open city's date. Four times the render time and disk space.
+    bool captureAllSeasons = false;
     // The highest zoom a render makes, as the game counts zooms: 3, 4 or 5. Zoom 5 has 4 times
     // the pixels of zoom 4. Without zoom 5 tiles, zoom 5 shows zoom 4 at twice the size. Without
     // zoom 4 tiles neighbors do not show at zoom 4 and 5.
@@ -135,7 +135,7 @@ public:
         constexpr int kDays[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
         return captureAtDate ? std::clamp(captureDay, 1, kDays[RenderMonth() - 1]) : 0;
     }
-    [[nodiscard]] bool RenderSeasonSlots() const { return captureAtDate && captureSeasonSlots; }
+    [[nodiscard]] bool RenderAllSeasons() const { return captureAtDate && captureAllSeasons; }
     // renderRotation as a mask, bit r for rotation index r. All four when none is on.
     [[nodiscard]] uint32_t RenderRotationMask() const
     {

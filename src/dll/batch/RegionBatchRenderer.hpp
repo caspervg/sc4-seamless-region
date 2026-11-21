@@ -1,6 +1,6 @@
 #pragma once
 
-// Batch (W3-G): renders every founded city of the region, unattended.
+// Batch: renders every founded city of the region, unattended.
 //
 // Start renders the open city first (no switch), then the others as a nearest-first walk, and
 // switches back to the start city at the end. Started in the region view (no city), it opens the
@@ -101,7 +101,8 @@ private:
     // No render, out of date, or a level up to Settings::maxRenderZoom is missing.
     [[nodiscard]] bool NeedsRender_(const CityInfo& city) const;
     // Where a render of the city goes with the current settings: its key, or a season slot.
-    [[nodiscard]] std::string StorageKey_(const std::string& cityKey) const;
+    // The storage keys of the renders the settings make of a city: main, then season slots.
+    [[nodiscard]] std::vector<std::string> StorageKeys_(const std::string& cityKey) const;
     // Save the current city when the batch leaves it: always the player's own city, a city the
     // batch opened only with Settings::batchSaveCities.
     [[nodiscard]] bool SaveOnLeave_() const;
@@ -145,9 +146,11 @@ private:
     Clock::time_point lastProgressRead_{};
     CaptureProgress captureProgress_;  // read 4 times a second, for the window
 
-    // A city this run rendered. The switch away saves it: its meta.json then gets the new save
-    // file time, because the city did not change in between (the game was paused).
-    std::string restampKey_;
+    // A city this run rendered, and its renders (main and season slots). The switch away saves
+    // it: their meta.json then get the new save file time, because the city did not change in
+    // between (the game was paused).
+    std::string restampCity_;
+    std::vector<std::string> restampKeys_;
     std::filesystem::path restampPath_;
     // The other cities with a render that is up to date, before the switch saves the rendered
     // city. That save also writes the save files of its neighbors (neighbor data only), which

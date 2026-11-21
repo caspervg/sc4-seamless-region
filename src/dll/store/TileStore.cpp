@@ -732,6 +732,19 @@ bool TileStore::NeedsRender(const CityInfo& city, const std::string& storageKey,
                                  transport, rotations, month, day, noon);
 }
 
+bool TileStore::NeedsRender(const CityInfo& city, const Seasons::Pass& pass, const Settings& s) const
+{
+    return NeedsRender(city, Seasons::StorageKey(city.key, pass.slot), s.MaxRenderZoomIndex(),
+                       pass.slot == Season::Main && s.captureTransportLayer, s.RenderRotationMask(), pass.date.month,
+                       pass.date.day, s.captureAtNoon);
+}
+
+bool TileStore::NeedsRender(const CityInfo& city, const Settings& s) const
+{
+    return std::ranges::any_of(Seasons::RenderPasses({s.RenderMonth(), s.RenderDay()}, s.RenderAllSeasons()),
+                               [&](const Seasons::Pass& pass) { return NeedsRender(city, pass, s); });
+}
+
 std::string TileStore::ChooseStorageKey(const std::string& cityKey, const Season wanted) const
 {
     std::vector<std::string> keys = StorageKeysInOrder(cityKey, wanted);

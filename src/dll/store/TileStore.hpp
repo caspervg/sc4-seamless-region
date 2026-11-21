@@ -1,6 +1,6 @@
 #pragma once
 
-// Store (W2-D): reads and writes the rendered tiles of every city of the region.
+// Store: reads and writes the rendered tiles of every city of the region.
 //
 // Layout: <Region>/RegionRenders/<cityKey>/r<rot>z<zoom>/<tx>_<ty>.webp, the transport layer in
 // t<rot>z<zoom>/ with the same tile names, and <Region>/RegionRenders/<cityKey>/meta.json. Fully
@@ -31,6 +31,8 @@
 #include "core/GameAccess.hpp"
 #include "region/RegionLayout.hpp"
 #include "store/Seasons.hpp"
+
+class Settings;
 
 struct TileKey
 {
@@ -181,6 +183,11 @@ public:
     // CityMeta::NeedsRender of the render in `storageKey` for the city's save file.
     [[nodiscard]] bool NeedsRender(const CityInfo& city, const std::string& storageKey, int maxZoom, bool transport,
                                    uint32_t rotations, int month, int day, std::optional<bool> noon) const;
+    // Whether one render of the city (Seasons::RenderPasses) needs making with these settings.
+    // Season slots have no transport layer.
+    [[nodiscard]] bool NeedsRender(const CityInfo& city, const Seasons::Pass& pass, const Settings& settings) const;
+    // Whether any render of the city that the settings ask for needs making.
+    [[nodiscard]] bool NeedsRender(const CityInfo& city, const Settings& settings) const;
     // The render to show for a city whose neighbor is in season `wanted`: the first of
     // Seasons::FallbackOrder that has a meta.json, where a main render made at a date counts as
     // the slot of its season. The city key when there is none.

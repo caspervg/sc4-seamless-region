@@ -287,9 +287,34 @@ void CityCapturer::OnCityShutdown()
     }
 }
 
-bool CityCapturer::Start(const CaptureRequest& request) { return Begin_(false, request); }
+bool CityCapturer::Start(const CaptureRequest& request)
+{
+    if (phase_ != Phase::Idle) {
+        LOG_WARN("Capture: a render runs already");
+        return false;
+    }
+    request_ = request;
+    passIndex_ = 0;
+    const Settings* s = ctx_.settings;
+    const Seasons::Date date = s ? Seasons::Date{s->RenderMonth(), s->RenderDay()} : Seasons::Date{};
+    // Adding the transport layer touches the main render only.
+    passes_ = Seasons::RenderPasses(date, s && s->RenderAllSeasons() && !request.addTransport);
+    const CityInfo* city = ctx_.region ? ctx_.region->Current() : nullptr;
+    if (request.onlyNeeded && s && city && !request.addTransport) {
+        std::erase_if(passes_, [&](const Seasons::Pass& pass) { return !ctx_.tileStore->NeedsRender(*city, pass, *s); });
+        if (passes_.empty()) {
+            passes_.push_back({Season::Main, date});  // up to date: one pass, as a plain Start
+        }
+    }
+    return Begin_(false, request);
+}
 
-bool CityCapturer::StartTestTile() { return Begin_(true, CaptureRequest()); }
+bool CityCapturer::StartTestTile()
+{
+    passes_.clear();
+    passIndex_ = 0;
+    return Begin_(true, CaptureRequest());
+}
 
 void CityCapturer::Cancel()
 {
@@ -369,10 +394,9 @@ bool CityCapturer::Begin_(const bool testTile, const CaptureRequest& request)
     // With season slots a render at a date goes to the slot of its season, else to the main render.
     // Adding the transport layer always goes to the main render: season slots have none (no
     // props or flora show in the transport view).
-    cityKey_ = !current ? std::string()
-               : ctx_.settings && ctx_.settings->RenderSeasonSlots() && !request.addTransport
-                   ? Seasons::StorageKey(current->key, Seasons::OfMonth(ctx_.settings->RenderMonth()))
-                   : current->key;
+    cityKey_ = !current                    ? std::string()
+               : passIndex_ < passes_.size() ? Seasons::StorageKey(current->key, passes_[passIndex_].slot)
+                                             : current->key;
     savePath_ = current ? current->savePath : std::filesystem::path();
     cellX_ = current ? current->cellX : 0;
     cellZ_ = current ? current->cellZ : 0;
@@ -798,9 +822,12 @@ bool CityCapturer::StepPrepare_()
         }
     }
     if (ctx_.settings) {
-        saved_.season.date = ctx_.settings->captureAtDate;
-        saved_.season.month = std::clamp(ctx_.settings->captureMonth, 1, 12);
-        saved_.season.day = std::clamp(ctx_.settings->captureDay, 1, SeasonRules::kDaysInMonth[saved_.season.month - 1]);
+        const Seasons::Date date = passIndex_ < passes_.size() ? passes_[passIndex_].date
+                                                               : Seasons::Date{ctx_.settings->RenderMonth(),
+                                                                               ctx_.settings->RenderDay()};
+        saved_.season.date = date.month > 0;
+        saved_.season.month = std::clamp(date.month, 1, 12);
+        saved_.season.day = std::clamp(date.day, 1, SeasonRules::kDaysInMonth[saved_.season.month - 1]);
         saved_.season.flora = ctx_.settings->captureSeasonalFlora;
         saved_.season.noon = ctx_.settings->captureAtNoon;
         ApplySeason_();
@@ -1913,7 +1940,7 @@ bool CityCapturer::Fail_(std::string error)
     return false;
 }
 
-void CityCapturer::End_(const bool ok, std::string phase, std::string error, const bool cityClosing)
+void CityCapturer::End_(bool ok, std::string phase, std::string error, const bool cityClosing)
 {
     if (phase_ == Phase::Idle) {
         return;
@@ -1967,6 +1994,18 @@ void CityCapturer::End_(const bool ok, std::string phase, std::string error, con
     LOG_INFO("Capture: time in ms: move {:.0f}, models {:.0f}, draw {:.0f}, read {:.0f}, in {} ticks", timing_.moveMs,
              timing_.modelsMs, timing_.drawMs, timing_.readMs, timing_.ticks);
 
+    if (ok && !testTile_ && !cityClosing && passIndex_ + 1 < passes_.size()) {
+        ++passIndex_;
+        LOG_INFO("Capture: next render, {} at {}/{}", Seasons::Name(passes_[passIndex_].slot),
+                 passes_[passIndex_].date.month, passes_[passIndex_].date.day);
+        if (Begin_(false, request_)) {
+            return;
+        }
+        lastResult_ = "The render of " + std::string(Seasons::Name(passes_[passIndex_].slot)) +
+                      " did not start: " + progress_.error;
+        ok = false;
+        progress_.failed = true;
+    }
     if (onFinished_) {
         // A copy: the callback may set another callback or start the next capture.
         const std::function<void(bool)> callback = onFinished_;
@@ -2227,11 +2266,16 @@ void CityCapturer::DrawDateChoice(Settings& settings)
         }
         changed |= ImGui::Checkbox("Seasonal trees", &settings.captureSeasonalFlora);
         ImGui::SameLine();
-        changed |= ImGui::Checkbox("Keep a render per season", &settings.captureSeasonSlots);
+        changed |= ImGui::Checkbox("Render all seasons", &settings.captureAllSeasons);
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Store this render as the city's render for its season, next to the others, instead of "
-                              "replacing the city's render. Neighbors then show the season of your city's date. "
-                              "Uses more disk space. Season renders have no transport layer.");
+            ImGui::SetTooltip("After the render at this date, render the other three seasons too (spring Apr 15, "
+                              "summer Jul 15, fall Oct 15, winter Jan 15), in the same rotations and zooms, while the "
+                              "city stays open. Neighbors then show the season of your city's date. Season renders "
+                              "have no transport layer.");
+        }
+        if (settings.captureAllSeasons) {
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                               "Every render takes about four times as long and four times the disk space.");
         }
         ImGui::SameLine();
         ImGui::TextDisabled("(?)");

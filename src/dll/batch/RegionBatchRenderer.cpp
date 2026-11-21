@@ -397,7 +397,8 @@ void RegionBatchRenderer::Begin_()
     phase_ = Phase::Next;
     secondsSum_ = 0.0;
     secondsCount_ = 0;
-    restampKey_.clear();
+    restampCity_.clear();
+    restampKeys_.clear();
     restampOthers_.clear();
     message_.clear();
     lastRun_ = run_;
@@ -702,6 +703,7 @@ void RegionBatchRenderer::StepSettle_()
             request.rotations.push_back(r);
         }
     }
+    request.onlyNeeded = !run_.force;
     if (!ctx_.capturer->Start(request)) {
         const std::string error = ctx_.capturer->Progress().error;
         BatchQueue::Fail(run_, current_, "The render did not start: " + (error.empty() ? "no reason given." : error));
@@ -747,17 +749,20 @@ void RegionBatchRenderer::StepCapture_()
         secondsSum_ += seconds;
         ++secondsCount_;
         if (const CityInfo* city = FindByKey_(current_.key)) {
-            restampKey_ = StorageKey_(city->key);
+            restampCity_ = city->key;
+            restampKeys_ = StorageKeys_(city->key);
             restampPath_ = city->savePath;
             restampOthers_.clear();
             for (const CityInfo& other : ctx_.region->Cities()) {
                 const int64_t fileTime = other.savePath.empty() ? 0 : TileStore::FileTime(other.savePath);
-                const std::string otherKey = StorageKey_(other.key);
-                const std::optional<CityRenderMeta> meta = other.key == city->key || fileTime == 0
-                                                               ? std::nullopt
-                                                               : ctx_.tileStore->LoadMeta(otherKey);
-                if (meta && meta->saveFileTime == fileTime) {
-                    restampOthers_.push_back({otherKey, other.savePath, fileTime});
+                if (other.key == city->key || fileTime == 0) {
+                    continue;
+                }
+                for (std::string& otherKey : StorageKeys_(other.key)) {
+                    const std::optional<CityRenderMeta> meta = ctx_.tileStore->LoadMeta(otherKey);
+                    if (meta && meta->saveFileTime == fileTime) {
+                        restampOthers_.push_back({std::move(otherKey), other.savePath, fileTime});
+                    }
                 }
             }
         }
@@ -785,15 +790,18 @@ void RegionBatchRenderer::StepCapture_()
 
 void RegionBatchRenderer::Restamp_()
 {
-    if (restampKey_.empty()) {
+    if (restampCity_.empty()) {
         return;
     }
-    std::optional<CityRenderMeta> meta = ctx_.tileStore->LoadMeta(restampKey_);
+    std::optional<CityRenderMeta> meta;
     const int64_t saved = TileStore::FileTime(restampPath_);
-    if (meta && saved != 0 && saved != meta->saveFileTime) {
-        meta->saveFileTime = saved;
-        if (ctx_.tileStore->WriteMeta(restampKey_, *meta)) {
-            LOG_INFO("Batch: '{}' was saved after its render, its render stays up to date", restampKey_);
+    for (const std::string& key : restampKeys_) {
+        meta = ctx_.tileStore->LoadMeta(key);
+        if (meta && saved != 0 && saved != meta->saveFileTime) {
+            meta->saveFileTime = saved;
+            if (ctx_.tileStore->WriteMeta(key, *meta)) {
+                LOG_INFO("Batch: '{}' was saved after its render, its render stays up to date", key);
+            }
         }
     }
     int neighbors = 0;
@@ -806,11 +814,12 @@ void RegionBatchRenderer::Restamp_()
         }
     }
     if (neighbors > 0) {
-        LOG_INFO("Batch: the save of '{}' also wrote {} neighbor cities, their renders stay up to date", restampKey_,
+        LOG_INFO("Batch: the save of '{}' also wrote {} neighbor renders, they stay up to date", restampCity_,
                  neighbors);
     }
     restampOthers_.clear();
-    restampKey_.clear();
+    restampKeys_.clear();
+    restampCity_.clear();
 }
 
 void RegionBatchRenderer::Finish_(const State state, const std::string& message)
@@ -921,17 +930,19 @@ std::string RegionBatchRenderer::StatusText() const
 
 bool RegionBatchRenderer::SaveOnLeave_() const { return !openedByBatch_ || ctx_.settings->batchSaveCities; }
 
-std::string RegionBatchRenderer::StorageKey_(const std::string& cityKey) const
+std::vector<std::string> RegionBatchRenderer::StorageKeys_(const std::string& cityKey) const
 {
     const Settings& s = *ctx_.settings;
-    return s.RenderSeasonSlots() && !run_.addTransport ? Seasons::StorageKey(cityKey, Seasons::OfMonth(s.RenderMonth())) : cityKey;
+    std::vector<std::string> keys;
+    for (const Seasons::Pass& pass : Seasons::RenderPasses({s.RenderMonth(), s.RenderDay()}, s.RenderAllSeasons())) {
+        keys.push_back(Seasons::StorageKey(cityKey, pass.slot));
+    }
+    return keys;
 }
 
 bool RegionBatchRenderer::NeedsRender_(const CityInfo& city) const
 {
-    const Settings& s = *ctx_.settings;
-    return ctx_.tileStore->NeedsRender(city, StorageKey_(city.key), s.MaxRenderZoomIndex(), s.captureTransportLayer,
-                                       s.RenderRotationMask(), s.RenderMonth(), s.RenderDay(), s.captureAtNoon);
+    return ctx_.tileStore->NeedsRender(city, *ctx_.settings);
 }
 
 bool RegionBatchRenderer::NeedsTransport_(const CityInfo& city) const
