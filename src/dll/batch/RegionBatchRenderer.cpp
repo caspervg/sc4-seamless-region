@@ -59,15 +59,21 @@ namespace
     {
         uint32_t totalMB = 0;
         uint32_t largestMB = 0;
+        // Where the rest goes: DLLs and the exe, mapped files and sections (also graphics driver
+        // memory), the heaps and pools (committed, and reserved but not committed yet).
+        uint32_t imageMB = 0;
+        uint32_t mappedMB = 0;
+        uint32_t privateMB = 0;
+        uint32_t reservedMB = 0;
     };
 
-    // Free and largest free piece of the process's address space.
+    // Free and largest free piece of the process's address space, and what uses the rest.
     AddressSpace FreeAddressSpace()
     {
         AddressSpace room;
         SYSTEM_INFO info{};
         GetSystemInfo(&info);
-        uint64_t total = 0, largest = 0;
+        uint64_t total = 0, largest = 0, image = 0, mapped = 0, committed = 0, reserved = 0;
         auto* address = static_cast<uint8_t*>(info.lpMinimumApplicationAddress);
         MEMORY_BASIC_INFORMATION region{};
         while (address < info.lpMaximumApplicationAddress && VirtualQuery(address, &region, sizeof(region))) {
@@ -75,10 +81,26 @@ namespace
                 total += region.RegionSize;
                 largest = std::max<uint64_t>(largest, region.RegionSize);
             }
+            else if (region.Type == MEM_IMAGE) {
+                image += region.RegionSize;
+            }
+            else if (region.Type == MEM_MAPPED) {
+                mapped += region.RegionSize;
+            }
+            else if (region.State == MEM_COMMIT) {
+                committed += region.RegionSize;
+            }
+            else {
+                reserved += region.RegionSize;
+            }
             address = static_cast<uint8_t*>(region.BaseAddress) + region.RegionSize;
         }
         room.totalMB = static_cast<uint32_t>(total >> 20);
         room.largestMB = static_cast<uint32_t>(largest >> 20);
+        room.imageMB = static_cast<uint32_t>(image >> 20);
+        room.mappedMB = static_cast<uint32_t>(mapped >> 20);
+        room.privateMB = static_cast<uint32_t>(committed >> 20);
+        room.reservedMB = static_cast<uint32_t>(reserved >> 20);
         return room;
     }
 
@@ -314,7 +336,11 @@ bool RegionBatchRenderer::Start(const bool force, const bool addTransport)
     run_ = BatchQueue::Build(
         ctx_.region->Cities(), start, force,
         [this, addTransport](const CityInfo& c) { return addTransport ? NeedsTransport_(c) : NeedsRender_(c); },
-        NowText("%Y%m%d-%H%M%S"), NowText("%Y-%m-%d %H:%M:%S"));
+        NowText("%Y%m%d-%H%M%S"), NowText("%Y-%m-%d %H:%M:%S"), [](const CityInfo& c) -> uint64_t {
+            std::error_code ec;
+            const uintmax_t bytes = c.savePath.empty() ? 0 : fs::file_size(c.savePath, ec);
+            return ec ? 0 : static_cast<uint64_t>(bytes);
+        });
     run_.addTransport = addTransport;
     run_.transport = ctx_.settings->captureTransportLayer;
     run_.maxZoom = ctx_.settings->MaxRenderZoomIndex();
@@ -498,8 +524,10 @@ void RegionBatchRenderer::Next_()
             SaveRun_();
             continue;
         }
-        Log_(std::format("Opening '{}' (attempt {}, {} MB address space free, largest piece {} MB)", current_.name,
-                         attempt, room.totalMB, room.largestMB));
+        Log_(std::format("Opening '{}' (attempt {}, {} MB address space free, largest piece {} MB; used: {} MB "
+                         "heaps and pools + {} MB reserved for them, {} MB mapped, {} MB DLLs)",
+                         current_.name, attempt, room.totalMB, room.largestMB, room.privateMB, room.reservedMB,
+                         room.mappedMB, room.imageMB));
         phase_ = Phase::Switching;
         return;
     }
