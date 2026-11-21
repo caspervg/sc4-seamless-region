@@ -221,11 +221,11 @@ bool NeighborRenderer::ShouldDraw_() const
 
 void NeighborRenderer::Rebuild_()
 {
-    // The renders shown so far, by city name: a new season keeps showing the old one where its
-    // tiles are still loading.
+    // The renders shown so far, by city: a new season keeps showing the old one where its tiles
+    // are still loading.
     std::unordered_map<std::string, Neighbor> previous;
     for (Neighbor& n : neighbors_) {
-        previous.emplace(n.name, std::move(n));
+        previous.emplace(n.cityKey, std::move(n));
     }
     neighbors_.clear();
     season_ = Seasons::OfMonth(GameAccess::CityMonth());
@@ -246,28 +246,46 @@ void NeighborRenderer::Rebuild_()
             continue;
         }
         ++founded;
-        const std::string storageKey = ctx_.tileStore->ChooseStorageKey(city.key, season_);
-        const std::optional<CityRenderMeta> meta = ctx_.tileStore->LoadMeta(storageKey);
-        if (!meta) {
-            continue;
+        // Every render of the city that fits it, in the order they stand in.
+        std::vector<std::string> keys;
+        std::vector<CityRenderMeta> metas;
+        for (std::string& storageKey : ctx_.tileStore->StorageKeysInOrder(city.key, season_)) {
+            std::optional<CityRenderMeta> meta = ctx_.tileStore->LoadMeta(storageKey);
+            if (!meta) {
+                continue;
+            }
+            if (meta->tileSize < 16 || meta->tileSize > 2048 || meta->sizeX != city.sizeX ||
+                meta->sizeZ != city.sizeZ || (!metas.empty() && meta->tileSize != metas.front().tileSize)) {
+                LOG_WARN("Neighbors: the render '{}' does not fit the city (tile size {}, size {}x{}). It is skipped.",
+                         storageKey, meta->tileSize, meta->sizeX, meta->sizeZ);
+                continue;
+            }
+            keys.push_back(std::move(storageKey));
+            metas.push_back(std::move(*meta));
         }
-        if (meta->tileSize < 16 || meta->tileSize > 2048 || meta->sizeX != city.sizeX || meta->sizeZ != city.sizeZ) {
-            LOG_WARN("Neighbors: the render of '{}' does not fit the city (tile size {}, size {}x{}). It is skipped.",
-                     city.name, meta->tileSize, meta->sizeX, meta->sizeZ);
+        if (metas.empty() || metas.size() > 255) {
             continue;
         }
         Neighbor n;
         n.name = city.name;
+        n.cityKey = city.key;
         n.cells = {city.cellX, city.cellZ, city.cellX + city.sizeX, city.cellZ + city.sizeZ};
         n.originOffset = ctx_.region->OriginOffset(city);
-        n.tileSize = meta->tileSize;
-        n.key.cityKey = storageKey;
-        n.standInKey.cityKey = storageKey;
+        n.tileSize = metas.front().tileSize;
         bool any = false;
         for (int r = 0; r < ViewMath::kRotationCount; ++r) {
             for (int z = 0; z < ViewMath::kZoomCount; ++z) {
-                if (const CityRenderMeta::Level* level = CityMeta::ChooseLevel(meta->levels, r, z)) {
-                    const int slot = r * ViewMath::kZoomCount + z;
+                // The first render with a level for this view.
+                const CityRenderMeta* meta = nullptr;
+                const CityRenderMeta::Level* level = nullptr;
+                const int slot = r * ViewMath::kZoomCount + z;
+                for (size_t k = 0; k < metas.size() && !level; ++k) {
+                    if ((level = CityMeta::ChooseLevel(metas[k].levels, r, z))) {
+                        meta = &metas[k];
+                        n.slotKey[slot] = static_cast<uint8_t>(k);
+                    }
+                }
+                if (level) {
                     n.levels[slot] = *level;
                     n.scale[slot] = CityMeta::LevelScale(*level, z);
                     any = true;
@@ -282,21 +300,22 @@ void NeighborRenderer::Rebuild_()
                 }
             }
         }
-        if (const auto it = previous.find(n.name); any && it != previous.end() &&
-                                                    it->second.key.cityKey != n.key.cityKey) {
+        n.keys = std::move(keys);
+        if (const auto it = previous.find(n.cityKey); any && it != previous.end()) {
+            // Per view: the old render where it differs from the new one and lies on its grid.
             const Neighbor& old = it->second;
-            bool sameGrid = true;
-            for (size_t slot = 0; slot < n.levels.size() && sameGrid; ++slot) {
+            for (size_t slot = 0; slot < n.levels.size(); ++slot) {
+                if (n.scale[slot] <= 0.0 || old.scale[slot] <= 0.0 || old.keys.empty()) {
+                    continue;
+                }
+                const std::string& oldKey = old.keys[old.slotKey[slot]];
                 const CityRenderMeta::Level& a = n.levels[slot];
                 const CityRenderMeta::Level& b = old.levels[slot];
-                sameGrid = (n.scale[slot] > 0.0) == (old.scale[slot] > 0.0) &&
-                           (n.scale[slot] <= 0.0 ||
-                            (a.zoom == b.zoom && a.tilesX == b.tilesX && a.tilesY == b.tilesY &&
-                             std::fabs(a.originX - b.originX) < 0.5f && std::fabs(a.originY - b.originY) < 0.5f &&
-                             n.scale[slot] == old.scale[slot]));
-            }
-            if (sameGrid) {
-                n.previousKey.cityKey = old.key.cityKey;
+                if (oldKey != n.keys[n.slotKey[slot]] && a.zoom == b.zoom && a.tilesX == b.tilesX &&
+                    a.tilesY == b.tilesY && std::fabs(a.originX - b.originX) < 0.5f &&
+                    std::fabs(a.originY - b.originY) < 0.5f && n.scale[slot] == old.scale[slot]) {
+                    n.previousKeys[slot] = oldKey;
+                }
             }
         }
         if (any) {
@@ -411,8 +430,9 @@ void NeighborRenderer::MarkReadyTile_(const TileKey& key, const CameraFrame& fra
     if (key.rotation != frame.rotation) {
         return;
     }
+    const int slot = frame.rotation * ViewMath::kZoomCount + frame.zoomIndex;
     for (const Neighbor& neighbor : neighbors_) {
-        if (neighbor.key.cityKey != key.cityKey) {
+        if (neighbor.keys.empty() || neighbor.keys[neighbor.slotKey[slot]] != key.cityKey) {
             continue;
         }
         NeighborMath::LevelPlacement placement;
@@ -459,7 +479,7 @@ void NeighborRenderer::FlushDirty_()
                 reinterpret_cast<AddDirtyRectangleFn>(RenderAddresses::Renderer::kAddDirtyRectangle);
             for (int i = 0; i < dirty_.Count(); ++i) {
                 addDirtyRectangle(renderer, RenderAddresses::Renderer::kDirtyKindRegion, &dirty_[i], nullptr,
-                                  RenderAddresses::Renderer::kDirtyNow);
+                                  0);  // BISECT
             }
             dirtySent_ += static_cast<uint64_t>(dirty_.Count());
         }
@@ -701,6 +721,17 @@ void NeighborRenderer::DrawGroup_(const bool front)
                                         frame.viewportHeight, tx0, ty0, tx1, ty1)) {
             continue;
         }
+        {
+            const int slot = frame.rotation * ViewMath::kZoomCount + frame.zoomIndex;
+            const std::string& viewKey = neighbor.keys[neighbor.slotKey[slot]];
+            if (neighbor.key.cityKey != viewKey) {
+                neighbor.key.cityKey = viewKey;  // reuses the string's storage
+                neighbor.standInKey.cityKey = viewKey;
+            }
+            if (neighbor.previousKey.cityKey != neighbor.previousKeys[slot]) {
+                neighbor.previousKey.cityKey = neighbor.previousKeys[slot];
+            }
+        }
         neighbor.key.rotation = frame.rotation;
         neighbor.key.zoom = level->zoom;
         const bool neighborLinear = placement.tilePixels != static_cast<double>(neighbor.tileSize);
@@ -797,6 +828,13 @@ void NeighborRenderer::DrawPanelSection()
         return;
     }
     const int slot = rotation * ViewMath::kZoomCount + std::clamp(zoom, 0, ViewMath::kZoomCount - 1);
+    const auto missing = std::ranges::count_if(neighbors_, [&](const Neighbor& n) { return n.scale[slot] <= 0.0; });
+    if (missing > 0) {
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
+                           "%lld neighbors are not shown: none of their renders has rotation %d at zoom %d or "
+                           "below. Render them in this rotation.",
+                           static_cast<long long>(missing), rotation + 1, std::clamp(zoom, 0, 4) + 1);
+    }
     if (ImGui::BeginTable("neighbors", 4,
                           ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY |
                               ImGuiTableFlags_SizingStretchProp,

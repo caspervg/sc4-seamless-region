@@ -149,8 +149,10 @@ class TileStore final : public Module
 {
 public:
     // Encode queue capacity in tiles. QueueWrite returns false when it is full, and then
-    // leaves the caller's rgba buffer intact so the caller can retry with it.
-    static constexpr size_t kQueueCapacity = 24;
+    // leaves the caller's rgba buffer intact so the caller can retry with it. Room for a whole
+    // capture block (up to 32 tiles, CaptureMath::kMaxBlockPixels) and the next one's start, so
+    // the capture does not wait on every block. 1 MB per 512 px tile.
+    static constexpr size_t kQueueCapacity = 48;
     static constexpr const char* kFolderName = "RegionRenders";
 
     TileStore() = default;
@@ -183,6 +185,9 @@ public:
     // Seasons::FallbackOrder that has a meta.json, where a main render made at a date counts as
     // the slot of its season. The city key when there is none.
     [[nodiscard]] std::string ChooseStorageKey(const std::string& cityKey, Season wanted) const;
+    // Every storage key of the city with a meta.json, in the order of ChooseStorageKey: the first
+    // is its choice, the rest stand in for views (rotation, zoom) that the first has no level for.
+    [[nodiscard]] std::vector<std::string> StorageKeysInOrder(const std::string& cityKey, Season wanted) const;
     // Cached directory index, no disk hit and no allocation per call once a city is indexed.
     // The first call for a city that the background scan has not reached yet scans that city.
     [[nodiscard]] bool HasTile(const TileKey& key) const;

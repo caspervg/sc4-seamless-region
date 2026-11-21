@@ -7,6 +7,7 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <format>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -547,6 +548,23 @@ void TileCache::Clear()
 void TileCache::SetOnTileReady(std::function<void(const TileKey&)> callback)
 {
     impl_->onReady = std::move(callback);
+}
+
+std::string TileCache::StatsText() const
+{
+    const Impl& s = *impl_;
+    size_t waitingDecode = 0, waitingUpload = 0, freeBuffers = 0;
+    {
+        std::lock_guard lock(impl_->mutex);
+        waitingDecode = s.requests.size();
+        waitingUpload = s.done.size();
+        freeBuffers = s.freeBuffers.size();
+    }
+    return std::format("tiles={} hits={} misses={} decode={} upload={} pending={} free={} workers={} uploaded={} "
+                       "failed={} missing={} overBudget={} queueDrops={} pass={}",
+                       s.lru.Count(), s.hits, s.misses, waitingDecode, waitingUpload, s.pending.size(), freeBuffers,
+                       s.workers.size(), s.uploads, s.failures, s.missing.size(), s.overBudget, s.queueDrops,
+                       s.passStamp);
 }
 
 void TileCache::DrawPanelSection()

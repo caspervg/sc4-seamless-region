@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
 
 #include "core/GameAccess.hpp"
 #include "public/cIGZImGuiService.h"
@@ -69,6 +70,8 @@ public:
     // The driver texture name for SC4DrawContext::SetTexture, or 0 when the texture cannot
     // be drawn right now (device lost).
     [[nodiscard]] uint32_t DriverTexture(const TileTexture& texture) const;
+    // One line of counters for the remote status command.
+    [[nodiscard]] std::string StatsText() const;
     // Decodes and uploads still to do. Zero when the cache is idle.
     [[nodiscard]] size_t PendingCount() const;
 

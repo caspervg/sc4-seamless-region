@@ -734,20 +734,29 @@ bool TileStore::NeedsRender(const CityInfo& city, const std::string& storageKey,
 
 std::string TileStore::ChooseStorageKey(const std::string& cityKey, const Season wanted) const
 {
+    std::vector<std::string> keys = StorageKeysInOrder(cityKey, wanted);
+    return keys.empty() ? cityKey : std::move(keys.front());
+}
+
+std::vector<std::string> TileStore::StorageKeysInOrder(const std::string& cityKey, const Season wanted) const
+{
+    std::vector<std::string> keys;
     const std::optional<CityRenderMeta> main = LoadMeta(cityKey);
     const Season mainSeason = main && main->renderMonth > 0 ? Seasons::OfMonth(main->renderMonth) : Season::Main;
+    bool mainAdded = false;
     for (const Season season : Seasons::FallbackOrder(wanted)) {
-        if (main && (season == mainSeason || season == Season::Main)) {
-            return cityKey;
+        if (main && !mainAdded && (season == mainSeason || season == Season::Main)) {
+            keys.push_back(cityKey);
+            mainAdded = true;
         }
         if (season != Season::Main) {
             std::string key = Seasons::StorageKey(cityKey, season);
             if (LoadMeta(key)) {
-                return key;
+                keys.push_back(std::move(key));
             }
         }
     }
-    return cityKey;
+    return keys;
 }
 
 bool TileStore::WriteMeta(const std::string& cityKey, const CityRenderMeta& meta)

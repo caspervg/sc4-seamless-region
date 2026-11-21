@@ -60,6 +60,12 @@ private:
         NeighborMath::CellRect cells;
         cS3DVector3 originOffset;  // metres, relative to the current city
         int tileSize = 512;
+        std::string cityKey;       // the city, without a season
+        // The renders of the city in the order they stand in (StorageKeysInOrder), and per view
+        // the one drawn there: a season render with only rotation 1 leaves the other rotations
+        // to the next one, finally the main render.
+        std::vector<std::string> keys;
+        std::array<uint8_t, kLevelSlots> slotKey{};
         // Per view: the level drawn there and its scale (screen pixels per tile pixel at
         // magnification 1). Scale 0: nothing to draw in that view.
         std::array<CityRenderMeta::Level, kLevelSlots> levels{};
@@ -72,10 +78,11 @@ private:
         uint8_t frontMask = 0;     // bit r: drawn in front of the current city at rotation r
         TileKey key;               // cityKey is fixed, the rest changes per tile (no allocation)
         TileKey standInKey;        // the same for stand-in tiles
-        // The render shown before the last rebuild (another season) when it lies on the same
-        // grid in every view: its tiles still in the cache fill the spots of tiles still loading.
-        // Empty cityKey: none.
-        TileKey previousKey;
+        // Per view: the render shown there before the last rebuild (another season) when it lies
+        // on the same grid. Its tiles still in the cache fill the spots of tiles still loading.
+        // Empty: none.
+        std::array<std::string, kLevelSlots> previousKeys{};
+        TileKey previousKey;  // per tile, like key
         int visibleTiles = 0;      // last draw, for the panel
         int readyTiles = 0;
     };

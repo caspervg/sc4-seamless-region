@@ -1990,7 +1990,7 @@ void CityCapturer::PhaseText_(char* text, const size_t size) const
     case Phase::WaitStore:
         std::snprintf(text, size, "Rotation %d, zoom %d%s: tile %d of %d%s", level ? level->rotation : 0,
                       level ? level->zoom + 1 : 0, level && level->transport ? ", transport" : "", levelTilesDone_ + 1,
-                      level ? level->tiles : 0, phase_ == Phase::WaitStore ? " (waiting for the tile writer)" : "");
+                      level ? level->tiles : 0, phase_ == Phase::WaitStore && waiting_ ? " (waiting for the tile writer)" : "");
         break;
     case Phase::Finish: std::snprintf(text, size, "Writing the last tiles"); break;
     case Phase::Idle: std::snprintf(text, size, "%s", progress_.phase.c_str()); break;

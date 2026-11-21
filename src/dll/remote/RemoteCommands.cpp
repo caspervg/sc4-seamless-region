@@ -16,6 +16,7 @@
 #include "core/Messages.hpp"
 #include "imgui.h"
 #include "region/RegionIndex.hpp"
+#include "render/TileCache.hpp"
 #include "switching/CitySwitcher.hpp"
 #include "utils/Logger.h"
 #include "utils/Settings.h"
@@ -138,6 +139,9 @@ bool RemoteCommands::Run_(const uint32_t id, cIGZCommandParameterSet* input, std
                                 ? std::format("{}/{}", settings.captureMonth, settings.captureDay)
                                 : std::string("off"),
                             settings.maxRenderZoom);
+        if (ctx_.tileCache) {
+            reply += " " + ctx_.tileCache->StatsText();
+        }
         return true;
     }
     case kRenderRegion: {
