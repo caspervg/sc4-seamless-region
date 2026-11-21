@@ -43,6 +43,9 @@ public:
     // (the capture module uses it while it renders).
     void SetEnabled(bool enabled);
     [[nodiscard]] bool Enabled() const { return enabled_; }
+    // true: no neighbor drawing and no tile cache while a region render runs, whatever
+    // SetEnabled says. Each city of the batch would load neighbor tiles for nothing.
+    void SetHeld(bool held);
     // Reads every meta.json again, drops the cached tiles and redraws everything (new
     // renders, settings change).
     void InvalidateAll();
@@ -95,6 +98,7 @@ private:
     ModuleContext ctx_;
     bool initialized_ = false;
     bool enabled_ = true;
+    bool held_ = false;
     bool cityActive_ = false;
     bool outlineTiles_ = false;
     bool shownNeighbors_ = true;

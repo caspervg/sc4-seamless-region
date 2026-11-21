@@ -23,6 +23,7 @@
 #include "public/ImGuiPanelAdapter.h"
 #include "public/cIGZImGuiService.h"
 #include "region/RegionIndex.hpp"
+#include "render/NeighborRenderer.hpp"
 #include "store/TileStore.hpp"
 #include "switching/CitySwitcher.hpp"
 #include "utils/Logger.h"
@@ -47,6 +48,38 @@ namespace
     // runs during a batch (CityCapturer).
     constexpr int kSettleTicks = 10;
     constexpr auto kSettleTime = std::chrono::milliseconds(500);
+    // Free address space below which no further city is opened (see Next_).
+    // ponytail: thresholds from one crash; tune them with the numbers the Opening lines log.
+    constexpr uint32_t kMinFreeMB = 1600;
+    constexpr uint32_t kMinLargestFreeMB = 256;
+
+    struct AddressSpace
+    {
+        uint32_t totalMB = 0;
+        uint32_t largestMB = 0;
+    };
+
+    // Free and largest free piece of the process's address space.
+    AddressSpace FreeAddressSpace()
+    {
+        AddressSpace room;
+        SYSTEM_INFO info{};
+        GetSystemInfo(&info);
+        uint64_t total = 0, largest = 0;
+        auto* address = static_cast<uint8_t*>(info.lpMinimumApplicationAddress);
+        MEMORY_BASIC_INFORMATION region{};
+        while (address < info.lpMaximumApplicationAddress && VirtualQuery(address, &region, sizeof(region))) {
+            if (region.State == MEM_FREE) {
+                total += region.RegionSize;
+                largest = std::max<uint64_t>(largest, region.RegionSize);
+            }
+            address = static_cast<uint8_t*>(region.BaseAddress) + region.RegionSize;
+        }
+        room.totalMB = static_cast<uint32_t>(total >> 20);
+        room.largestMB = static_cast<uint32_t>(largest >> 20);
+        return room;
+    }
+
     // The render of a city shows no progress for this long: it is cancelled.
     constexpr auto kCaptureStall = std::chrono::minutes(10);
     constexpr auto kProgressReadInterval = std::chrono::milliseconds(250);
@@ -369,6 +402,9 @@ void RegionBatchRenderer::Begin_()
     if (GameAccess::City()) {
         pause_.emplace(false, true, true, true);
     }
+    if (ctx_.neighborRenderer) {
+        ctx_.neighborRenderer->SetHeld(true);
+    }
     stepId_ = ctx_.idle->AddRecurring([this] { return Step_(); });
 }
 
@@ -441,6 +477,16 @@ void RegionBatchRenderer::Next_()
             settleTicks_ = 0;
             return;
         }
+        // Every city load leaves the 32 bit game with less address space (a run crashed in
+        // LoadCity after 43 cities with about 1.7 GB free in pieces). Stop while the run can
+        // still go on after a restart of the game: it stays in batch.json.
+        const AddressSpace room = FreeAddressSpace();
+        if (room.totalMB < kMinFreeMB || room.largestMB < kMinLargestFreeMB) {
+            Interrupt_(std::format("The game has {} MB of address space left (largest piece {} MB), too little to "
+                                   "load another city safely. Restart the game and continue the region render.",
+                                   room.totalMB, room.largestMB));
+            return;
+        }
         // A city this run opened has no changes of the player: switching without a save loses
         // nothing. The player's own city must be saved, the switcher refuses otherwise.
         if (!Open_(*city)) {
@@ -449,7 +495,8 @@ void RegionBatchRenderer::Next_()
             SaveRun_();
             continue;
         }
-        Log_(std::format("Opening '{}' (attempt {})", current_.name, attempt));
+        Log_(std::format("Opening '{}' (attempt {}, {} MB address space free, largest piece {} MB)", current_.name,
+                         attempt, room.totalMB, room.largestMB));
         phase_ = Phase::Switching;
         return;
     }
@@ -768,6 +815,9 @@ void RegionBatchRenderer::Finish_(const State state, const std::string& message)
 {
     Restamp_();  // the last rendered city, saved when the run left it for the region view
     running_ = false;
+    if (ctx_.neighborRenderer) {
+        ctx_.neighborRenderer->SetHeld(false);
+    }
     if (stepId_ != 0) {
         ctx_.idle->Cancel(stepId_);
         stepId_ = 0;
@@ -805,6 +855,9 @@ void RegionBatchRenderer::Finish_(const State state, const std::string& message)
 void RegionBatchRenderer::Interrupt_(const std::string& why)
 {
     running_ = false;
+    if (ctx_.neighborRenderer) {
+        ctx_.neighborRenderer->SetHeld(false);
+    }
     if (stepId_ != 0) {
         ctx_.idle->Cancel(stepId_);
         stepId_ = 0;

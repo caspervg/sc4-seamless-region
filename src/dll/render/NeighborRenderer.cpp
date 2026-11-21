@@ -175,6 +175,19 @@ void NeighborRenderer::SetEnabled(const bool enabled)
     LOG_INFO("Neighbors: drawing {}", enabled ? "on" : "off");
 }
 
+void NeighborRenderer::SetHeld(const bool held)
+{
+    if (held_ == held) {
+        return;
+    }
+    held_ = held;
+    if (held && ctx_.tileCache) {
+        ctx_.tileCache->Clear();  // gives the memory back for the cities a batch loads
+    }
+    RequestFullRedraw_();
+    LOG_INFO("Neighbors: {} for the region render", held ? "off" : "on again");
+}
+
 void NeighborRenderer::InvalidateAll()
 {
     if (!initialized_) {
@@ -200,7 +213,7 @@ bool NeighborRenderer::ShouldDraw_() const
 {
     // TileStore::HasTile scans a city folder on the calling thread until the store's
     // background index is done. Draw nothing before that, Tick_ redraws when it is ready.
-    return initialized_ && enabled_ && cityActive_ && ctx_.settings->showNeighbors && !neighbors_.empty() &&
+    return initialized_ && enabled_ && !held_ && cityActive_ && ctx_.settings->showNeighbors && !neighbors_.empty() &&
            ctx_.tileStore->IsIndexReady() && GameAccess::Renderer() != nullptr;
 }
 
