@@ -25,7 +25,10 @@
 namespace
 {
     constexpr size_t kMaxRequests = 256;  // more than one 4K screen of tiles
-    constexpr int kDecodeBuffers = 8;     // decoded tiles waiting for upload, 1 MB each
+    constexpr int kDecodeBuffers = 16;    // decoded tiles waiting for upload, 1 MB each
+    // Decode threads (below normal priority). A WebP tile takes a few ms to read and decode; a
+    // 4K screen holds 50 to 60 of them.
+    constexpr int kMaxWorkers = 3;
     constexpr int kMaxTileEdge = 2048;
     constexpr size_t kDefaultTileBytes = 512 * 512 * 4;
     constexpr int kMaxUploadAttempts = 3;
@@ -101,20 +104,19 @@ struct TileCache::Impl
     uint64_t hits = 0, misses = 0, uploads = 0, evictions = 0, failures = 0, overBudget = 0, queueDrops = 0;
     bool loggedOverBudget = false, loggedNotPowerOfTwo = false, loggedCreateFailed = false, loggedDecodeFailed = false;
 
-    // Shared with the worker, guarded by mutex.
+    // Shared with the workers, guarded by mutex.
     std::mutex mutex;
     std::condition_variable wake;
     bool stop = false;
     uint32_t epoch = 0;
-    std::vector<Request> requests;  // newest at the back, the worker takes the newest first
+    std::vector<Request> requests;  // newest at the back, the workers take the newest first
     std::vector<Done> done;
     std::vector<int> freeBuffers;
 
     // A buffer belongs to the worker while it decodes and to the game thread while its Done
     // item waits for upload.
     std::array<std::vector<uint8_t>, kDecodeBuffers> buffers;
-    std::vector<uint8_t> fileBytes;  // worker only
-    std::thread worker;
+    std::vector<std::thread> workers;
 
     void ReleaseBuffer(const int buffer)
     {
@@ -184,17 +186,20 @@ void TileCache::OnCityShutdown()
 void TileCache::StartWorker_()
 {
     Impl& s = *impl_;
-    if (!s.initialized || s.worker.joinable()) {
+    if (!s.initialized || !s.workers.empty()) {
         return;
     }
     s.stop = false;
-    s.worker = std::thread([this] { WorkerMain_(); });
+    const int count = std::clamp(static_cast<int>(std::thread::hardware_concurrency()) - 1, 1, kMaxWorkers);
+    for (int i = 0; i < count; ++i) {
+        s.workers.emplace_back([this] { WorkerMain_(); });
+    }
 }
 
 void TileCache::StopWorker_()
 {
     Impl& s = *impl_;
-    if (!s.worker.joinable()) {
+    if (s.workers.empty()) {
         return;
     }
     {
@@ -202,13 +207,17 @@ void TileCache::StopWorker_()
         s.stop = true;
     }
     s.wake.notify_all();
-    s.worker.join();
+    for (std::thread& worker : s.workers) {
+        worker.join();
+    }
+    s.workers.clear();
 }
 
 void TileCache::WorkerMain_()
 {
     Impl& s = *impl_;
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    std::vector<uint8_t> fileBytes;  // this worker's, kept between tiles
 
     std::unique_lock lock(s.mutex);
     for (;;) {
@@ -227,8 +236,8 @@ void TileCache::WorkerMain_()
         bool ok = false;
         try {
             std::vector<uint8_t>& rgba = s.buffers[buffer];
-            ok = ctx_.tileStore->ReadTile(request.key, s.fileBytes) &&
-                 DecodeTile(std::span<const uint8_t>(s.fileBytes), rgba, w, h) && w > 0 && h > 0 &&
+            ok = ctx_.tileStore->ReadTile(request.key, fileBytes) &&
+                 DecodeTile(std::span<const uint8_t>(fileBytes), rgba, w, h) && w > 0 && h > 0 &&
                  w <= kMaxTileEdge && h <= kMaxTileEdge && rgba.size() >= static_cast<size_t>(w) * h * 4;
             if (ok) {
                 PremultiplyAlpha(rgba.data(), static_cast<size_t>(w) * h);

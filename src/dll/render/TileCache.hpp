@@ -2,7 +2,7 @@
 
 // Render (W2-E): a bounded cache of neighbor tile textures.
 //
-// Decodes on one worker thread (below normal priority, runs only while a city is open),
+// Decodes on up to three worker threads (below normal priority, only while a city is open),
 // uploads on the game thread within the per-frame budget (Settings::uploadTilesPerFrame,
 // Settings::uploadMsPerFrame). Hard memory cap from Settings::tileCacheMB. Tiles that were
 // drawn least recently go first.

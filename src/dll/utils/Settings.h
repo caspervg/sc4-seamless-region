@@ -102,9 +102,9 @@ public:
     // too little at 4K: one neighbor can show more tiles than that holds.
     int tileCacheMB = 512;
     // Texture uploads per frame: at most this many tiles...
-    int uploadTilesPerFrame = 4;
+    int uploadTilesPerFrame = 16;
     // ...or this many milliseconds, whichever comes first.
-    int uploadMsPerFrame = 3;
+    int uploadMsPerFrame = 12;
     // At zoom 4 and 5, scroll at most this far past the city edge, in metres.
     int zoom45BandMetres = 1024;
     // WebP quality for stored tiles, 0 to 100.
