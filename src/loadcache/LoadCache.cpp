@@ -23,6 +23,7 @@
 #include <filesystem>
 #include <initializer_list>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -47,10 +48,13 @@ namespace
     constexpr uint16_t kGameVersion = 641;
 
     // Resource manager fields: the segment deque begin iterator at +0x58 {cur, first, last,
-    // node}, its end cur at +0x68, buffers of 32 pointers; the critical section at +0x80.
+    // node}, its end cur at +0x68, buffers of 32 pointers. Two critical sections: +0x80 for
+    // resources (GetResource, GetResourceList), +0x50 for the segment deque (register,
+    // unregister, FindDBSegment). The game takes +0x80 first.
     constexpr size_t kSegmentsBegin = 0x58;
     constexpr size_t kSegmentsEnd = 0x68;
-    constexpr size_t kLock = 0x80;
+    constexpr size_t kResourceLock = 0x80;
+    constexpr size_t kSegmentLock = 0x50;
     constexpr int kDequeBuffer = 32;
 
     struct Key
@@ -141,13 +145,27 @@ namespace
         std::unordered_map<void*, Run> runs;
     };
     std::mutex gListMutex;
-    std::unordered_set<void*> gStartupSegments;  // registered before PostAppInit
+    // Registered before PostAppInit. Written once there, read without a lock afterwards.
+    std::unordered_set<void*> gStartupSegments;
     std::unordered_map<uint32_t, TypeKeys> gTypes;
     uint64_t gListHits = 0, gListMisses = 0;
 
-    // The segments of the resource manager, in its order. Call with its lock held.
+    struct RmLock
+    {
+        void* cs;
+        RmLock(void* rm, const size_t offset) : cs(static_cast<uint8_t*>(rm) + offset)
+        {
+            Slot<void(__thiscall*)(void*)>(cs, 0x4)(cs);
+        }
+        ~RmLock() { Slot<void(__thiscall*)(void*)>(cs, 0x8)(cs); }
+        RmLock(const RmLock&) = delete;
+        RmLock& operator=(const RmLock&) = delete;
+    };
+
+    // The segments of the resource manager, in its order.
     std::vector<void*> Segments(void* rm)
     {
+        RmLock segmentLock(rm, kSegmentLock);
         auto* base = static_cast<uint8_t*>(rm);
         void** cur = *reinterpret_cast<void***>(base + kSegmentsBegin);
         void** last = *reinterpret_cast<void***>(base + kSegmentsBegin + 8);
@@ -164,15 +182,6 @@ namespace
         return segments;
     }
 
-    struct RmLock
-    {
-        void* cs;
-        explicit RmLock(void* rm) : cs(static_cast<uint8_t*>(rm) + kLock) { Slot<void(__thiscall*)(void*)>(cs, 0x4)(cs); }
-        ~RmLock() { Slot<void(__thiscall*)(void*)>(cs, 0x8)(cs); }
-        RmLock(const RmLock&) = delete;
-        RmLock& operator=(const RmLock&) = delete;
-    };
-
     void __cdecl CollectKey(const Key* key, void* keys) { static_cast<std::vector<Key>*>(keys)->push_back(*key); }
 
     // The game's GetResourceList (0x009739cb) for a type filter: the same list, in the same
@@ -184,7 +193,7 @@ namespace
         }
         const uint32_t type = static_cast<uint32_t*>(filter)[2];
         const auto start = std::chrono::steady_clock::now();
-        RmLock rmLock(rm);  // the game's order: its lock first, then ours
+        RmLock rmLock(rm, kResourceLock);  // the game's order: its lock first, then ours
         std::scoped_lock lock(gListMutex);
         if (gStartupSegments.empty()) {
             return gGetResourceList(rm, edx, out, filter);
@@ -232,21 +241,20 @@ namespace
             size = after;
         }
         ++gListMisses;
-        std::vector<Key> all;
-        if (whole) {
-            all.reserve(size);
-            ListEnum(list, &CollectKey, &all);
-            whole = all.size() == size;
-        }
-        if (whole) {
-            std::vector<Key> keys;
-            for (auto& [segment, run] : entry.runs) {
-                const uint32_t first = static_cast<uint32_t>(keys.size());
-                keys.insert(keys.end(), all.begin() + run.first, all.begin() + run.first + run.size);
-                run.first = first;
+        // The list is complete here; a failure below only means nothing is kept.
+        try {
+            if (whole) {
+                // The runs index the whole list (the keys of later segments stay in it unused).
+                entry.keys.reserve(size);
+                ListEnum(list, &CollectKey, &entry.keys);
+                whole = entry.keys.size() == size;
             }
-            entry.keys = std::move(keys);
-            gTypes.emplace(type, std::move(entry));
+            if (whole) {
+                gTypes.emplace(type, std::move(entry));
+            }
+        }
+        catch (...) {
+            whole = false;
         }
         Log("Key lists: type %08X built in %.0f ms (%u keys, %zu segments)%s", type, MsSince(start), count,
             segments.size(), whole ? ", kept" : ", not kept: the list does not read back");
@@ -260,13 +268,29 @@ namespace
     std::unordered_map<Key, uint32_t, KeyHash> gExemplarTypes;
     uint64_t gScanSkipped = 0, gScanPassed = 0;
 
-    uint32_t ReadExemplarType(const Key& key)
+    // The type to remember for an exemplar, or nothing: when it did not load (maybe for a
+    // while only) or when the record the game uses is not in a start-up segment (a city save,
+    // which can differ from city to city).
+    std::optional<uint32_t> ReadExemplarType(const Key& key)
     {
         void* rm = *reinterpret_cast<void**>(kResourceManagerPtr);
+        if (!rm) {
+            return std::nullopt;
+        }
+        // FindDBSegment (slot +0x80): the first segment with the record, as GetResource takes it.
+        void* segment = nullptr;
+        if (!Slot<bool(__thiscall*)(void*, const Key&, void**)>(rm, 0x80)(rm, key, &segment) || !segment) {
+            return std::nullopt;
+        }
+        const bool startup = gStartupSegments.contains(segment);
+        Release(segment);
+        if (!startup) {
+            return std::nullopt;
+        }
         void* resource = nullptr;
         using GetResourceFn = bool(__thiscall*)(void*, const Key&, uint32_t, void**, uint32_t, void*);
-        if (!rm || !Slot<GetResourceFn>(rm, 0xc)(rm, key, kPropertyHolderIid, &resource, 0, nullptr) || !resource) {
-            return kNoType;
+        if (!Slot<GetResourceFn>(rm, 0xc)(rm, key, kPropertyHolderIid, &resource, 0, nullptr) || !resource) {
+            return std::nullopt;
         }
         void* holder = Slot<void*(__thiscall*)(void*)>(resource, 0x1c)(resource);
         uint32_t type = 0;
@@ -330,9 +354,14 @@ namespace
         ++gScanPassed;
         if (!known) {
             // The callback loaded it just now, so this read comes from the game's cache.
-            type = ReadExemplarType(*key);
-            std::scoped_lock lock(gTypeMutex);
-            gExemplarTypes.emplace(*key, type);
+            if (const std::optional<uint32_t> read = ReadExemplarType(*key)) {
+                try {
+                    std::scoped_lock lock(gTypeMutex);
+                    gExemplarTypes.emplace(*key, *read);
+                }
+                catch (...) {
+                }
+            }
         }
     }
 
@@ -410,10 +439,13 @@ public:
         // Every plugin segment is registered by now; later ones are city saves.
         void* rm = *reinterpret_cast<void**>(kResourceManagerPtr);
         if (rm && gGetResourceList) {
-            RmLock rmLock(rm);
+            RmLock rmLock(rm, kResourceLock);
             std::scoped_lock lock(gListMutex);
             for (void* segment : Segments(rm)) {
-                gStartupSegments.insert(segment);
+                // Held for the session: no later segment can come at the same address.
+                if (gStartupSegments.insert(segment).second) {
+                    ::AddRef(segment);
+                }
             }
             Log("%zu segments at start-up", gStartupSegments.size());
         }

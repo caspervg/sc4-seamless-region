@@ -9,7 +9,7 @@ Windows 1.1.641. Found with the load profiler (`src/profiler`) and a read-only G
 | total | 30-32 s | 11.6 s |
 | `GetResourceList` (index walks) | 34 calls, 9-13 s | 13 calls, 3.5 s |
 | Type 21 scan | ~4.5 s + list | ~4.5 s |
-| lot configurations (`kPostCityInit`, first load only) | 15.6 s | - |
+| first load only, at `kPostCityInit`: network RUL INI load (`cSC4NetworkTool::Init` `0x006269c0` -> `0x006253d0`, flag `0x00b452a8`; RUL2 overrides `0x0063d3e0` alone ~11 s), lot configurations (`0x0048a5e0`) ~2.4 s | 15.6 s | - |
 
 ## Key lists
 
@@ -20,6 +20,14 @@ Windows 1.1.641. Found with the load profiler (`src/profiler`) and a read-only G
   vtable `0x00aada64`) and calls slot +0x48 `(list, filter)` of every segment.
 - `GetResourceListForType` `0x00973280` (slot +0x48): wraps the type in a filter (12 bytes,
   vtable `0x00ad8970`, type at +8) and calls slot +0x44.
+- Locks: `rm+0x80` guards resources (`GetResource`, `GetResourceList`); `rm+0x50` guards the
+  segment deque (register front +0x6c `0x0097437b`, register back +0x70 `0x009743c1`, used for
+  city saves in `LoadCity` `0x00455743` and new city `0x00454b88`; unregister +0x74
+  `0x009742b7`; `FindDBSegment(key, seg**)` +0x80 `0x0097377f`, first segment in deque order
+  with the record, AddRef'd). The game takes +0x80 before +0x50. `GetResourceList` itself walks
+  the deque under +0x80 only.
+- Plugin segments are registered once, in `SetupResources` `0x004572b0` (one call site,
+  `0x0044c97e`); there is no later plugin folder.
 - Segments: a deque of segment pointers, begin iterator `{cur, first, last, node}` at `rm+0x58`,
   end `cur` at `rm+0x68`, 32 pointers per buffer (`0x0097316e` increments).
 - Key list (vtable `0x00aada64`): a deque of 12 byte keys at +0x18, insertion order,
@@ -64,5 +72,18 @@ City saves hold exemplars too (Auclair: 237 records of type 0x6534284a).
   together in the game's segment order: the noted runs for start-up segments, a live call for
   segments added since (city saves). The same keys in the same order, and a new list each time.
 - Exemplar scans: the type of each exemplar is noted when a callback first sees it (read
-  again after the game's callback, from its cache). Later, a callback is skipped for an
+  again after the game's callback, from its cache), only when the record the game uses is in
+  a start-up segment (saves differ per city) and it loaded. Later, a callback is skipped for an
   exemplar of a type it does not take.
+- Start-up segments get one reference each, so no later segment can reuse their address.
+
+## Further ideas (not done)
+
+- `cRZFile::Seek` `0x0091895a` (vtable `0x00ad1e58` +0x34) calls `SetFilePointer` every time,
+  also for an absolute seek inside the read buffer (`[+0x60, +0x60+[+0x64])`, position
+  `+0x48`). The INI line reader `0x0091ca15` seeks back after every read. ~5800 of 16000
+  samples on a cold load (most in the RUL load), ~1300 of 6300 warm. Read-only handles only.
+- Type+group filter lists (filter vtable `0x00aaf4e0`, from `0x00682020`; users `0x0063f700`,
+  `0x006a1450`, `0x0074f410`, `0x0074fdc0`) walk the index on the first load (~2.7 s): could
+  come from the kept exemplar runs.
+- Keep the exemplar type index on disk, keyed by the plugin files' names, sizes and times.
