@@ -2091,6 +2091,30 @@ void CityCapturer::DrawDateChoice(Settings& settings)
             settings.captureDay = day;
             changed = true;
         }
+        // Mid-season dates: every seasonal pack of a typical plugins folder is in the same season
+        // there (seasonal props start their seasons on different days, docs/re-notes/seasons.md,
+        // Plugin audit). Spring shows summer for packs without a spring, and for the trees.
+        static constexpr struct
+        {
+            const char* name;
+            int month, day;
+        } kPresets[] = {{"Spring", 4, 15}, {"Summer", 7, 15}, {"Fall", 10, 15}, {"Winter", 1, 15}};
+        for (const auto& preset : kPresets) {
+            if (&preset != kPresets) {
+                ImGui::SameLine();
+            }
+            const bool current = settings.captureMonth == preset.month && settings.captureDay == preset.day;
+            ImGui::BeginDisabled(current);
+            if (ImGui::SmallButton(preset.name)) {
+                settings.captureMonth = preset.month;
+                settings.captureDay = preset.day;
+                changed = true;
+            }
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip("%s %d", kMonths[preset.month - 1], preset.day);
+            }
+        }
         changed |= ImGui::Checkbox("Seasonal trees", &settings.captureSeasonalFlora);
         ImGui::SameLine();
         ImGui::TextDisabled("(?)");
