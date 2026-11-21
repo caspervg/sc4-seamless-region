@@ -2,25 +2,30 @@
 // redoes on every load. Plugins do not change while the game runs, so:
 //
 // - Key lists by type. ResourceManager::GetResourceList walks the index of every DBPF segment
-//   (about 270 ms per call, 13 calls per city load). A list asked for by type is kept and
-//   handed out again while the segments registered at start-up are unchanged and the segments
-//   added since (city saves) have no key of that type.
-// - The Type 21 scan. On every city load the network props manager loads every exemplar to
-//   find the ones with ExemplarType 0x21 (about 4.5 s). After the first scan only those and
-//   keys not seen before are passed on.
+//   (about 270 ms per call, 13 calls per city load). For the segments registered at start-up
+//   the keys of each type are kept per segment; a list is put together from those, in the
+//   game's segment order, and segments added since (city saves) are asked as before.
+// - Exemplar scans. Nine scans load every exemplar to read its ExemplarType (property 0x10) and
+//   keep only one type, the Type 21 scan alone about 4.5 s per load. The type of each exemplar
+//   is remembered, and a scan's callback is skipped for exemplars of another type. Exemplars not
+//   seen before go to the game as before.
 //
-// Windows SimCity 4 1.1.641 only. Writes SC4LoadCache.log next to the DLL.
+// Windows SimCity 4 1.1.641 only (docs/re-notes/loadcache.md). Writes SC4LoadCache.log next to
+// the DLL.
 
 #include <windows.h>
 
+#include <array>
 #include <chrono>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <initializer_list>
 #include <mutex>
-#include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include <MinHook.h>
@@ -30,19 +35,15 @@
 
 namespace
 {
-    // ---- game addresses (docs/re-notes/loadcache.md) ----
+    // ---- game addresses ----
     constexpr uintptr_t kResourceManagerPtr = 0x00b43ca8;
     constexpr uintptr_t kGetResourceList = 0x009739cb;   // thiscall(rm, list** out, filter*) -> count
-    constexpr uintptr_t kType21Scan = 0x006100d0;        // fastcall(manager)
-    constexpr uintptr_t kType21Callback = 0x0060fb90;    // cdecl(const Key*, manager)
     constexpr uintptr_t kGetPropertyUint = 0x005fd480;   // cdecl(holder, id, uint32_t* out) -> bool
     constexpr uintptr_t kOperatorNew = 0x005e55e0;       // cdecl(size)
     constexpr uintptr_t kKeyListCtor = 0x00974e7a;       // thiscall(memory) -> list
     constexpr uintptr_t kTypeFilterVtable = 0x00ad8970;  // {vtable, refs, type}
-    constexpr uint32_t kExemplarType = 0x6534284a;
     constexpr uint32_t kPropertyHolderIid = 0xa52160f5;
     constexpr uint32_t kExemplarTypeProperty = 0x10;
-    constexpr uint32_t kNetworkPropsType = 0x21;
     constexpr uint16_t kGameVersion = 641;
 
     // Resource manager fields: the segment deque begin iterator at +0x58 {cur, first, last,
@@ -73,8 +74,23 @@ namespace
     }
     void AddRef(void* object) { Slot<uint32_t(__thiscall*)(void*)>(object, 0x4)(object); }
     void Release(void* object) { Slot<uint32_t(__thiscall*)(void*)>(object, 0x8)(object); }
-    uint32_t ListSize(void* list) { return Slot<uint32_t(__thiscall*)(void*)>(list, 0x24)(list); }
 
+    // The game's key list (vtable 0x00aada64): a deque of keys in insertion order, duplicates
+    // kept.
+    using KeyCallback = void(__cdecl*)(const Key*, void*);
+    void ListInsert(void* list, const Key& key) { Slot<bool(__thiscall*)(void*, const Key&)>(list, 0x10)(list, key); }
+    void ListEnum(void* list, KeyCallback callback, void* context)
+    {
+        Slot<void(__thiscall*)(void*, KeyCallback, void*)>(list, 0x1c)(list, callback, context);
+    }
+    uint32_t ListSize(void* list) { return Slot<uint32_t(__thiscall*)(void*)>(list, 0x24)(list); }
+    // Segment slot +0x48: appends the keys the filter takes, returns their count.
+    uint32_t SegmentKeys(void* segment, void* list, void* filter)
+    {
+        return Slot<uint32_t(__thiscall*)(void*, void*, void*)>(segment, 0x48)(segment, list, filter);
+    }
+
+    // As GetResourceList makes one: the game's allocator and constructor, one reference.
     void* NewKeyList()
     {
         void* memory = reinterpret_cast<void*(__cdecl*)(size_t)>(kOperatorNew)(0x40);
@@ -113,16 +129,20 @@ namespace
     using GetResourceListFn = uint32_t(__fastcall*)(void* rm, void* edx, void** out, void* filter);
     GetResourceListFn gGetResourceList = nullptr;
 
-    struct CachedList
+    // The keys of one type in the start-up segments: per segment its run in `keys` and the
+    // count it returned.
+    struct TypeKeys
     {
-        void* list = nullptr;  // one reference held here
-        uint32_t count = 0;    // the return value of the call that made it
-        uint32_t size = 0;     // its size then: a caller that changed the list makes it unusable
+        struct Run
+        {
+            uint32_t first = 0, size = 0, returned = 0;
+        };
+        std::vector<Key> keys;
+        std::unordered_map<void*, Run> runs;
     };
     std::mutex gListMutex;
     std::unordered_set<void*> gStartupSegments;  // registered before PostAppInit
-    std::unordered_map<uint32_t, CachedList> gLists;
-    bool gListsOff = false;
+    std::unordered_map<uint32_t, TypeKeys> gTypes;
     uint64_t gListHits = 0, gListMisses = 0;
 
     // The segments of the resource manager, in its order. Call with its lock held.
@@ -149,8 +169,14 @@ namespace
         void* cs;
         explicit RmLock(void* rm) : cs(static_cast<uint8_t*>(rm) + kLock) { Slot<void(__thiscall*)(void*)>(cs, 0x4)(cs); }
         ~RmLock() { Slot<void(__thiscall*)(void*)>(cs, 0x8)(cs); }
+        RmLock(const RmLock&) = delete;
+        RmLock& operator=(const RmLock&) = delete;
     };
 
+    void __cdecl CollectKey(const Key* key, void* keys) { static_cast<std::vector<Key>*>(keys)->push_back(*key); }
+
+    // The game's GetResourceList (0x009739cb) for a type filter: the same list, in the same
+    // order, with the keys of start-up segments from the cache.
     uint32_t __fastcall GetResourceListHook(void* rm, void* edx, void** out, void* filter)
     {
         if (!filter || *static_cast<uintptr_t*>(filter) != kTypeFilterVtable || !out) {
@@ -160,87 +186,87 @@ namespace
         const auto start = std::chrono::steady_clock::now();
         RmLock rmLock(rm);  // the game's order: its lock first, then ours
         std::scoped_lock lock(gListMutex);
-        if (gStartupSegments.empty() || gListsOff) {
+        if (gStartupSegments.empty()) {
             return gGetResourceList(rm, edx, out, filter);
         }
         const std::vector<void*> segments = Segments(rm);
-        size_t startup = 0;
-        std::vector<void*> added;
-        for (void* segment : segments) {
-            if (gStartupSegments.contains(segment)) {
-                ++startup;
-            }
-            else {
-                added.push_back(segment);
-            }
-        }
-        if (startup != gStartupSegments.size()) {
-            // A segment of the start-up set is gone: plugins changed after all. Stay out of it.
-            Log("Key lists: %zu of %zu start-up segments left, the cache is off", startup, gStartupSegments.size());
-            for (auto& [t, cached] : gLists) {
-                Release(cached.list);
-            }
-            gLists.clear();
-            gListsOff = true;
+        void* list = NewKeyList();
+        if (!list) {
             return gGetResourceList(rm, edx, out, filter);
         }
-        // Keys of this type in the segments added since start-up (a city save, usually none).
-        uint32_t addedKeys = 0;
-        if (!added.empty()) {
-            if (void* scratch = NewKeyList()) {
-                for (void* segment : added) {
-                    addedKeys += Slot<uint32_t(__thiscall*)(void*, void*, void*)>(segment, 0x48)(segment, scratch, filter);
+        *out = list;
+        uint32_t count = 0;
+        if (const auto known = gTypes.find(type); known != gTypes.end()) {
+            size_t asked = 0;
+            for (void* segment : segments) {
+                const auto run = known->second.runs.find(segment);
+                if (run == known->second.runs.end()) {
+                    count += SegmentKeys(segment, list, filter);  // not a start-up segment
+                    ++asked;
+                    continue;
                 }
-                Release(scratch);
-            }
-            else {
-                addedKeys = 1;
-            }
-        }
-        if (addedKeys == 0) {
-            if (const auto it = gLists.find(type); it != gLists.end()) {
-                if (ListSize(it->second.list) == it->second.size) {
-                    AddRef(it->second.list);
-                    *out = it->second.list;
-                    ++gListHits;
-                    return it->second.count;
+                const Key* key = known->second.keys.data() + run->second.first;
+                for (uint32_t i = 0; i < run->second.size; ++i) {
+                    ListInsert(list, key[i]);
                 }
-                Log("Key lists: type %08X was changed by a caller, made again", type);
-                Release(it->second.list);
-                gLists.erase(it);
+                count += run->second.returned;
             }
+            if (++gListHits <= 100) {
+                Log("Key lists: type %08X from the cache in %.1f ms (%u keys, %zu segments asked)", type, MsSince(start),
+                    count, asked);
+            }
+            return count;
         }
-        const uint32_t count = gGetResourceList(rm, edx, out, filter);
+        // First time for this type: the game's loop, noting each start-up segment's run.
+        TypeKeys entry;
+        uint32_t size = 0;
+        bool whole = true;
+        for (void* segment : segments) {
+            const uint32_t returned = SegmentKeys(segment, list, filter);
+            count += returned;
+            const uint32_t after = ListSize(list);
+            whole &= after >= size;
+            if (gStartupSegments.contains(segment)) {
+                entry.runs[segment] = {size, after >= size ? after - size : 0, returned};
+            }
+            size = after;
+        }
         ++gListMisses;
-        if (addedKeys == 0 && *out) {
-            AddRef(*out);
-            gLists[type] = {*out, count, ListSize(*out)};
+        std::vector<Key> all;
+        if (whole) {
+            all.reserve(size);
+            ListEnum(list, &CollectKey, &all);
+            whole = all.size() == size;
         }
-        Log("Key lists: type %08X built in %.0f ms (%u keys, %zu segments, %zu added since start-up with %u keys)%s",
-            type, MsSince(start), count, segments.size(), added.size(), addedKeys, addedKeys == 0 ? ", kept" : "");
+        if (whole) {
+            std::vector<Key> keys;
+            for (auto& [segment, run] : entry.runs) {
+                const uint32_t first = static_cast<uint32_t>(keys.size());
+                keys.insert(keys.end(), all.begin() + run.first, all.begin() + run.first + run.size);
+                run.first = first;
+            }
+            entry.keys = std::move(keys);
+            gTypes.emplace(type, std::move(entry));
+        }
+        Log("Key lists: type %08X built in %.0f ms (%u keys, %zu segments)%s", type, MsSince(start), count,
+            segments.size(), whole ? ", kept" : ", not kept: the list does not read back");
         return count;
     }
 
-    // ---- Type 21 scan ----
-    using Type21ScanFn = void(__fastcall*)(void* manager);
-    using Type21CallbackFn = void(__cdecl*)(const Key* key, void* manager);
-    Type21ScanFn gType21Scan = nullptr;
-    // ExemplarType == 0x21 per exemplar key seen in a scan.
-    std::unordered_map<Key, bool, KeyHash> gIsType21;
+    // ---- exemplar scans ----
+    // ExemplarType of every exemplar a scan has seen. kNoType: it did not load or has none.
+    constexpr uint32_t kNoType = 0xFFFFFFFF;
+    std::mutex gTypeMutex;
+    std::unordered_map<Key, uint32_t, KeyHash> gExemplarTypes;
+    uint64_t gScanSkipped = 0, gScanPassed = 0;
 
-    struct ScanContext
-    {
-        void* manager;
-        uint32_t keys = 0, skipped = 0, checked = 0, passed = 0;
-    };
-
-    bool IsType21(const Key& key)
+    uint32_t ReadExemplarType(const Key& key)
     {
         void* rm = *reinterpret_cast<void**>(kResourceManagerPtr);
         void* resource = nullptr;
         using GetResourceFn = bool(__thiscall*)(void*, const Key&, uint32_t, void**, uint32_t, void*);
-        if (!Slot<GetResourceFn>(rm, 0xc)(rm, key, kPropertyHolderIid, &resource, 0, nullptr) || !resource) {
-            return false;
+        if (!rm || !Slot<GetResourceFn>(rm, 0xc)(rm, key, kPropertyHolderIid, &resource, 0, nullptr) || !resource) {
+            return kNoType;
         }
         void* holder = Slot<void*(__thiscall*)(void*)>(resource, 0x1c)(resource);
         uint32_t type = 0;
@@ -248,50 +274,72 @@ namespace
             holder && reinterpret_cast<bool(__cdecl*)(void*, uint32_t, uint32_t*)>(kGetPropertyUint)(
                           holder, kExemplarTypeProperty, &type);
         Release(resource);
-        return found && type == kNetworkPropsType;
+        return found ? type : kNoType;
     }
 
-    void __cdecl Type21Callback(const Key* key, void* context)
+    // A scan callback, cdecl (const key*, context). Each loads the exemplar, reads property 0x10
+    // and only releases it again when the type is not one it takes (each one checked in Ghidra,
+    // docs/re-notes/loadcache.md).
+    struct Scan
     {
-        auto* scan = static_cast<ScanContext*>(context);
-        ++scan->keys;
-        const auto it = gIsType21.find(*key);
-        bool type21;
-        if (it != gIsType21.end()) {
-            type21 = it->second;
-            scan->skipped += type21 ? 0 : 1;
+        uintptr_t address;
+        const char* name;
+        std::array<uint32_t, 3> types;  // the types it takes, kNoType for none
+        size_t contextTypeOffset;       // or, when not 0: the type it takes is at context + this
+    };
+    constexpr Scan kScans[] = {
+        {0x0060fb90, "network props (type 0x21)", {0x21, kNoType, kNoType}, 0},
+        {0x00513a60, "automata", {kNoType, kNoType, kNoType}, 0xa40},
+        {0x006a7840, "demand (type 3)", {0x3, kNoType, kNoType}, 0},
+        {0x006b03b0, "building development (type 0xf)", {0xf, kNoType, kNoType}, 0},
+        {0x00699e20, "type 4", {0x4, kNoType, kNoType}, 0},
+        {0x0069d130, "types 2, 0x11, 0x15", {0x2, 0x11, 0x15}, 0},
+        {0x0078cb40, "type 0x29", {0x29, kNoType, kNoType}, 0},
+        {0x0080e430, "type 0xe", {0xe, kNoType, kNoType}, 0},
+        {0x004a42a0, "type 0x1e", {0x1e, kNoType, kNoType}, 0},
+    };
+    constexpr size_t kScanCount = std::size(kScans);
+    KeyCallback gScanOriginal[kScanCount]{};
+
+    template <size_t I>
+    void __cdecl ScanHook(const Key* key, void* context)
+    {
+        constexpr const Scan& scan = kScans[I];
+        uint32_t type = kNoType;
+        bool known = false;
+        {
+            std::scoped_lock lock(gTypeMutex);
+            if (const auto it = gExemplarTypes.find(*key); it != gExemplarTypes.end()) {
+                type = it->second;
+                known = true;
+            }
         }
-        else {
-            type21 = IsType21(*key);
-            gIsType21.emplace(*key, type21);
-            ++scan->checked;
+        if (known) {
+            const bool takes =
+                type != kNoType &&
+                (scan.contextTypeOffset != 0
+                     ? type == *reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(context) +
+                                                                   scan.contextTypeOffset)
+                     : type == scan.types[0] || type == scan.types[1] || type == scan.types[2]);
+            if (!takes) {
+                ++gScanSkipped;
+                return;
+            }
         }
-        if (type21) {
-            reinterpret_cast<Type21CallbackFn>(kType21Callback)(key, scan->manager);
-            ++scan->passed;
+        gScanOriginal[I](key, context);
+        ++gScanPassed;
+        if (!known) {
+            // The callback loaded it just now, so this read comes from the game's cache.
+            type = ReadExemplarType(*key);
+            std::scoped_lock lock(gTypeMutex);
+            gExemplarTypes.emplace(*key, type);
         }
     }
 
-    // The game's scan (0x006100d0) with our callback in between.
-    void __fastcall Type21ScanHook(void* manager)
+    template <size_t... I>
+    std::array<void*, kScanCount> ScanHooks(std::index_sequence<I...>)
     {
-        void* rm = *reinterpret_cast<void**>(kResourceManagerPtr);
-        if (!rm) {
-            return;
-        }
-        const auto start = std::chrono::steady_clock::now();
-        void* list = nullptr;
-        using ForTypeFn = uint32_t(__thiscall*)(void*, void**, uint32_t);
-        if (Slot<ForTypeFn>(rm, 0x48)(rm, &list, kExemplarType) != 0 && list) {
-            ScanContext scan{manager};
-            using EnumKeysFn = void(__thiscall*)(void*, void(__cdecl*)(const Key*, void*), void*);
-            Slot<EnumKeysFn>(list, 0x1c)(list, &Type21Callback, &scan);
-            Log("Type 21 scan: %u exemplars, %u skipped, %u checked, %u passed to the game, %.0f ms", scan.keys,
-                scan.skipped, scan.checked, scan.passed, MsSince(start));
-        }
-        if (list) {
-            Release(list);
-        }
+        return {reinterpret_cast<void*>(&ScanHook<I>)...};
     }
 
     uint16_t GameVersion()
@@ -347,8 +395,10 @@ public:
         };
         hook(kGetResourceList, reinterpret_cast<void*>(&GetResourceListHook), reinterpret_cast<void**>(&gGetResourceList),
              "GetResourceList");
-        hook(kType21Scan, reinterpret_cast<void*>(&Type21ScanHook), reinterpret_cast<void**>(&gType21Scan),
-             "Type 21 scan");
+        const std::array<void*, kScanCount> scanHooks = ScanHooks(std::make_index_sequence<kScanCount>());
+        for (size_t i = 0; i < kScanCount; ++i) {
+            hook(kScans[i].address, scanHooks[i], reinterpret_cast<void**>(&gScanOriginal[i]), kScans[i].name);
+        }
         if (cIGZFrameWork* framework = RZGetFrameWork()) {
             framework->AddHook(this);
         }
@@ -372,7 +422,9 @@ public:
 
     bool PreAppShutdown() override
     {
-        Log("Key lists: %llu handed out again, %llu built", gListHits, gListMisses);
+        Log("Key lists: %llu from the cache, %llu built. Exemplar scans: %llu callbacks skipped, %llu passed, %zu "
+            "exemplar types known",
+            gListHits, gListMisses, gScanSkipped, gScanPassed, gExemplarTypes.size());
         return true;
     }
 };

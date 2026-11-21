@@ -22,25 +22,47 @@ Windows 1.1.641. Found with the load profiler (`src/profiler`) and a read-only G
   vtable `0x00ad8970`, type at +8) and calls slot +0x44.
 - Segments: a deque of segment pointers, begin iterator `{cur, first, last, node}` at `rm+0x58`,
   end `cur` at `rm+0x68`, 32 pointers per buffer (`0x0097316e` increments).
-- Key list vtable: +0x1c `EnumKeys(callback, context)` (used by the game), +0x24 `Size`.
+- Key list (vtable `0x00aada64`): a deque of 12 byte keys at +0x18, insertion order,
+  duplicates kept (a key in two segments is listed twice). +0xc `Insert(list)`, +0x10
+  `Insert(key)` (push_back), +0x18 `EraseAll`, +0x1c `EnumKeys(callback, context)` (calls
+  `callback(&copy, context)` cdecl), +0x24 `Size`.
+- Type filter `0x00ad8970`: `IsKeyIncluded` (`0x00973194`) compares only `key.type`.
 - The gzcom-dll header of `cIGZPersistResourceManager` and `cIGZPersistDBSegment` is two slots
   short before these entries on Windows; only the slots above are used.
 
-## Type 21 scan
+## Exemplar scans
 
-- `0x006100d0`, fastcall `(manager)`, called from the network props manager's init `0x00610120`
-  on every city load: `rm->GetResourceListForType(&list, 0x6534284a)` (all exemplars), then
-  `list->EnumKeys(0x0060fb90, manager)`.
-- Callback `0x0060fb90` cdecl `(const key*, manager)`: `rm->GetResource(key, 0xa52160f5,
-  &res, 0, 0)` (slot +0xc), `holder = res->slot+0x1c()`, `0x005fd480(holder, 0x10, &type)`
-  (cdecl, bool). Only `type == 0x21` builds a network prop entry (0x6c bytes, `0x0060fa90`).
-  Every exemplar is loaded and parsed to find a few hundred.
+Each calls `rm->GetResourceListForType(&list, 0x6534284a)` (every exemplar) and
+`list->EnumKeys(callback, context)`. Every callback below is cdecl `(const key*, context)`,
+does `rm->GetResource(key, 0xa52160f5, &res, 0, 0)` (slot +0xc), `holder = res->slot+0x1c()`,
+`0x005fd480(holder, 0x10, &type)` (cdecl, bool), and when the type is not its own only
+releases `res` and returns (checked instruction by instruction):
+
+| Callback | Scan (caller) | Takes ExemplarType |
+|---|---|---|
+| `0x0060fb90` | network props `0x006100d0`, every load (~4.5 s) | 0x21 |
+| `0x00513a60` | automata `ScanExemplars` `0x00514520`, 4 per load | `[context+0xa40]` |
+| `0x006a7840` | `cSC4DemandSimulator::Init` `0x006a8c20` | 3 |
+| `0x006b03b0` | building development `0x006b0760` | 0xf |
+| `0x00699e20` | `0x0069d240` | 4 |
+| `0x0069d130` | `0x0069d1d0` (once, flag `0x00b48540`) | 2, 0x11, 0x15 |
+| `0x0078cb40` | `0x0078cce0` (returns at once when flags `0x00b4dfd2`/`d1` are set) | 0x29 |
+| `0x0080e430` | `0x0080e4a0` | 0xe |
+| `0x004a42a0` | `0x004a4310` | 0x1e |
+
+Not filtered: `0x0043b710` and `0x00489990` test the key's group first; `0x0078cc70` and the
+`0x00682020` users take another path. Whichever scan runs first in a load pays the disk reads
+for all exemplars; the others hit the game's cache. So skipping one scan alone only moves
+the cost: all of them have to skip.
+
+City saves hold exemplars too (Auclair: 237 records of type 0x6534284a).
 
 ## What the DLL does
 
-- Key lists asked for with the type filter are kept per type while all segments registered
-  before `PostAppInit` are still there and the segments added since (city saves) have no key
-  of that type. A kept list is handed out with one more reference; a caller that changed it
-  (other `Size`) makes it be built again.
-- The Type 21 scan remembers per exemplar key whether it is type 0x21. Later scans pass only
-  those and keys not seen before to the game's callback.
+- Key lists by type filter: the first list of a type is built as the game does, noting the run
+  of keys each segment registered before `PostAppInit` added. Later lists of that type are put
+  together in the game's segment order: the noted runs for start-up segments, a live call for
+  segments added since (city saves). The same keys in the same order, and a new list each time.
+- Exemplar scans: the type of each exemplar is noted when a callback first sees it (read
+  again after the game's callback, from its cache). Later, a callback is skipped for an
+  exemplar of a type it does not take.
