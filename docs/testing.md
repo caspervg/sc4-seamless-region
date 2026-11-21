@@ -604,6 +604,21 @@ city with roads, rail, a highway and zones.
 4. With "Render at noon" on, save the city (Ctrl+S) during a full render. The region picture
    looks as after a normal save, and the render goes on at noon.
 
+### Render at date
+
+1. A city at night with lit buildings, "Render at noon" on: the tiles show no lit windows, and
+   after the render the windows light again (gradually, as at dusk).
+2. "Render at date" on, January 15, "Seasonal trees" on. The log says `Capture: at January 15:
+   N props and M of K trees changed in X ms`. The tiles show winter props (Girafe, Neko, CP
+   seasonal sets) and bare deciduous trees, snowy Girafe conifers. After the render the city
+   looks as before.
+3. The same city at June 1 and at October 1: summer and fall looks. A city planted on Sep 1 in
+   game at its own date shows the same trees as its render at that month.
+4. Save (Ctrl+S) during a render at a date: the log says `the date overrides are off for the
+   save`. Load the save: props and trees show the city's own date, no tree is missing.
+5. Close the city during such a render, and a render that is cancelled: no tree is missing
+   afterwards, and the monthly flora update after a month of play keeps every tree.
+
 ### Faster renders
 
 1. Settings: "Rotations" 1 only, render a city. The log names only rotation 0 levels, the

@@ -57,6 +57,14 @@ public:
     // Draw the tiles on the city edge again as dirty rectangles (both key colors), instead of the
     // whole window over the second key color. Off: the whole window, as before.
     bool capturePartialRedraw = true;
+    // Render at a date: timed props (seasonal lot and painted props) show the state of
+    // captureMonth/captureDay, the same in every city of the region. The city's own date stays.
+    bool captureAtDate = false;
+    int captureMonth = 6;
+    int captureDay = 1;
+    // With captureAtDate: seasonal trees (flora with a year long cycle, planted on Sep 1 as is
+    // the standard) show the stage of captureMonth. Slower in cities with many trees.
+    bool captureSeasonalFlora = true;
     // The highest zoom a render makes, as the game counts zooms: 3, 4 or 5. Zoom 5 has 4 times
     // the pixels of zoom 4. Without zoom 5 tiles, zoom 5 shows zoom 4 at twice the size. Without
     // zoom 4 tiles neighbors do not show at zoom 4 and 5.

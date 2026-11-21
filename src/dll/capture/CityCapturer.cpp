@@ -5,12 +5,14 @@
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <format>
 #include <fstream>
 #include <limits>
 
 #include <webp/encode.h>
 
 #include "cISC43DRender.h"
+#include "cISC424HourClock.h"
 #include "cISC4App.h"
 #include "cISC4City.h"
 #include "cISC4LightingManager.h"
@@ -30,6 +32,7 @@
 #include "capture/CaptureAddresses.hpp"
 #include "capture/ModelLoadMonitor.hpp"
 #include "batch/RegionBatchRenderer.hpp"
+#include "capture/SeasonRules.hpp"
 #include "capture/SnapshotReader.hpp"
 #include "core/GameAddresses.hpp"
 #include "core/Guard.hpp"
@@ -751,9 +754,25 @@ bool CityCapturer::StepPrepare_()
             terrainView->SetWaterGlareStatus(false);
         }
     }
+    // Messages the simulation posted before the pause (a new day or month) arrive here, before
+    // any state is overridden: a flora visit must never see an overridden stage.
+    if (!Pump_()) {
+        return false;
+    }
+    // The pause above also holds the 24 hour clock (HiddenPause), so its light update and its hour
+    // messages do not undo the noon of the render.
+    cISC424HourClock* clock = GameAccess::City() ? GameAccess::City()->Get24HourClock() : nullptr;
     if (ctx_.settings && ctx_.settings->captureAtNoon) {
-        // Like the thumbnail writer: noon light, so every render looks the same. The clock is
-        // paused, so the game does not move the time of day on during the render.
+        // The game's own day mode (the day button without its preference write): buildings and
+        // night props switch to day at once, no lit windows. The game time stays.
+        if (clock) {
+            saved_.visualMode = clock->GetVisualTimeMode();
+            if (saved_.visualMode != 1) {
+                clock->SetVisualTimeMode(1);
+                saved_.visualModeSet = true;
+            }
+        }
+        // Like the thumbnail writer: noon light, so every render looks the same.
         if (cISC4LightingManager* lighting = LightingManager(game.renderer)) {
             saved_.timeOfDay = lighting->GetTimeOfDay();
             saved_.timeOfDaySaved = true;
@@ -762,6 +781,14 @@ bool CityCapturer::StepPrepare_()
         else {
             LOG_WARN("Capture: the lighting manager is not available. The render uses the light of the game.");
         }
+    }
+    if (ctx_.settings) {
+        saved_.season.date = ctx_.settings->captureAtDate;
+        saved_.season.month = std::clamp(ctx_.settings->captureMonth, 1, 12);
+        saved_.season.day = std::clamp(ctx_.settings->captureDay, 1, SeasonRules::kDaysInMonth[saved_.season.month - 1]);
+        saved_.season.flora = ctx_.settings->captureSeasonalFlora;
+        saved_.season.noon = ctx_.settings->captureAtNoon;
+        ApplySeason_();
     }
     game.renderer->StopScreenShake(0);
     if (frame.magnification != 1.0f) {
@@ -1580,6 +1607,26 @@ void CityCapturer::QueueEdgeTiles_(cISC43DRender* renderer, const int x, const i
     }
 }
 
+void CityCapturer::ApplySeason_()
+{
+    const SeasonOverride::Options& season = saved_.season;
+    if (!season.date && !season.noon) {
+        return;
+    }
+    const SeasonOverride::Counts counts = season_.Apply(GameAccess::City(), season);
+    if (season.date) {
+        static constexpr const char* kMonths[] = {"January", "February", "March",     "April",   "May",      "June",
+                                                  "July",    "August",   "September", "October", "November", "December"};
+        LOG_INFO("Capture: at {} {}: {} props{} changed in {:.0f} ms", kMonths[season.month - 1], season.day,
+                 counts.props,
+                 season.flora ? std::format(" and {} of {} trees", counts.flora, counts.floraSeen) : std::string(),
+                 counts.ms);
+    }
+    else {
+        LOG_INFO("Capture: {} time of day props at noon", counts.props);
+    }
+}
+
 void CityCapturer::SetTimeOfDay_(const float time) const
 {
     if (cISC4LightingManager* lighting = LightingManager(GameAccess::Renderer())) {
@@ -1669,6 +1716,13 @@ void CityCapturer::Restore_(const bool cityClosing)
         saved_.synchronousModels = false;
     }
 
+    // A city that closes saves nothing after this: let go of the occupants only.
+    season_.Restore(!cityClosing);
+    seasonAfterSave_ = false;
+    if (cISC424HourClock* clock = GameAccess::City() ? GameAccess::City()->Get24HourClock() : nullptr;
+        clock && !cityClosing && saved_.visualModeSet) {
+        clock->SetVisualTimeMode(saved_.visualMode);
+    }
     RestoreClearColor_();
     if (saved_.timeOfDaySaved) {
         SetTimeOfDay_(saved_.timeOfDay);
@@ -1864,6 +1918,12 @@ void CityCapturer::OnSaveBegin_()
     if (PopTransport_()) {
         LOG_INFO("Capture: the transport view is closed for the save");
     }
+    // The prop and flora states are saved with the city: the real ones go in.
+    if (phase_ != Phase::Idle && season_.Active()) {
+        season_.Restore(true);
+        seasonAfterSave_ = true;
+        LOG_INFO("Capture: the date overrides are off for the save");
+    }
     cISC43DRender* renderer = GameAccess::Renderer();
     if (phase_ == Phase::Idle || !saved_.backgroundSaved || !renderer) {
         return;
@@ -1884,6 +1944,12 @@ void CityCapturer::OnSaveBegin_()
 // Also called from the next step, in case a save ended without its post-save message.
 void CityCapturer::ResumeAfterSave_()
 {
+    if (seasonAfterSave_) {
+        seasonAfterSave_ = false;
+        if (phase_ != Phase::Idle) {
+            ApplySeason_();
+        }
+    }
     if (!saveInsideRender_) {
         return;
     }
@@ -1996,6 +2062,53 @@ void CityCapturer::DrawRotationChoice(Settings& settings)
     }
 }
 
+void CityCapturer::DrawDateChoice(Settings& settings)
+{
+    bool changed = ImGui::Checkbox("Render at date", &settings.captureAtDate);
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::BeginItemTooltip()) {
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+        ImGui::TextUnformatted("Render every city as it looks on this date: seasonal props on lots and painted props "
+                               "show the season of the date, the same in every city of the region. The date of the "
+                               "city does not change, and the props are as before after the render.");
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+    }
+    if (settings.captureAtDate) {
+        static constexpr const char* kMonths[] = {"January", "February", "March",     "April",   "May",      "June",
+                                                  "July",    "August",   "September", "October", "November", "December"};
+        int month = std::clamp(settings.captureMonth, 1, 12) - 1;
+        ImGui::SetNextItemWidth(120.0f);
+        if (ImGui::Combo("##month", &month, kMonths, IM_ARRAYSIZE(kMonths))) {
+            settings.captureMonth = month + 1;
+            changed = true;
+        }
+        ImGui::SameLine();
+        int day = std::clamp(settings.captureDay, 1, SeasonRules::kDaysInMonth[month]);
+        ImGui::SetNextItemWidth(120.0f);
+        if (ImGui::SliderInt("##day", &day, 1, SeasonRules::kDaysInMonth[month]) || day != settings.captureDay) {
+            settings.captureDay = day;
+            changed = true;
+        }
+        changed |= ImGui::Checkbox("Seasonal trees", &settings.captureSeasonalFlora);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        if (ImGui::BeginItemTooltip()) {
+            ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+            ImGui::TextUnformatted("Seasonal trees of the flora tool show the season of the month too, as when they "
+                                   "were planted on September 1st (the standard for seasonal flora): fall in "
+                                   "September to November, winter in December to February, summer in March to "
+                                   "August. Takes longer in cities with very many trees.");
+            ImGui::PopTextWrapPos();
+            ImGui::EndTooltip();
+        }
+    }
+    if (changed) {
+        settings.MarkChanged();
+    }
+}
+
 void CityCapturer::DrawTransportChoice(Settings& settings)
 {
     if (ImGui::Checkbox("Transport layer", &settings.captureTransportLayer)) {
@@ -2048,6 +2161,7 @@ void CityCapturer::DrawPanelSection()
         ImGui::BeginDisabled(batchRuns);
         DrawMaxZoomChoice(*ctx_.settings);
         DrawRotationChoice(*ctx_.settings);
+        DrawDateChoice(*ctx_.settings);
         DrawTransportChoice(*ctx_.settings);
         ImGui::EndDisabled();
     }

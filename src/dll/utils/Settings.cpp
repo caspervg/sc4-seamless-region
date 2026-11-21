@@ -144,6 +144,10 @@ void Settings::Load(const std::filesystem::path& settingsFilePath)
         r.Bool("CaptureTransportLayer", captureTransportLayer);
         r.Bool("CaptureEdgeWalls", captureEdgeWalls);
         r.Bool("CapturePartialRedraw", capturePartialRedraw);
+        r.Bool("CaptureAtDate", captureAtDate);
+        r.Int("CaptureMonth", captureMonth, 1, 12);
+        r.Int("CaptureDay", captureDay, 1, 31);
+        r.Bool("CaptureSeasonalFlora", captureSeasonalFlora);
         r.Int("MaxRenderZoom", maxRenderZoom, kMinRenderZoom, kMaxRenderZoom);
         r.Bool("RenderRotation1", renderRotation[0]);
         r.Bool("RenderRotation2", renderRotation[1]);
@@ -189,6 +193,10 @@ bool Settings::Save(const std::filesystem::path& settingsFilePath) const
         s["CaptureTransportLayer"] = b(captureTransportLayer);
         s["CaptureEdgeWalls"] = b(captureEdgeWalls);
         s["CapturePartialRedraw"] = b(capturePartialRedraw);
+        s["CaptureAtDate"] = b(captureAtDate);
+        s["CaptureMonth"] = std::to_string(captureMonth);
+        s["CaptureDay"] = std::to_string(captureDay);
+        s["CaptureSeasonalFlora"] = b(captureSeasonalFlora);
         s["MaxRenderZoom"] = std::to_string(maxRenderZoom);
         s["RenderRotation1"] = b(renderRotation[0]);
         s["RenderRotation2"] = b(renderRotation[1]);

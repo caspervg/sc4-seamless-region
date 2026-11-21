@@ -874,6 +874,7 @@ void RegionBatchRenderer::DrawPanelSection()
         const char* why = WhyNotBegin_();
         CityCapturer::DrawMaxZoomChoice(*ctx_.settings);
         CityCapturer::DrawRotationChoice(*ctx_.settings);
+        CityCapturer::DrawDateChoice(*ctx_.settings);
         CityCapturer::DrawTransportChoice(*ctx_.settings);
         if (ImGui::Checkbox("Save each city", &ctx_.settings->batchSaveCities)) {
             ctx_.settings->MarkChanged();

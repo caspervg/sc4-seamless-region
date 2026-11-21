@@ -29,10 +29,10 @@ Windows code has the same shape, or two kinds of evidence agree), **probable**, 
   manager. "Capture at noon" through `cISC4LightingManager::SetTimeOfDay(12)` changes the light
   only. The same state override can force the time-of-day props to their noon state if wanted.
 - **Re-validated 2026-11-21** (section "Re-validation" below): lit building windows follow the
-  clock's *visual* day/night mode, not `SetTimeOfDay`, so today's "Render at noon" keeps night
-  windows. The clock also runs while the sim is paused and its ambient light update calls
-  `SetTimeOfDay` with the clock time, so the 12.0 can be overwritten during a render. The fix is
-  the game's own "day" mode, `SetVisualTimeMode(1)`. A flora stage override must never meet a
+  clock's *visual* day/night mode, not `SetTimeOfDay`, so "Render at noon" kept night windows
+  until it used the game's own "day" mode, `SetVisualTimeMode(1)` (built). The clock runs while
+  the sim is paused, but the capture's `SC4AutoGamePause(false, true, true, true)` hidden-pauses
+  it too, so inside a render the 12.0 is not overwritten. A flora stage override must never meet a
   monthly flora visit: a visit that computes stage 0 for a tree shown at 1 or 2 deletes it.
 
 ## 1. Who ticks the timed props, and how to list them
@@ -348,7 +348,9 @@ and **posts** `0x66956814` (new day), `...15` (week), `...16` (month), `...17` (
 (`0x00702d25`). A day message queued before the pause can still arrive at the capture's first
 pump, so the override runs after that pump, and the restore keeps the guard of section 6.
 
-**The clock runs while the sim is paused (strong).** `OnIdle` of the 24 hour clock
+**The clock runs while the sim is paused (strong).** Not during a render: the capture's
+`SC4AutoGamePause` hidden-pauses the sim, the animation system and the clock (counted, so the
+player's speed buttons do not undo it). `OnIdle` of the 24 hour clock
 `[0x00b43dbc]` only checks its own Pause/HiddenPause counters (+0x2c/+0x30). The sim pause only
 posts `0xaa7fb7e0`. So during a paused capture `0x44778233` makes View3DWin
 `UpdateAmbientLightLevel` `0x007e6e40` call `SetTimeOfDay` with the visual time (overwriting the
@@ -474,7 +476,18 @@ its active window visible (pulls the end back one interval, `SetPropTimerState(2
 runs at insert only, so it does not meet a render-time `SetState` override, and the restore guard
 of section 6 still holds. `SC4DateJumper.dll` is loaded too (not read).
 
-## Proposed implementation
+## Built (2026-11-21)
+
+`capture/SeasonRules.hpp` (pure, `tests/SeasonTests.cpp`), `capture/SeasonOverride.{hpp,cpp}`,
+wired in `CityCapturer` (`StepPrepare_`, `Restore_`, `OnSaveBegin_`, `ResumeAfterSave_`).
+Settings `CaptureAtDate`, `CaptureMonth`, `CaptureDay`, `CaptureSeasonalFlora`; "Render at noon"
+also sets the visual day mode and the time of day props at 12:00. Differences from the proposal
+below: the start date comes from the exemplar (cached per prop type), interval and duration from
+DateInfo (+0, +4, the game's own values); the flora list comes from `GetOccupantsByBBox` with the
+flora type over the city box (the call family the capture already uses); the stable roll hashes
+the position. A pump runs before the overrides, so a new day or month message posted before the
+pause meets the real states.
+
 
 New `src/dll/capture/SeasonOverride.{hpp,cpp}` with pure rules in a header the tests can use
 (`IsTimedPropOn`, `SeasonalFloraStage`, `DayOfYear`). Owned by `CityCapturer::SavedState`.

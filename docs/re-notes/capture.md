@@ -219,6 +219,13 @@ buffer changes the color, and a city pixel can have the key color. The capture:
 Only blocks with a tile on the edge of the city pay for the second draw, and only their edge
 tiles pay for the compose. The opaque tiles of such a block are taken from the first pass.
 
+**Render at date and at noon.** `CaptureAtDate` (month and day, off by default) and
+`CaptureSeasonalFlora`: `SeasonOverride` sets the visible state of the yearly timed props and
+of the seasonal flora for the render, and puts it back at the end and around a save inside the
+render (both states are saved with the city). "Render at noon" also puts the clock in the game's
+day mode (no lit windows) and the time of day props at 12:00. Rules and evidence:
+`docs/re-notes/seasons.md` (Built, Re-validation, Plugin audit).
+
 **Partial second pass (`CapturePartialRedraw`, on by default).** When the edge tiles are at
 most a third of the block (and the block is one read), the second pass does not draw the
 whole window again. The edge tiles are queued as dirty rectangles (`AddDirtyRectangle`

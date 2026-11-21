@@ -43,6 +43,7 @@
 
 #include "SC4AutoGamePause.h"
 #include "capture/CaptureMath.hpp"
+#include "capture/SeasonOverride.hpp"
 #include "core/GameAccess.hpp"
 #include "store/TileStore.hpp"
 #include "view/CameraReader.hpp"
@@ -107,6 +108,9 @@ public:
     static void DrawTransportChoice(Settings& settings);
     // The "Rotations" check boxes (Settings::renderRotation). The batch panel shows them too.
     static void DrawRotationChoice(Settings& settings);
+    // "Render at date" with its month, day and seasonal trees (Settings::captureAtDate). The
+    // batch panel shows it too.
+    static void DrawDateChoice(Settings& settings);
 
 private:
     enum class Phase
@@ -167,6 +171,9 @@ private:
         bool glareBefore = true;
         bool timeOfDaySaved = false;    // the render runs at noon
         float timeOfDay = 0.0f;
+        bool visualModeSet = false;     // the render set the clock's visual time mode to day
+        int32_t visualMode = 0;
+        SeasonOverride::Options season; // the date and noon overrides of this render
     };
 
     bool Begin_(bool testTile, const CaptureRequest& request);
@@ -212,6 +219,8 @@ private:
     void SkipLevel_();
 
     void SetClearColor_(uint32_t rgba);
+    // The date and noon overrides of saved_.season, logged. Needs the paused simulation.
+    void ApplySeason_();
     // The key color for the next draw of the block, without throwing the backing store away: that
     // draw forces a full redraw itself or redraws dirty rectangles.
     void SetKeyColor_(uint32_t rgba);
@@ -316,6 +325,8 @@ private:
 
     SavedState saved_;
     std::optional<SC4AutoGamePause> pause_;
+    SeasonOverride season_;
+    bool seasonAfterSave_ = false;  // a save took the overrides away: apply them again
 
     using Clock = std::chrono::steady_clock;
     Clock::time_point startTime_{};
