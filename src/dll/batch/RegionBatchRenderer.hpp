@@ -100,6 +100,8 @@ private:
     void Log_(const std::string& line) const;
     // No render, out of date, or a level up to Settings::maxRenderZoom is missing.
     [[nodiscard]] bool NeedsRender_(const CityInfo& city) const;
+    // Where a render of the city goes with the current settings: its key, or a season slot.
+    [[nodiscard]] std::string StorageKey_(const std::string& cityKey) const;
     // Save the current city when the batch leaves it: always the player's own city, a city the
     // batch opened only with Settings::batchSaveCities.
     [[nodiscard]] bool SaveOnLeave_() const;

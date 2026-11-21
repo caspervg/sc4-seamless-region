@@ -698,16 +698,17 @@ void RegionBatchRenderer::StepCapture_()
         secondsSum_ += seconds;
         ++secondsCount_;
         if (const CityInfo* city = FindByKey_(current_.key)) {
-            restampKey_ = city->key;
+            restampKey_ = StorageKey_(city->key);
             restampPath_ = city->savePath;
             restampOthers_.clear();
             for (const CityInfo& other : ctx_.region->Cities()) {
                 const int64_t fileTime = other.savePath.empty() ? 0 : TileStore::FileTime(other.savePath);
+                const std::string otherKey = StorageKey_(other.key);
                 const std::optional<CityRenderMeta> meta = other.key == city->key || fileTime == 0
                                                                ? std::nullopt
-                                                               : ctx_.tileStore->LoadMeta(other.key);
+                                                               : ctx_.tileStore->LoadMeta(otherKey);
                 if (meta && meta->saveFileTime == fileTime) {
-                    restampOthers_.push_back({other.key, other.savePath, fileTime});
+                    restampOthers_.push_back({otherKey, other.savePath, fileTime});
                 }
             }
         }
@@ -865,14 +866,22 @@ std::string RegionBatchRenderer::StatusText() const
 
 bool RegionBatchRenderer::SaveOnLeave_() const { return !openedByBatch_ || ctx_.settings->batchSaveCities; }
 
+std::string RegionBatchRenderer::StorageKey_(const std::string& cityKey) const
+{
+    const Settings& s = *ctx_.settings;
+    return s.RenderSeasonSlots() && !run_.addTransport ? Seasons::StorageKey(cityKey, Seasons::OfMonth(s.RenderMonth())) : cityKey;
+}
+
 bool RegionBatchRenderer::NeedsRender_(const CityInfo& city) const
 {
-    return ctx_.tileStore->NeedsRender(city, ctx_.settings->MaxRenderZoomIndex(),
-                                       ctx_.settings->captureTransportLayer, ctx_.settings->RenderRotationMask());
+    const Settings& s = *ctx_.settings;
+    return ctx_.tileStore->NeedsRender(city, StorageKey_(city.key), s.MaxRenderZoomIndex(), s.captureTransportLayer,
+                                       s.RenderRotationMask(), s.RenderMonth(), s.RenderDay(), s.captureAtNoon);
 }
 
 bool RegionBatchRenderer::NeedsTransport_(const CityInfo& city) const
 {
+    // The transport layer lives in the main render only.
     const std::optional<CityRenderMeta> meta = ctx_.tileStore->LoadMeta(city.key);
     return !meta || !CityMeta::HasLevelsUpTo(*meta, ctx_.settings->MaxRenderZoomIndex(), true,
                                              ctx_.settings->RenderRotationMask());

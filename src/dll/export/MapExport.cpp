@@ -357,8 +357,17 @@ namespace
                 if (!city.founded) {
                     continue;
                 }
-                const fs::path cityDir = TileStore::CityDirectory(req_.rendersDir, city.key);
-                if (!ReadFile(cityDir / L"meta.json", bytes)) {
+                // The first season slot of the fallback order that has a render.
+                CityInfo stored = city;
+                bool found = false;
+                for (const Season season : Seasons::FallbackOrder(req_.season)) {
+                    stored.key = Seasons::StorageKey(city.key, season);
+                    if (ReadFile(TileStore::CityDirectory(req_.rendersDir, stored.key) / L"meta.json", bytes)) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
                     continue;  // not rendered
                 }
                 std::optional<CityRenderMeta> meta =

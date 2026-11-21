@@ -58,6 +58,8 @@ namespace GameAccess
 
     [[nodiscard]] cISC4App* App();
     [[nodiscard]] cISC4City* City();
+    // The month of the open city's game date, 1..12, 0 without a city.
+    [[nodiscard]] int CityMonth();
     [[nodiscard]] cISC4Region* Region();
     // The cISC4RegionalCity of the city being played. Freed by CloseCity: never keep it.
     [[nodiscard]] cISC4RegionalCity* RegionalCity();

@@ -590,7 +590,8 @@ void CameraExtender::RefreshNeighborWalls()
             const int rotation = v / ViewMath::kZoomCount;
             const int zoom = v % ViewMath::kZoomCount;
             autoWalls_[v] = CameraBounds::NeighborEdgeMask(ctx_.region->Cities(), *current, [&](const CityInfo& city) {
-                const std::optional<CityRenderMeta> meta = ctx_.tileStore->LoadMeta(city.key);
+                const std::optional<CityRenderMeta> meta = ctx_.tileStore->LoadMeta(
+                    ctx_.tileStore->ChooseStorageKey(city.key, Seasons::OfMonth(GameAccess::CityMonth())));
                 return meta && CityMeta::ChooseLevel(meta->levels, rotation, zoom) != nullptr;
             });
         }

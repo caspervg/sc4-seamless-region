@@ -207,6 +207,7 @@ bool NeighborRenderer::ShouldDraw_() const
 void NeighborRenderer::Rebuild_()
 {
     neighbors_.clear();
+    season_ = Seasons::OfMonth(GameAccess::CityMonth());
     regionGeneration_ = ctx_.region->Generation();
     const CityInfo* current = ctx_.region->Current();
     if (!current) {
@@ -224,7 +225,8 @@ void NeighborRenderer::Rebuild_()
             continue;
         }
         ++founded;
-        const std::optional<CityRenderMeta> meta = ctx_.tileStore->LoadMeta(city.key);
+        const std::string storageKey = ctx_.tileStore->ChooseStorageKey(city.key, season_);
+        const std::optional<CityRenderMeta> meta = ctx_.tileStore->LoadMeta(storageKey);
         if (!meta) {
             continue;
         }
@@ -238,7 +240,7 @@ void NeighborRenderer::Rebuild_()
         n.cells = {city.cellX, city.cellZ, city.cellX + city.sizeX, city.cellZ + city.sizeZ};
         n.originOffset = ctx_.region->OriginOffset(city);
         n.tileSize = meta->tileSize;
-        n.key.cityKey = city.key;
+        n.key.cityKey = storageKey;
         bool any = false;
         for (int r = 0; r < ViewMath::kRotationCount; ++r) {
             for (int z = 0; z < ViewMath::kZoomCount; ++z) {
@@ -323,7 +325,9 @@ void NeighborRenderer::Tick_()
         shownNeighbors_ = ctx_.settings->showNeighbors;
         shownFront_ = ctx_.settings->showFrontNeighbors;
     }
-    if (ctx_.region->Generation() != regionGeneration_) {
+    // A new season in the open city: neighbors with season renders show the new one.
+    if (ctx_.region->Generation() != regionGeneration_ ||
+        (GameAccess::CityMonth() != 0 && Seasons::OfMonth(GameAccess::CityMonth()) != season_)) {
         Rebuild_();
         redraw = true;
     }

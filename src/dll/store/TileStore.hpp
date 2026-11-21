@@ -30,10 +30,11 @@
 
 #include "core/GameAccess.hpp"
 #include "region/RegionLayout.hpp"
+#include "store/Seasons.hpp"
 
 struct TileKey
 {
-    std::string cityKey;  // CityInfo::key
+    std::string cityKey;  // CityInfo::key, or a season slot of it (Seasons::StorageKey)
     int rotation = 0;     // 0..3
     int zoom = 0;         // zoom index 0..4
     int tx = 0;           // ViewMath::TileGrid tile column
@@ -66,6 +67,12 @@ struct CityRenderMeta
     // is the last write time of the save file when rendered.
     int64_t saveFileTime = 0;
     int64_t renderTime = 0;
+    // The date of Render at date ("renderDate" in meta.json), 0 and 0 for the city's own date
+    // (also every meta written before the field).
+    int renderMonth = 0;
+    int renderDay = 0;
+    // Render at noon ("noon"). Unknown in metas written before the field: never compared.
+    std::optional<bool> noon;
     // Typical ground height of the city in metres, for outlines on the region map. Optional:
     // metas written before it was added have none.
     std::optional<float> groundHeight;
@@ -116,8 +123,11 @@ namespace CityMeta
                                      uint32_t rotations = 0xF);
     // The batch rule: a city needs a render when its render is stale (IsStale) or a level up to
     // maxZoom (zoom index) is missing. With transport, a missing transport level counts too.
+    // Also when the render's date (month and day, 0 and 0 for the city's own) or its noon differs
+    // from the wanted one. A meta without the noon field never counts as different there.
     [[nodiscard]] bool NeedsRender(const std::optional<CityRenderMeta>& meta, int64_t saveFileTime, int maxZoom,
-                                   bool transport = false, uint32_t rotations = 0xF);
+                                   bool transport = false, uint32_t rotations = 0xF, int month = 0, int day = 0,
+                                   std::optional<bool> noon = std::nullopt);
     // An earlier render has `wanted` already: a level of the same rotation, zoom and layer on the
     // same tile grid (tile counts, origin within half a pixel, magnification). The save time is
     // not checked: the caller decides that the city did not change.
@@ -162,12 +172,17 @@ public:
     // Cached after the first read. Nullopt when there is no meta.json or it is invalid (logged
     // once per city).
     [[nodiscard]] std::optional<CityRenderMeta> LoadMeta(const std::string& cityKey) const;
-    // True when the city has no render or its save file differs from the rendered one.
-    [[nodiscard]] bool IsStale(const CityInfo& city) const;
-    // CityMeta::NeedsRender for the city's save file: stale, or a level up to maxZoom (zoom
-    // index) is missing, with transport also a transport level.
-    [[nodiscard]] bool NeedsRender(const CityInfo& city, int maxZoom, bool transport = false,
-                                   uint32_t rotations = 0xF) const;
+    // True when the render in `storageKey` (a city key or a season slot of it) is missing or its
+    // save file differs from the rendered one.
+    [[nodiscard]] bool IsStale(const CityInfo& city, const std::string& storageKey) const;
+    [[nodiscard]] bool IsStale(const CityInfo& city) const { return IsStale(city, city.key); }
+    // CityMeta::NeedsRender of the render in `storageKey` for the city's save file.
+    [[nodiscard]] bool NeedsRender(const CityInfo& city, const std::string& storageKey, int maxZoom, bool transport,
+                                   uint32_t rotations, int month, int day, std::optional<bool> noon) const;
+    // The render to show for a city whose neighbor is in season `wanted`: the first of
+    // Seasons::FallbackOrder that has a meta.json, where a main render made at a date counts as
+    // the slot of its season. The city key when there is none.
+    [[nodiscard]] std::string ChooseStorageKey(const std::string& cityKey, Season wanted) const;
     // Cached directory index, no disk hit and no allocation per call once a city is indexed.
     // The first call for a city that the background scan has not reached yet scans that city.
     [[nodiscard]] bool HasTile(const TileKey& key) const;

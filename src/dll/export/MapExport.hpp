@@ -25,6 +25,7 @@
 
 #include "cS3DVector2.h"
 #include "region/RegionLayout.hpp"
+#include "store/Seasons.hpp"
 
 namespace MapExport
 {
@@ -58,6 +59,8 @@ namespace MapExport
         // Also make the transport layer (tiles-transport/) when a city has transport levels at
         // the source zoom and rotation.
         bool transport = true;
+        // The season slot to show, with Seasons::FallbackOrder per city. Main: the main renders.
+        Season season = Season::Main;
     };
 
     enum class Phase : int

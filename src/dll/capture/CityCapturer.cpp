@@ -366,7 +366,13 @@ bool CityCapturer::Begin_(const bool testTile, const CaptureRequest& request)
             return refuse("The folder for the renders of this region is not known.");
         }
     }
-    cityKey_ = current ? current->key : std::string();
+    // With season slots a render at a date goes to the slot of its season, else to the main render.
+    // Adding the transport layer always goes to the main render: season slots have none (no
+    // props or flora show in the transport view).
+    cityKey_ = !current ? std::string()
+               : ctx_.settings && ctx_.settings->RenderSeasonSlots() && !request.addTransport
+                   ? Seasons::StorageKey(current->key, Seasons::OfMonth(ctx_.settings->RenderMonth()))
+                   : current->key;
     savePath_ = current ? current->savePath : std::filesystem::path();
     cellX_ = current ? current->cellX : 0;
     cellZ_ = current ? current->cellZ : 0;
@@ -408,8 +414,10 @@ bool CityCapturer::Begin_(const bool testTile, const CaptureRequest& request)
     tileSize_ = CityRenderMeta().tileSize;
 
     testTile_ = testTile;
-    transport_ = !testTile && ((ctx_.settings && ctx_.settings->captureTransportLayer) || request.transport ||
-                               request.addTransport);
+    const bool seasonSlot = Seasons::Split(cityKey_).second != Season::Main;
+    transport_ = !testTile && !seasonSlot &&
+                 ((ctx_.settings && ctx_.settings->captureTransportLayer) || request.transport || request.addTransport);
+    addTransportOnly_ = request.addTransport;
     levels_.clear();
     if (testTile) {
         Level level;
@@ -1431,6 +1439,18 @@ bool CityCapturer::WriteMeta_(const bool final)
     meta.sizeZ = sizeZ_;
     meta.tileSize = tileSize_;
     meta.groundHeight = 0.5f * (minHeight_ + terrainHigh_);  // terrain middle
+    if (saved_.season.date) {
+        meta.renderMonth = saved_.season.month;
+        meta.renderDay = saved_.season.day;
+    }
+    meta.noon = saved_.season.noon;
+    const std::optional<CityRenderMeta> before = addTransportOnly_ ? ctx_.tileStore->LoadMeta(cityKey_) : std::nullopt;
+    if (before) {
+        // Only the transport layer is new: the date of the normal levels stays.
+        meta.renderMonth = before->renderMonth;
+        meta.renderDay = before->renderDay;
+        meta.noon = before->noon;
+    }
     meta.edges = edges_;
     const std::optional<CityRenderMeta> earlier = ctx_.tileStore->LoadMeta(cityKey_);
     const bool usable = earlier && earlier->tileSize == meta.tileSize && earlier->formatVersion == meta.formatVersion;
@@ -2116,6 +2136,13 @@ void CityCapturer::DrawDateChoice(Settings& settings)
             }
         }
         changed |= ImGui::Checkbox("Seasonal trees", &settings.captureSeasonalFlora);
+        ImGui::SameLine();
+        changed |= ImGui::Checkbox("Keep a render per season", &settings.captureSeasonSlots);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Store this render as the city's render for its season, next to the others, instead of "
+                              "replacing the city's render. Neighbors then show the season of your city's date. "
+                              "Uses more disk space. Season renders have no transport layer.");
+        }
         ImGui::SameLine();
         ImGui::TextDisabled("(?)");
         if (ImGui::BeginItemTooltip()) {

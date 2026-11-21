@@ -208,6 +208,7 @@ private:
     int maxZoom_ = 3;  // zoom index, the highest this render makes
     uint32_t rotations_ = 0xF;  // bit r: this render makes rotation r
     bool transport_ = false;  // this render makes the transport layer
+    bool addTransportOnly_ = false;  // CaptureRequest::addTransport: the normal levels stay
 
     // Pushes data view 0xF3, pumps and checks that it took. False when it did not (logged) or
     // when the capture ended in the pump.

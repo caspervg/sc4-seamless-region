@@ -200,6 +200,12 @@ namespace CityMeta
                         {"saveFileTime", meta.saveFileTime},
                         {"renderTime", meta.renderTime},
                         {"levels", levels}};
+        if (meta.renderMonth > 0) {
+            j["renderDate"] = {{"month", meta.renderMonth}, {"day", meta.renderDay}};
+        }
+        if (meta.noon) {
+            j["noon"] = *meta.noon;
+        }
         if (meta.groundHeight) {
             j["groundHeight"] = *meta.groundHeight;
         }
@@ -286,6 +292,17 @@ namespace CityMeta
         }
         if (m.sizeX < 1 || m.sizeZ < 1 || m.tileSize < 1) {
             return fail("a size is not positive");
+        }
+        if (const auto date = j.find("renderDate"); date != j.end() && date->is_object()) {
+            int month = 0, day = 0;
+            if (Int(*date, "month", month) && Int(*date, "day", day) && month >= 1 && month <= 12 && day >= 1 &&
+                day <= 31) {
+                m.renderMonth = month;
+                m.renderDay = day;
+            }
+        }
+        if (const auto noon = j.find("noon"); noon != j.end() && noon->is_boolean()) {
+            m.noon = noon->get<bool>();
         }
         if (float ground = 0.0f; Float(j, "groundHeight", ground) && std::isfinite(ground)) {
             m.groundHeight = ground;
@@ -444,9 +461,12 @@ namespace CityMeta
     }
 
     bool NeedsRender(const std::optional<CityRenderMeta>& meta, const int64_t saveFileTime, const int maxZoom,
-                     const bool transport, const uint32_t rotations)
+                     const bool transport, const uint32_t rotations, const int month, const int day,
+                     const std::optional<bool> noon)
     {
-        return IsStale(meta, saveFileTime) || !HasLevelsUpTo(*meta, maxZoom, transport, rotations);
+        return IsStale(meta, saveFileTime) || !HasLevelsUpTo(*meta, maxZoom, transport, rotations) ||
+               meta->renderMonth != month || meta->renderDay != day ||
+               (noon && meta->noon && *noon != *meta->noon);
     }
 
     std::vector<CityRenderMeta::Level> LevelsToDrop(const CityRenderMeta& earlier, const int maxZoom,
@@ -474,8 +494,9 @@ uint64_t TileStore::PackKey(const TileKey& key, bool& valid)
     return valid ? Pack(key.rotation, key.zoom, key.tx, key.ty, key.transport) : 0;
 }
 
-bool TileStore::SafeName(const std::string_view name)
+bool TileStore::SafeName(std::string_view name)
 {
+    name = Seasons::Split(name).first;  // a season slot is safe when its city key is
     if (name.empty() || name.size() > 128 || name == "." || name == ".." || name.back() == '.' || name.back() == ' ') {
         return false;
     }
@@ -486,7 +507,9 @@ bool TileStore::SafeName(const std::string_view name)
 
 fs::path TileStore::CityDirectory(const fs::path& renders, const std::string& cityKey)
 {
-    return renders / FromUtf8(cityKey);
+    const auto [city, season] = Seasons::Split(cityKey);
+    const fs::path dir = renders / FromUtf8(std::string(city));
+    return season == Season::Main ? dir : dir / FromUtf8(std::string(Seasons::Name(season)));
 }
 
 fs::path TileStore::TilePathIn(const fs::path& renders, const TileKey& key)
@@ -696,16 +719,35 @@ std::optional<CityRenderMeta> TileStore::LoadMeta(const std::string& cityKey) co
     return metaCache_.insert_or_assign(cityKey, std::move(meta)).first->second;
 }
 
-bool TileStore::IsStale(const CityInfo& city) const
+bool TileStore::IsStale(const CityInfo& city, const std::string& storageKey) const
 {
-    return CityMeta::IsStale(LoadMeta(city.key), city.savePath.empty() ? 0 : FileTime(city.savePath));
+    return CityMeta::IsStale(LoadMeta(storageKey), city.savePath.empty() ? 0 : FileTime(city.savePath));
 }
 
-bool TileStore::NeedsRender(const CityInfo& city, const int maxZoom, const bool transport,
-                            const uint32_t rotations) const
+bool TileStore::NeedsRender(const CityInfo& city, const std::string& storageKey, const int maxZoom,
+                            const bool transport, const uint32_t rotations, const int month, const int day,
+                            const std::optional<bool> noon) const
 {
-    return CityMeta::NeedsRender(LoadMeta(city.key), city.savePath.empty() ? 0 : FileTime(city.savePath), maxZoom,
-                                 transport, rotations);
+    return CityMeta::NeedsRender(LoadMeta(storageKey), city.savePath.empty() ? 0 : FileTime(city.savePath), maxZoom,
+                                 transport, rotations, month, day, noon);
+}
+
+std::string TileStore::ChooseStorageKey(const std::string& cityKey, const Season wanted) const
+{
+    const std::optional<CityRenderMeta> main = LoadMeta(cityKey);
+    const Season mainSeason = main && main->renderMonth > 0 ? Seasons::OfMonth(main->renderMonth) : Season::Main;
+    for (const Season season : Seasons::FallbackOrder(wanted)) {
+        if (main && (season == mainSeason || season == Season::Main)) {
+            return cityKey;
+        }
+        if (season != Season::Main) {
+            std::string key = Seasons::StorageKey(cityKey, season);
+            if (LoadMeta(key)) {
+                return key;
+            }
+        }
+    }
+    return cityKey;
 }
 
 bool TileStore::WriteMeta(const std::string& cityKey, const CityRenderMeta& meta)
@@ -1048,8 +1090,14 @@ void TileStore::ProcessDelete(const std::string& cityKey)
     const auto removed = fs::remove_all(CityDirectory(renders, cityKey), ec);
     {
         std::unique_lock lock(mutex_);
-        index_.erase(cityKey);
-        metaCache_.erase(cityKey);
+        // The main folder holds the season slots too.
+        const bool main = Seasons::Split(cityKey).second == Season::Main;
+        const auto gone = [&](const std::string& key) {
+            return key == cityKey || (main && key.size() > cityKey.size() && key.starts_with(cityKey) &&
+                                      key[cityKey.size()] == '@');
+        };
+        std::erase_if(index_, [&](const auto& entry) { return gone(entry.first); });
+        std::erase_if(metaCache_, [&](const auto& entry) { return gone(entry.first); });
         ++generation_;
     }
     if (ec) {
@@ -1106,6 +1154,12 @@ void TileStore::ProcessScan()
     }
     for (const std::string& name : names) {
         EnsureIndexed(name);
+        for (int s = 1; s < static_cast<int>(Seasons::kNames.size()); ++s) {
+            std::error_code seasonEc;
+            if (fs::is_directory(renders / FromUtf8(name) / FromUtf8(std::string(Seasons::kNames[s])), seasonEc)) {
+                EnsureIndexed(Seasons::StorageKey(name, static_cast<Season>(s)));
+            }
+        }
     }
     scanDone_ = true;
     ++generation_;

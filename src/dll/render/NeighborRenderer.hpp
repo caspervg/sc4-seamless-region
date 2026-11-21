@@ -102,6 +102,7 @@ private:
     bool indexReady_ = false;
     uint32_t settingsRevision_ = 0;
     uint32_t regionGeneration_ = 0;
+    Season season_ = Season::Main;  // of the open city's date, at the last Rebuild_
     uint32_t deviceGeneration_ = 0;
     std::array<uint32_t, 3> passTokens_{};
 

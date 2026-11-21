@@ -122,6 +122,8 @@ namespace
                      "map is then about 4 times the size of zoom 4. Without --zoom: the highest zoom of all cities.\n\n"
                      "--transport (the default): also put the transport view on the map, when the cities have it.\n"
                      "--no-transport: only the normal view.\n\n"
+                     "--season main|spring|summer|fall|winter: the season renders to use (each city falls back\n"
+                     "to the nearest season it has, then its main render). Default main.\n\n"
                      "--mosaic [pixels]: one picture, RegionRenders\\mosaic.png, instead of the map. The map at\n"
                      "the largest size whose longest side fits the pixels (default 16384, up to 65536).\n\n"
                      "Example: SC4RegionMap.exe \"%%USERPROFILE%%\\Documents\\SimCity 4\\Regions\\Fairview\"\n");
@@ -156,6 +158,15 @@ int wmain(const int argc, wchar_t** argv)
             request.mode = MapExport::Mode::Mosaic;
             if (hasValue && iswdigit(argv[i + 1][0])) {
                 request.mosaicMaxPixels = std::clamp(_wtoi(argv[++i]), 256, 65536);
+            }
+        }
+        else if (arg == L"--season" && hasValue) {
+            const std::wstring name = argv[++i];
+            for (int s = 0; s < static_cast<int>(Seasons::kNames.size()); ++s) {
+                if (name == std::wstring(Seasons::kNames[s].begin(), Seasons::kNames[s].end()) ||
+                    (s == 0 && name == L"main")) {
+                    request.season = static_cast<Season>(s);
+                }
             }
         }
         else if (arg == L"--open") {

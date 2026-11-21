@@ -6,6 +6,7 @@
 // MarkChanged() so modules that cache a value can notice through Revision(). Save() writes
 // every key back and keeps the other content of the file.
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <filesystem>
@@ -77,6 +78,10 @@ public:
     // With captureAtDate: seasonal trees (flora with a year long cycle, planted on Sep 1 as is
     // the standard) show the stage of captureMonth. Slower in cities with many trees.
     bool captureSeasonalFlora = true;
+    // With captureAtDate: keep a render per season (spring, summer, fall, winter) next to the
+    // main one, instead of replacing the main render. Neighbors then show the season of the
+    // open city's date. Off: one render per city, at the date.
+    bool captureSeasonSlots = false;
     // The highest zoom a render makes, as the game counts zooms: 3, 4 or 5. Zoom 5 has 4 times
     // the pixels of zoom 4. Without zoom 5 tiles, zoom 5 shows zoom 4 at twice the size. Without
     // zoom 4 tiles neighbors do not show at zoom 4 and 5.
@@ -118,6 +123,14 @@ public:
 
     // maxRenderZoom as a zoom index (2..4).
     [[nodiscard]] int MaxRenderZoomIndex() const { return maxRenderZoom - 1; }
+    // The date a render is made at (0 and 0: the city's own) and the slot it is stored in.
+    [[nodiscard]] int RenderMonth() const { return captureAtDate ? std::clamp(captureMonth, 1, 12) : 0; }
+    [[nodiscard]] int RenderDay() const
+    {
+        constexpr int kDays[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+        return captureAtDate ? std::clamp(captureDay, 1, kDays[RenderMonth() - 1]) : 0;
+    }
+    [[nodiscard]] bool RenderSeasonSlots() const { return captureAtDate && captureSeasonSlots; }
     // renderRotation as a mask, bit r for rotation index r. All four when none is on.
     [[nodiscard]] uint32_t RenderRotationMask() const
     {

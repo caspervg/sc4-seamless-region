@@ -137,6 +137,7 @@ void Settings::Read_(mINI::INIMap<std::string>& section, const std::filesystem::
     r.Int("CaptureMonth", captureMonth, 1, 12);
     r.Int("CaptureDay", captureDay, 1, 31);
     r.Bool("CaptureSeasonalFlora", captureSeasonalFlora);
+    r.Bool("CaptureSeasonSlots", captureSeasonSlots);
     r.Int("MaxRenderZoom", maxRenderZoom, kMinRenderZoom, kMaxRenderZoom);
     r.Bool("RenderRotation1", renderRotation[0]);
     r.Bool("RenderRotation2", renderRotation[1]);
@@ -175,6 +176,7 @@ void Settings::Write_(mINI::INIMap<std::string>& s) const
     s["CaptureMonth"] = std::to_string(captureMonth);
     s["CaptureDay"] = std::to_string(captureDay);
     s["CaptureSeasonalFlora"] = b(captureSeasonalFlora);
+    s["CaptureSeasonSlots"] = b(captureSeasonSlots);
     s["MaxRenderZoom"] = std::to_string(maxRenderZoom);
     s["RenderRotation1"] = b(renderRotation[0]);
     s["RenderRotation2"] = b(renderRotation[1]);

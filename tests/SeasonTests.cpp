@@ -61,3 +61,53 @@ TEST_CASE(SeasonPropState)
     CHECK(PropState(0xF, 0xD, 117, 99) == 0);
     CHECK(PropState(0xF, 0xD, 75, 74) == 0 && PropState(0xF, 0xD, 75, 75) == 1);
 }
+
+#include "store/Seasons.hpp"
+#include "store/TileStore.hpp"
+
+TEST_CASE(SeasonSlotsAndKeys)
+{
+    CHECK(Seasons::OfMonth(4) == Season::Spring && Seasons::OfMonth(7) == Season::Summer);
+    CHECK(Seasons::OfMonth(10) == Season::Fall && Seasons::OfMonth(1) == Season::Winter &&
+          Seasons::OfMonth(12) == Season::Winter);
+    CHECK(Seasons::StorageKey("City_-_A", Season::Main) == "City_-_A");
+    CHECK(Seasons::StorageKey("City_-_A", Season::Fall) == "City_-_A@fall");
+    CHECK(Seasons::Split("City_-_A@fall").first == "City_-_A" && Seasons::Split("City_-_A@fall").second == Season::Fall);
+    // An @ without a season name is part of the key.
+    CHECK(Seasons::Split("me@home").second == Season::Main && Seasons::Split("me@home").first == "me@home");
+    CHECK(Seasons::FallbackOrder(Season::Summer)[0] == Season::Summer &&
+          Seasons::FallbackOrder(Season::Summer)[4] == Season::Main);
+    CHECK(Seasons::FallbackOrder(Season::Main)[0] == Season::Main);
+    // A season slot is a subfolder of the city folder.
+    CHECK(TileStore::CityDirectory(L"R", "City_-_A@winter") == std::filesystem::path(L"R/City_-_A/winter"));
+    CHECK(TileStore::CityDirectory(L"R", "City_-_A") == std::filesystem::path(L"R/City_-_A"));
+}
+
+TEST_CASE(SeasonMetaDateAndNoon)
+{
+    CityRenderMeta meta;
+    meta.saveFileTime = 1000;
+    for (int r = 0; r < 4; ++r) {
+        for (int z = 0; z < 4; ++z) {
+            meta.levels.push_back({r, z, 0.0f, 0.0f, 1, 1});
+        }
+    }
+    meta.renderMonth = 7;
+    meta.renderDay = 15;
+    meta.noon = true;
+    const std::optional<CityRenderMeta> read = CityMeta::Parse(CityMeta::ToJson(meta));
+    CHECK(read && read->renderMonth == 7 && read->renderDay == 15 && read->noon && *read->noon);
+    // Up to date only at the same date and noon.
+    CHECK(!CityMeta::NeedsRender(read, 1000, 3, false, 0xF, 7, 15, true));
+    CHECK(CityMeta::NeedsRender(read, 1000, 3, false, 0xF, 1, 15, true));
+    CHECK(CityMeta::NeedsRender(read, 1000, 3, false, 0xF, 0, 0, true));  // now the city's own date
+    CHECK(CityMeta::NeedsRender(read, 1000, 3, false, 0xF, 7, 15, false));
+    // A meta from before the fields: the city's own date, noon unknown.
+    CityRenderMeta old = meta;
+    old.renderMonth = old.renderDay = 0;
+    old.noon.reset();
+    const std::optional<CityRenderMeta> oldRead = CityMeta::Parse(CityMeta::ToJson(old));
+    CHECK(oldRead && oldRead->renderMonth == 0 && !oldRead->noon);
+    CHECK(!CityMeta::NeedsRender(oldRead, 1000, 3, false, 0xF, 0, 0, true));
+    CHECK(CityMeta::NeedsRender(oldRead, 1000, 3, false, 0xF, 7, 15, true));
+}

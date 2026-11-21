@@ -134,6 +134,7 @@ bool HtmlMapExporter::Start()
     request.cacheBytes = static_cast<size_t>(ctx_.settings->mapCacheMB) * 1024 * 1024;
     request.upscaleLevels = ctx_.settings->mapUpscaleLevels;
     request.transport = transport_;
+    request.season = ctx_.settings->RenderSeasonSlots() ? Seasons::OfMonth(ctx_.settings->RenderMonth()) : Season::Main;
     request.mode = mosaic_ ? MapExport::Mode::Mosaic : MapExport::Mode::Map;
     request.mosaicMaxPixels = kMosaicSizes[mosaicSize_];
 

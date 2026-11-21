@@ -334,10 +334,12 @@ void NeighborPicker::Rebuild_()
         n.sizeLabel = SizeLabel(std::max(city.sizeX, city.sizeZ));
         n.founded = city.founded;
         if (city.founded) {
-            const std::optional<CityRenderMeta> meta = ctx_.tileStore->LoadMeta(city.key);
+            const std::string storageKey =
+                ctx_.tileStore->ChooseStorageKey(city.key, Seasons::OfMonth(GameAccess::CityMonth()));
+            const std::optional<CityRenderMeta> meta = ctx_.tileStore->LoadMeta(storageKey);
             n.hasRender = meta && meta->sizeX == city.sizeX && meta->sizeZ == city.sizeZ && !meta->levels.empty();
             n.renderTime = meta ? meta->renderTime : 0;
-            n.stale = n.hasRender && ctx_.tileStore->IsStale(city);
+            n.stale = n.hasRender && ctx_.tileStore->IsStale(city, storageKey);
             for (int r = 0; n.hasRender && r < ViewMath::kRotationCount; ++r) {
                 for (int z = 0; z < ViewMath::kZoomCount; ++z) {
                     if (CityMeta::ChooseLevel(meta->levels, r, z)) {

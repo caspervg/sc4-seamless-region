@@ -1,3 +1,5 @@
+#include "cIGZDate.h"
+#include "cISC4Simulator.h"
 #include "core/GameAccess.hpp"
 
 #include "GZServPtrs.h"
@@ -74,6 +76,15 @@ namespace GameAccess
     cISC4App* App() { return sApp; }
 
     cISC4City* City() { return sApp ? sApp->GetCity() : nullptr; }
+
+    int CityMonth()
+    {
+        cISC4City* city = City();
+        cISC4Simulator* simulator = city ? city->GetSimulator() : nullptr;
+        cIGZDate* date = simulator ? simulator->GetSimDate() : nullptr;
+        const uint32_t month = date ? date->Month() : 0;
+        return month >= 1 && month <= 12 ? static_cast<int>(month) : 0;
+    }
 
     cISC4Region* Region() { return sApp ? sApp->GetRegion() : nullptr; }
 
