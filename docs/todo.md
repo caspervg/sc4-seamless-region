@@ -132,8 +132,13 @@ The RE is done: `docs/re-notes/seasons.md`. Build it:
 1. Timed props: walk the prop developer's list (+0xa5c), set the visible state with `SetState`
    for the chosen month and day, restore after the render, around a save and at city
    shutdown.
-2. Seasonal flora (optional, slow in large cities): set the stage from an anchor date.
-3. Night-lit and time-of-day props at noon through the same `SetState` path.
+2. Seasonal flora (optional, slow in large cities): set the stage from an anchor date. Restore
+   before any save and before the sim runs: a monthly visit deletes a tree shown at a stage it
+   computes as 0.
+3. Noon for real: today's "Render at noon" only sets the light, so night windows stay lit, and
+   the clock (which runs while the sim is paused) can set the light back during a render. Use
+   the game's day mode (`SetVisualTimeMode(1)` under a HiddenPause) and the `SetState` path for
+   the time-of-day props (`docs/re-notes/seasons.md`, Re-validation).
 4. A month and day picker in the capture and batch panels.
 
 ## Render after a save
