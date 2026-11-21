@@ -169,6 +169,7 @@ private:
         bool synchronousModels = false;
         bool glareSaved = false;        // the render turned the water glare off
         bool glareBefore = true;
+        bool gridHidden = false;        // the render turned the terrain grid off
         bool timeOfDaySaved = false;    // the render runs at noon
         float timeOfDay = 0.0f;
         bool visualModeSet = false;     // the render set the clock's visual time mode to day

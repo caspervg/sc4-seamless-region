@@ -129,6 +129,7 @@ void Settings::Read_(mINI::INIMap<std::string>& section, const std::filesystem::
     r.Bool("RenderOnSave", renderOnSave);
     r.Bool("CaptureAtNoon", captureAtNoon);
     r.Bool("CaptureWaterGlare", captureWaterGlare);
+    r.Bool("CaptureTerrainGrid", captureTerrainGrid);
     r.Bool("CaptureSnapshotFlag", captureSnapshotFlag);
     r.Bool("CaptureTransportLayer", captureTransportLayer);
     r.Bool("CaptureEdgeWalls", captureEdgeWalls);
@@ -169,6 +170,7 @@ void Settings::Write_(mINI::INIMap<std::string>& s) const
     s["RenderOnSave"] = b(renderOnSave);
     s["CaptureAtNoon"] = b(captureAtNoon);
     s["CaptureWaterGlare"] = b(captureWaterGlare);
+    s["CaptureTerrainGrid"] = b(captureTerrainGrid);
     s["CaptureSnapshotFlag"] = b(captureSnapshotFlag);
     s["CaptureTransportLayer"] = b(captureTransportLayer);
     s["CaptureEdgeWalls"] = b(captureEdgeWalls);

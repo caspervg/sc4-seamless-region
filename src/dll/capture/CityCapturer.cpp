@@ -762,6 +762,13 @@ bool CityCapturer::StepPrepare_()
             terrainView->SetWaterGlareStatus(false);
         }
     }
+    if (ctx_.settings && !ctx_.settings->captureTerrainGrid) {
+        // The grid flag is global (sbDisplayGrid), so a render takes whatever the player last chose.
+        if (cISTETerrainView* terrainView = TerrainView(); terrainView && terrainView->GetDisplayGridFlag()) {
+            terrainView->SetDisplayGridFlag(false);
+            saved_.gridHidden = true;
+        }
+    }
     // Messages the simulation posted before the pause (a new day or month) arrive here, before
     // any state is overridden: a flora visit must never see an overridden stage.
     if (!Pump_()) {
@@ -1824,6 +1831,11 @@ void CityCapturer::Restore_(const bool cityClosing)
     if (saved_.glareSaved) {
         if (cISTETerrainView* terrainView = TerrainView()) {
             terrainView->SetWaterGlareStatus(saved_.glareBefore);
+        }
+    }
+    if (saved_.gridHidden) {
+        if (cISTETerrainView* terrainView = TerrainView()) {
+            terrainView->SetDisplayGridFlag(true);
         }
     }
     if (saved_.snapshotPropertySet && game.app) {
