@@ -106,6 +106,112 @@ namespace
     };
 }
 
+void Settings::Read_(mINI::INIMap<std::string>& section, const std::filesystem::path& source)
+{
+    const Reader r{section, source};
+
+    if (section.has("LogLevel")) {
+        spdlog::level::level_enum level = logLevel;
+        if (ParseLogLevel(section.get("LogLevel"), level)) {
+            logLevel = level;
+        }
+        else {
+            r.Invalid("LogLevel");
+        }
+    }
+    r.Bool("LogToFile", logToFile);
+    r.Bool("StartWindowVisible", startWindowVisible);
+    r.Bool("Enabled", enabled);
+    r.Bool("ShowNeighbors", showNeighbors);
+    r.Bool("ShowFrontNeighbors", showFrontNeighbors);
+    r.Bool("HoverTint", hoverTint);
+    r.Bool("ClickToSwitch", clickToSwitch);
+    r.Bool("RenderOnSave", renderOnSave);
+    r.Bool("CaptureAtNoon", captureAtNoon);
+    r.Bool("CaptureWaterGlare", captureWaterGlare);
+    r.Bool("CaptureSnapshotFlag", captureSnapshotFlag);
+    r.Bool("CaptureTransportLayer", captureTransportLayer);
+    r.Bool("CaptureEdgeWalls", captureEdgeWalls);
+    r.Bool("CapturePartialRedraw", capturePartialRedraw);
+    r.Bool("CaptureAtDate", captureAtDate);
+    r.Int("CaptureMonth", captureMonth, 1, 12);
+    r.Int("CaptureDay", captureDay, 1, 31);
+    r.Bool("CaptureSeasonalFlora", captureSeasonalFlora);
+    r.Int("MaxRenderZoom", maxRenderZoom, kMinRenderZoom, kMaxRenderZoom);
+    r.Bool("RenderRotation1", renderRotation[0]);
+    r.Bool("RenderRotation2", renderRotation[1]);
+    r.Bool("RenderRotation3", renderRotation[2]);
+    r.Bool("RenderRotation4", renderRotation[3]);
+    r.Bool("BatchSaveCities", batchSaveCities);
+    r.Int("TileCacheMB", tileCacheMB, kMinTileCacheMB, kMaxTileCacheMB);
+    r.Int("UploadTilesPerFrame", uploadTilesPerFrame, kMinUploadTiles, kMaxUploadTiles);
+    r.Int("UploadMsPerFrame", uploadMsPerFrame, kMinUploadMs, kMaxUploadMs);
+    r.Int("Zoom45BandMetres", zoom45BandMetres, kMinBandMetres, kMaxBandMetres);
+    r.Int("WebpQuality", webpQuality, kMinWebpQuality, kMaxWebpQuality);
+    r.Int("MapQuality", mapQuality, kMinWebpQuality, kMaxWebpQuality);
+    r.Int("MapCacheMB", mapCacheMB, kMinMapCacheMB, kMaxMapCacheMB);
+    r.Int("MapUpscaleLevels", mapUpscaleLevels, kMinMapUpscale, kMaxMapUpscale);
+}
+
+void Settings::Write_(mINI::INIMap<std::string>& s) const
+{
+    const auto b = [](const bool v) { return std::string(v ? "true" : "false"); };
+    s["LogLevel"] = LogLevelName(logLevel);
+    s["LogToFile"] = b(logToFile);
+    s["StartWindowVisible"] = b(startWindowVisible);
+    s["Enabled"] = b(enabled);
+    s["ShowNeighbors"] = b(showNeighbors);
+    s["ShowFrontNeighbors"] = b(showFrontNeighbors);
+    s["HoverTint"] = b(hoverTint);
+    s["ClickToSwitch"] = b(clickToSwitch);
+    s["RenderOnSave"] = b(renderOnSave);
+    s["CaptureAtNoon"] = b(captureAtNoon);
+    s["CaptureWaterGlare"] = b(captureWaterGlare);
+    s["CaptureSnapshotFlag"] = b(captureSnapshotFlag);
+    s["CaptureTransportLayer"] = b(captureTransportLayer);
+    s["CaptureEdgeWalls"] = b(captureEdgeWalls);
+    s["CapturePartialRedraw"] = b(capturePartialRedraw);
+    s["CaptureAtDate"] = b(captureAtDate);
+    s["CaptureMonth"] = std::to_string(captureMonth);
+    s["CaptureDay"] = std::to_string(captureDay);
+    s["CaptureSeasonalFlora"] = b(captureSeasonalFlora);
+    s["MaxRenderZoom"] = std::to_string(maxRenderZoom);
+    s["RenderRotation1"] = b(renderRotation[0]);
+    s["RenderRotation2"] = b(renderRotation[1]);
+    s["RenderRotation3"] = b(renderRotation[2]);
+    s["RenderRotation4"] = b(renderRotation[3]);
+    s["BatchSaveCities"] = b(batchSaveCities);
+    s["TileCacheMB"] = std::to_string(tileCacheMB);
+    s["UploadTilesPerFrame"] = std::to_string(uploadTilesPerFrame);
+    s["UploadMsPerFrame"] = std::to_string(uploadMsPerFrame);
+    s["Zoom45BandMetres"] = std::to_string(zoom45BandMetres);
+    s["WebpQuality"] = std::to_string(webpQuality);
+    s["MapQuality"] = std::to_string(mapQuality);
+    s["MapCacheMB"] = std::to_string(mapCacheMB);
+    s["MapUpscaleLevels"] = std::to_string(mapUpscaleLevels);
+}
+
+bool Settings::Set(const std::string& key, const std::string& value)
+{
+    mINI::INIMap<std::string> known;
+    Write_(known);
+    if (!known.has(key)) {
+        return false;
+    }
+    mINI::INIMap<std::string> section;
+    section[key] = value;
+    Read_(section, std::filesystem::path(L"(remote command)"));
+    MarkChanged();
+    return true;
+}
+
+std::string Settings::Get(const std::string& key) const
+{
+    mINI::INIMap<std::string> all;
+    Write_(all);
+    return all.has(key) ? all.get(key) : std::string();
+}
+
 void Settings::Load(const std::filesystem::path& settingsFilePath)
 {
     const uint32_t revision = revision_;
@@ -119,49 +225,7 @@ void Settings::Load(const std::filesystem::path& settingsFilePath)
             return;
         }
         auto& section = ini[kSectionName];
-        const Reader r{section, settingsFilePath};
-
-        if (section.has("LogLevel")) {
-            spdlog::level::level_enum level = logLevel;
-            if (ParseLogLevel(section.get("LogLevel"), level)) {
-                logLevel = level;
-            }
-            else {
-                r.Invalid("LogLevel");
-            }
-        }
-        r.Bool("LogToFile", logToFile);
-        r.Bool("StartWindowVisible", startWindowVisible);
-        r.Bool("Enabled", enabled);
-        r.Bool("ShowNeighbors", showNeighbors);
-        r.Bool("ShowFrontNeighbors", showFrontNeighbors);
-        r.Bool("HoverTint", hoverTint);
-        r.Bool("ClickToSwitch", clickToSwitch);
-        r.Bool("RenderOnSave", renderOnSave);
-        r.Bool("CaptureAtNoon", captureAtNoon);
-        r.Bool("CaptureWaterGlare", captureWaterGlare);
-        r.Bool("CaptureSnapshotFlag", captureSnapshotFlag);
-        r.Bool("CaptureTransportLayer", captureTransportLayer);
-        r.Bool("CaptureEdgeWalls", captureEdgeWalls);
-        r.Bool("CapturePartialRedraw", capturePartialRedraw);
-        r.Bool("CaptureAtDate", captureAtDate);
-        r.Int("CaptureMonth", captureMonth, 1, 12);
-        r.Int("CaptureDay", captureDay, 1, 31);
-        r.Bool("CaptureSeasonalFlora", captureSeasonalFlora);
-        r.Int("MaxRenderZoom", maxRenderZoom, kMinRenderZoom, kMaxRenderZoom);
-        r.Bool("RenderRotation1", renderRotation[0]);
-        r.Bool("RenderRotation2", renderRotation[1]);
-        r.Bool("RenderRotation3", renderRotation[2]);
-        r.Bool("RenderRotation4", renderRotation[3]);
-        r.Bool("BatchSaveCities", batchSaveCities);
-        r.Int("TileCacheMB", tileCacheMB, kMinTileCacheMB, kMaxTileCacheMB);
-        r.Int("UploadTilesPerFrame", uploadTilesPerFrame, kMinUploadTiles, kMaxUploadTiles);
-        r.Int("UploadMsPerFrame", uploadMsPerFrame, kMinUploadMs, kMaxUploadMs);
-        r.Int("Zoom45BandMetres", zoom45BandMetres, kMinBandMetres, kMaxBandMetres);
-        r.Int("WebpQuality", webpQuality, kMinWebpQuality, kMaxWebpQuality);
-        r.Int("MapQuality", mapQuality, kMinWebpQuality, kMaxWebpQuality);
-        r.Int("MapCacheMB", mapCacheMB, kMinMapCacheMB, kMaxMapCacheMB);
-        r.Int("MapUpscaleLevels", mapUpscaleLevels, kMinMapUpscale, kMaxMapUpscale);
+        Read_(section, settingsFilePath);
     }
     catch (const std::exception& e) {
         LOG_ERROR("Failed to read settings from {}: {}", Logger::PathText(settingsFilePath), e.what());
@@ -177,40 +241,7 @@ bool Settings::Save(const std::filesystem::path& settingsFilePath) const
         mINI::INIStructure ini;
         file.read(ini);  // a missing file is fine, write() creates it
         auto& s = ini[kSectionName];
-        const auto b = [](const bool v) { return std::string(v ? "true" : "false"); };
-        s["LogLevel"] = LogLevelName(logLevel);
-        s["LogToFile"] = b(logToFile);
-        s["StartWindowVisible"] = b(startWindowVisible);
-        s["Enabled"] = b(enabled);
-        s["ShowNeighbors"] = b(showNeighbors);
-        s["ShowFrontNeighbors"] = b(showFrontNeighbors);
-        s["HoverTint"] = b(hoverTint);
-        s["ClickToSwitch"] = b(clickToSwitch);
-        s["RenderOnSave"] = b(renderOnSave);
-        s["CaptureAtNoon"] = b(captureAtNoon);
-        s["CaptureWaterGlare"] = b(captureWaterGlare);
-        s["CaptureSnapshotFlag"] = b(captureSnapshotFlag);
-        s["CaptureTransportLayer"] = b(captureTransportLayer);
-        s["CaptureEdgeWalls"] = b(captureEdgeWalls);
-        s["CapturePartialRedraw"] = b(capturePartialRedraw);
-        s["CaptureAtDate"] = b(captureAtDate);
-        s["CaptureMonth"] = std::to_string(captureMonth);
-        s["CaptureDay"] = std::to_string(captureDay);
-        s["CaptureSeasonalFlora"] = b(captureSeasonalFlora);
-        s["MaxRenderZoom"] = std::to_string(maxRenderZoom);
-        s["RenderRotation1"] = b(renderRotation[0]);
-        s["RenderRotation2"] = b(renderRotation[1]);
-        s["RenderRotation3"] = b(renderRotation[2]);
-        s["RenderRotation4"] = b(renderRotation[3]);
-        s["BatchSaveCities"] = b(batchSaveCities);
-        s["TileCacheMB"] = std::to_string(tileCacheMB);
-        s["UploadTilesPerFrame"] = std::to_string(uploadTilesPerFrame);
-        s["UploadMsPerFrame"] = std::to_string(uploadMsPerFrame);
-        s["Zoom45BandMetres"] = std::to_string(zoom45BandMetres);
-        s["WebpQuality"] = std::to_string(webpQuality);
-        s["MapQuality"] = std::to_string(mapQuality);
-        s["MapCacheMB"] = std::to_string(mapCacheMB);
-        s["MapUpscaleLevels"] = std::to_string(mapUpscaleLevels);
+        Write_(s);
         if (!file.write(ini)) {
             LOG_ERROR("Failed to write settings to {}", Logger::PathText(settingsFilePath));
             return false;

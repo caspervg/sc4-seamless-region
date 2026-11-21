@@ -834,6 +834,17 @@ std::optional<BatchQueue::Run> RegionBatchRenderer::LoadRun_() const
     return run;
 }
 
+std::string RegionBatchRenderer::StatusText() const
+{
+    if (!running_) {
+        return "idle";
+    }
+    static constexpr const char* kPhases[] = {"next", "switching", "settling", "rendering", "returning"};
+    return std::format("running, {} done, {} failed, {} left, '{}' {} {}/{} tiles{}", run_.done.size(),
+                       run_.failed.size(), run_.pending.size(), current_.name, kPhases[static_cast<int>(phase_)],
+                       captureProgress_.done, captureProgress_.total, cancelRequested_ ? ", stopping" : "");
+}
+
 bool RegionBatchRenderer::SaveOnLeave_() const { return !openedByBatch_ || ctx_.settings->batchSaveCities; }
 
 bool RegionBatchRenderer::NeedsRender_(const CityInfo& city) const

@@ -30,6 +30,7 @@
 #include "export/HtmlMapExporter.hpp"
 #include "interaction/NeighborPicker.hpp"
 #include "overlay/MapOverlay.hpp"
+#include "remote/RemoteCommands.hpp"
 #include "render/NeighborRenderer.hpp"
 #include "render/TileCache.hpp"
 #include "store/TileStore.hpp"
@@ -368,6 +369,8 @@ void SC4SeamlessRegionDirector::CreateModules_()
     add(std::make_unique<RegionBatchRenderer>(), "Batch", ctx_.batch);
     add(std::make_unique<HtmlMapExporter>(), "Export", ctx_.exporter);
     add(std::make_unique<MapOverlay>(), "Overlay", ctx_.overlay);
+    RemoteCommands* remote = nullptr;  // nothing else uses it
+    add(std::make_unique<RemoteCommands>(), "Remote", remote);
 
     int active = 0;
     for (PanelModule& m : panelModules_) {

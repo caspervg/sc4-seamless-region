@@ -52,6 +52,10 @@ public:
     // Stops after the current step and goes back to the start city or the region view.
     void Cancel();
     [[nodiscard]] bool IsRunning() const;
+    // For the remote commands: why the last Start was refused (or its result), and one line
+    // about the run.
+    [[nodiscard]] const std::string& Message() const { return message_; }
+    [[nodiscard]] std::string StatusText() const;
 
     // The progress window and the offer to continue a run. Called by our own ImGui panel.
     void DrawWindow();

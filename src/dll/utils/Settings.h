@@ -9,8 +9,15 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <string>
 
 #include <spdlog/common.h>
+
+namespace mINI
+{
+    template <typename T>
+    class INIMap;
+}
 
 class Settings
 {
@@ -18,6 +25,11 @@ public:
     void Load(const std::filesystem::path& settingsFilePath);
     // Writes all keys to the file. Returns false (and logs) on failure.
     bool Save(const std::filesystem::path& settingsFilePath) const;
+    // One INI key (case does not matter) from text, with the same rules as Load: an invalid value
+    // is logged and leaves the field. False for an unknown key. Marks the settings changed.
+    bool Set(const std::string& key, const std::string& value);
+    // The value of one INI key as Save writes it, empty for an unknown key.
+    [[nodiscard]] std::string Get(const std::string& key) const;
 
     void MarkChanged() { ++revision_; }
     [[nodiscard]] uint32_t Revision() const { return revision_; }
@@ -117,5 +129,7 @@ public:
     }
 
 private:
+    void Read_(mINI::INIMap<std::string>& section, const std::filesystem::path& source);
+    void Write_(mINI::INIMap<std::string>& section) const;
     uint32_t revision_ = 0;
 };
