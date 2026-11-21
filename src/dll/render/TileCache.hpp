@@ -57,6 +57,12 @@ public:
     // the ImGui frame). Either way the tile's spot on screen needs drawing again.
     void SetOnTileReady(std::function<void(const TileKey&)> callback);
 
+    // A ready texture or nullptr, like Acquire, but never queues a decode. For stand-ins: a
+    // tile of another zoom drawn while the right one loads.
+    const TileTexture* Peek(const TileKey& key);
+    // Forgets every queued and decoding tile (the textures stay). For a zoom or rotation change:
+    // the tiles of the old view are no longer on screen, and the new view asks for its own.
+    void DropQueued();
     // Starts a new draw pass for the "least recently drawn" order. Tiles acquired since the
     // last call count as drawn together and never evict each other.
     void BeginDrawPass();

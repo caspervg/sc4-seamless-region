@@ -71,19 +71,20 @@ namespace
                     static_cast<float>(oz + rz * sx + dz * sy), color, u, v};
         }
 
-        // Two triangles for the screen rectangle, UV 0..1.
-        void Quad(SC4WorldVertex* out, double x0, double y0, double x1, double y1, const uint32_t color) const
+        // Two triangles for the screen rectangle, UV u0..u1 and v0..v1 (default the whole texture).
+        void Quad(SC4WorldVertex* out, double x0, double y0, double x1, double y1, const uint32_t color,
+                  const float u0 = 0.0f, const float v0 = 0.0f, const float u1 = 1.0f, const float v1 = 1.0f) const
         {
             x0 += kPixelCentreShift;
             y0 += kPixelCentreShift;
             x1 += kPixelCentreShift;
             y1 += kPixelCentreShift;
-            out[0] = At(x0, y0, color, 0.0f, 0.0f);
-            out[1] = At(x1, y0, color, 1.0f, 0.0f);
-            out[2] = At(x1, y1, color, 1.0f, 1.0f);
+            out[0] = At(x0, y0, color, u0, v0);
+            out[1] = At(x1, y0, color, u1, v0);
+            out[2] = At(x1, y1, color, u1, v1);
             out[3] = out[0];
             out[4] = out[2];
-            out[5] = At(x0, y1, color, 0.0f, 1.0f);
+            out[5] = At(x0, y1, color, u0, v1);
         }
     };
 
@@ -254,6 +255,7 @@ void NeighborRenderer::Rebuild_()
         n.originOffset = ctx_.region->OriginOffset(city);
         n.tileSize = meta->tileSize;
         n.key.cityKey = storageKey;
+        n.standInKey.cityKey = storageKey;
         bool any = false;
         for (int r = 0; r < ViewMath::kRotationCount; ++r) {
             for (int z = 0; z < ViewMath::kZoomCount; ++z) {
@@ -262,6 +264,14 @@ void NeighborRenderer::Rebuild_()
                     n.levels[slot] = *level;
                     n.scale[slot] = CityMeta::LevelScale(*level, z);
                     any = true;
+                    for (const CityRenderMeta::Level& other : meta->levels) {
+                        const double otherScale = CityMeta::LevelScale(other, z);
+                        if (other.rotation == r && !other.transport && other.zoom != level->zoom && otherScale > 0.0 &&
+                            other.tilesX > 0 && other.tilesY > 0) {
+                            n.standIn[slot] = other;
+                            n.standInScale[slot] = otherScale;
+                        }
+                    }
                 }
             }
         }
@@ -283,17 +293,19 @@ void NeighborRenderer::Rebuild_()
 }
 
 bool NeighborRenderer::Place_(const Neighbor& neighbor, const CameraFrame& frame,
-                              NeighborMath::LevelPlacement& placement, const CityRenderMeta::Level*& level) const
+                              NeighborMath::LevelPlacement& placement, const CityRenderMeta::Level*& level,
+                              const bool standIn) const
 {
     if (!ViewMath::IsValidZoom(frame.zoomIndex) || !ViewMath::IsValidRotation(frame.rotation)) {
         return false;
     }
     const int slot = frame.rotation * ViewMath::kZoomCount + frame.zoomIndex;
-    if (neighbor.scale[slot] <= 0.0) {
+    const double levelScale = standIn ? neighbor.standInScale[slot] : neighbor.scale[slot];
+    if (levelScale <= 0.0) {
         return false;
     }
-    level = &neighbor.levels[slot];
-    const double scale = neighbor.scale[slot] * frame.magnification;
+    level = standIn ? &neighbor.standIn[slot] : &neighbor.levels[slot];
+    const double scale = levelScale * frame.magnification;
     const cS3DVector2 neighborCanvas = frame.projection.WorldToCanvas(neighbor.originOffset);
     const cS3DVector2 baseCanvas = frame.projection.WorldToCanvas(frame.baseCorner);
     placement = NeighborMath::PlaceLevel(neighborCanvas.fX, neighborCanvas.fY, level->originX, level->originY,
@@ -400,6 +412,10 @@ void NeighborRenderer::FlushDirty_()
                 MarkReadyTile_(key, ctx_.cameraReader->Frame());
             }
         }
+        else if (ShouldDraw_()) {
+            // ponytail: counted, not handled yet. If this shows up with holes, keep ready_ for the next frame.
+            readyLost_ += ready_.size();
+        }
         ready_.clear();
     }
     if (dirty_.Empty()) {
@@ -409,6 +425,7 @@ void NeighborRenderer::FlushDirty_()
     if (renderer && ShouldDraw_()) {
         if (dirty_.WholeView()) {
             renderer->ForceFullRedraw();
+            ++fullSent_;
         }
         else {
             // The game merges these with its own queue and redraws the static view inside
@@ -418,6 +435,7 @@ void NeighborRenderer::FlushDirty_()
             for (int i = 0; i < dirty_.Count(); ++i) {
                 addDirtyRectangle(renderer, RenderAddresses::Renderer::kDirtyKindRegion, &dirty_[i], nullptr, 0);
             }
+            dirtySent_ += static_cast<uint64_t>(dirty_.Count());
         }
     }
     dirty_.Clear();
@@ -510,6 +528,15 @@ void NeighborRenderer::DrawGroup_(const bool front)
     if (frame.magnification != 1.0f) {
         return;
     }
+    if (!front && (frame.zoomIndex != viewZoom_ || frame.rotation != viewRotation_)) {
+        // A zoom or rotation change redraws the whole view, which asks for the tiles it needs.
+        // Tiles still queued for the old view would only delay them (zooming twice quickly).
+        if (viewZoom_ >= 0) {
+            ctx_.tileCache->DropQueued();
+        }
+        viewZoom_ = frame.zoomIndex;
+        viewRotation_ = frame.rotation;
+    }
     const std::vector<int>& order = front ? front_[frame.rotation] : back_[frame.rotation];
     if (order.empty()) {
         return;
@@ -546,6 +573,67 @@ void NeighborRenderer::DrawGroup_(const bool front)
                              static_cast<uint32_t>(outline_.size()), outline_.data());
         ctx_.draw->EnableTextureStateFlag(context, true, 0);
         outline_.clear();
+    };
+
+    // Where a tile is still loading: the tiles of the stand-in level already in the cache,
+    // scaled and filtered. The tile's ready callback redraws the spot with the tile itself.
+    auto drawStandIn = [&](Neighbor& neighbor, const double x0, const double y0, const double x1, const double y1) {
+        NeighborMath::LevelPlacement alt;
+        const CityRenderMeta::Level* altLevel = nullptr;
+        if (!Place_(neighbor, frame, alt, altLevel, true) || alt.tilePixels <= 0.0) {
+            return;
+        }
+        auto range = [&](const double a, const double b, const double origin, const int count, int& first, int& last) {
+            first = std::clamp(static_cast<int>(std::floor((a - origin) / alt.tilePixels)), 0, count);
+            last = std::clamp(static_cast<int>(std::ceil((b - origin) / alt.tilePixels)), 0, count);
+        };
+        int ax0, ax1, ay0, ay1;
+        range(x0, x1, alt.originX, altLevel->tilesX, ax0, ax1);
+        range(y0, y1, alt.originY, altLevel->tilesY, ay0, ay1);
+        TileKey& key = neighbor.standInKey;
+        key.rotation = frame.rotation;
+        key.zoom = altLevel->zoom;
+        bool filtered = false;
+        for (int ay = ay0; ay < ay1; ++ay) {
+            for (int ax = ax0; ax < ax1; ++ax) {
+                key.tx = ax;
+                key.ty = ay;
+                if (!store->HasTile(key)) {
+                    continue;
+                }
+                const TileTexture* texture = cache->Peek(key);
+                const uint32_t driverTexture = texture ? cache->DriverTexture(*texture) : 0;
+                if (driverTexture == 0) {
+                    continue;
+                }
+                const double tx0 = NeighborMath::TileEdge(alt.originX, alt.tilePixels, ax);
+                const double tx1 = NeighborMath::TileEdge(alt.originX, alt.tilePixels, ax + 1);
+                const double ty0 = NeighborMath::TileEdge(alt.originY, alt.tilePixels, ay);
+                const double ty1 = NeighborMath::TileEdge(alt.originY, alt.tilePixels, ay + 1);
+                const double ix0 = std::max(x0, tx0), ix1 = std::min(x1, tx1);
+                const double iy0 = std::max(y0, ty0), iy1 = std::min(y1, ty1);
+                if (ix0 >= ix1 || iy0 >= iy1) {
+                    continue;
+                }
+                if (!begun) {
+                    BeginState_(context, front, linear, saved);
+                    begun = true;
+                }
+                if (!filtered) {
+                    ctx_.draw->SetTexFiltering(context, Drv::kFilterLinear, Drv::kFilterLinear, 0);
+                    filtered = true;
+                }
+                plane.Quad(quad, ix0, iy0, ix1, iy1, kWhite, static_cast<float>((ix0 - tx0) / (tx1 - tx0)),
+                           static_cast<float>((iy0 - ty0) / (ty1 - ty0)), static_cast<float>((ix1 - tx0) / (tx1 - tx0)),
+                           static_cast<float>((iy1 - ty0) / (ty1 - ty0)));
+                ctx_.draw->SetTexture(context, driverTexture, 0);
+                ctx_.draw->DrawPrims(context, Drv::kPrimTriangles, Drv::kVertexFormatPositionColorUV, 6, quad);
+                ++standInDraws_;
+            }
+        }
+        if (filtered && !linear) {
+            ctx_.draw->SetTexFiltering(context, Drv::kFilterNearest, Drv::kFilterNearest, 0);
+        }
     };
 
     for (const int index : order) {
@@ -592,6 +680,9 @@ void NeighborRenderer::DrawGroup_(const bool front)
                     ctx_.draw->SetTexture(context, driverTexture, 0);
                     ctx_.draw->DrawPrims(context, Drv::kPrimTriangles, Drv::kVertexFormatPositionColorUV, 6, quad);
                 }
+                else {
+                    drawStandIn(neighbor, x0, y0, x1, y1);
+                }
                 if (outlineTiles_) {
                     if (outline_.size() + 24 > kOutlineBatch) {
                         flushOutline();
@@ -631,7 +722,9 @@ void NeighborRenderer::DrawPanelSection()
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Draw a frame around every tile. Green tiles are loaded. Red tiles are on their way.");
     }
-    ImGui::SameLine();
+    ImGui::TextDisabled("Redraws for loaded tiles: %llu rectangles, %llu full. Lost: %llu. Stand-ins: %llu",
+                        static_cast<unsigned long long>(dirtySent_), static_cast<unsigned long long>(fullSent_),
+                        static_cast<unsigned long long>(readyLost_), static_cast<unsigned long long>(standInDraws_));
     if (ImGui::Button("Read renders again")) {
         InvalidateAll();
     }

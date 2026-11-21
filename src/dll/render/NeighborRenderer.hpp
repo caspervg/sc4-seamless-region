@@ -64,8 +64,14 @@ private:
         // magnification 1). Scale 0: nothing to draw in that view.
         std::array<CityRenderMeta::Level, kLevelSlots> levels{};
         std::array<double, kLevelSlots> scale{};
+        // Per view: a level of another zoom drawn scaled where a tile of the view's own level is
+        // still loading, when it is in the cache (zoom 4 and 5 share a camera pitch, the other
+        // zooms do not). Scale 0: none.
+        std::array<CityRenderMeta::Level, kLevelSlots> standIn{};
+        std::array<double, kLevelSlots> standInScale{};
         uint8_t frontMask = 0;     // bit r: drawn in front of the current city at rotation r
         TileKey key;               // cityKey is fixed, the rest changes per tile (no allocation)
+        TileKey standInKey;        // the same for stand-in tiles
         int visibleTiles = 0;      // last draw, for the panel
         int readyTiles = 0;
     };
@@ -87,8 +93,9 @@ private:
     void BeginState_(SC4DrawContextHandle context, bool front, bool linear, SavedState& saved) const;
     void EndState_(SC4DrawContextHandle context, const SavedState& saved) const;
     void Rebuild_();
+    // standIn: the stand-in level of the view instead of its own.
     bool Place_(const Neighbor& neighbor, const CameraFrame& frame, NeighborMath::LevelPlacement& placement,
-                const CityRenderMeta::Level*& level) const;
+                const CityRenderMeta::Level*& level, bool standIn = false) const;
     void OnTileReady_(const TileKey& key);
     // Adds the screen rectangle of a tile that became ready to dirty_.
     void MarkReadyTile_(const TileKey& key, const CameraFrame& frame);
@@ -104,6 +111,14 @@ private:
     bool shownNeighbors_ = true;
     bool shownFront_ = true;
     bool indexReady_ = false;
+    // For the panel: stand-in quads drawn, redraw rectangles and full redraws sent for tiles that
+    // became ready, ready tiles whose spot could not be placed (no camera) and stayed as they were.
+    uint64_t standInDraws_ = 0;
+    uint64_t dirtySent_ = 0;
+    uint64_t fullSent_ = 0;
+    uint64_t readyLost_ = 0;
+    int viewZoom_ = -1;  // zoom and rotation of the last draw: a change drops the old view's queue
+    int viewRotation_ = -1;
     uint32_t settingsRevision_ = 0;
     uint32_t regionGeneration_ = 0;
     Season season_ = Season::Main;  // of the open city's date, at the last Rebuild_

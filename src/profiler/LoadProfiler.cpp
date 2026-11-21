@@ -26,6 +26,7 @@
 #include <vector>
 
 #include <MinHook.h>
+#include <timeapi.h>
 
 #include "cRZMessage2COMDirector.h"
 
@@ -83,7 +84,49 @@ namespace
     int64_t gFrequency = 1;
     std::atomic<bool> gSampling{false};
     std::thread gSampler;
-    std::vector<std::pair<uint32_t, int>> gSamples;  // EIP, phase
+    // One sample: EIP, the timed phase, and the first game return addresses on the stack
+    // (innermost first), found by scanning the stack for values just after a CALL.
+    constexpr int kStackDepth = 48;
+    struct Sample
+    {
+        uint32_t eip;
+        int phase;
+        uint32_t ret[kStackDepth];
+    };
+    std::vector<Sample> gSamples;
+    uintptr_t gTextBegin = 0;
+    uintptr_t gTextEnd = 0;
+
+    bool InText(const uint32_t v) { return v >= gTextBegin && v < gTextEnd; }
+
+    // A return address follows a CALL: E8 rel32, FF /2 with a register, [reg], [reg+d8], [reg+d32]
+    // or [d32].
+    bool AfterCall(const uint32_t v)
+    {
+        if (v < gTextBegin + 8) {
+            return false;
+        }
+        const auto* b = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(v));
+        if (b[-5] == 0xE8) {
+            return true;
+        }
+        if (b[-2] == 0xFF && (b[-1] & 0x38) == 0x10 && (b[-1] >> 6) == 3) {
+            return true;  // call reg
+        }
+        if (b[-2] == 0xFF && (b[-1] & 0x38) == 0x10 && (b[-1] >> 6) == 0 && (b[-1] & 7) != 4 && (b[-1] & 7) != 5) {
+            return true;  // call [reg]
+        }
+        if (b[-3] == 0xFF && (b[-2] & 0x38) == 0x10 && (b[-2] >> 6) == 1) {
+            return true;  // call [reg+d8] (also with a SIB byte below)
+        }
+        if (b[-4] == 0xFF && (b[-3] & 0x38) == 0x10 && (b[-3] >> 6) == 1) {
+            return true;
+        }
+        if (b[-6] == 0xFF && (b[-5] & 0x38) == 0x10 && ((b[-5] >> 6) == 2 || b[-5] == 0x15)) {
+            return true;  // call [reg+d32], call [d32]
+        }
+        return false;
+    }
     std::filesystem::path gDir;
     int gLoads = 0;
 
@@ -98,18 +141,32 @@ namespace
 
     void SamplerMain()
     {
+        timeBeginPeriod(1);  // Sleep(1) sleeps about 1 ms instead of a 15.6 ms tick
         while (gSampling.load()) {
             if (SuspendThread(gMainHandle) != static_cast<DWORD>(-1)) {
                 CONTEXT context{};
                 context.ContextFlags = CONTEXT_CONTROL;
                 // No allocation while the main thread is suspended: it may hold the heap lock.
                 if (GetThreadContext(gMainHandle, &context) && gSamples.size() < gSamples.capacity()) {
-                    gSamples.emplace_back(context.Eip, gMainPhase.load());
+                    Sample sample{context.Eip, gMainPhase.load(), {}};
+                    MEMORY_BASIC_INFORMATION mbi{};
+                    if (VirtualQuery(reinterpret_cast<void*>(static_cast<uintptr_t>(context.Esp)), &mbi, sizeof(mbi))) {
+                        const auto end = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+                        int found = 0;
+                        for (uintptr_t at = context.Esp; at + 4 <= end && found < kStackDepth; at += 4) {
+                            const uint32_t v = *reinterpret_cast<const uint32_t*>(at);
+                            if (InText(v) && AfterCall(v)) {
+                                sample.ret[found++] = v;
+                            }
+                        }
+                    }
+                    gSamples.push_back(sample);
                 }
                 ResumeThread(gMainHandle);
             }
             Sleep(1);
         }
+        timeEndPeriod(1);
     }
 
     std::string ModuleOf(const uint32_t address)
@@ -143,7 +200,9 @@ namespace
         std::map<int, int> byPhase;
         std::map<std::string, int> byModule;
         std::unordered_map<uint32_t, std::pair<int, int>> byAddress;  // count, phase
-        for (const auto& [eip, phase] : gSamples) {
+        for (const Sample& sample : gSamples) {
+            const uint32_t eip = sample.eip;
+            const int phase = sample.phase;
             ++byPhase[phase];
             ++byModule[eip >= 0x00400000 && eip < 0x00c00000 ? std::string("SimCity 4.exe") : ModuleOf(eip)];
             auto& entry = byAddress[eip];
@@ -176,6 +235,19 @@ namespace
             }
             std::fclose(tsv);
         }
+        FILE* raw = nullptr;
+        if (_wfopen_s(&raw, (gDir / (L"SC4LoadProfiler-stacks-" + std::to_wstring(gLoads) + L".tsv")).c_str(), L"w") ==
+                0 &&
+            raw) {
+            for (const Sample& sample : gSamples) {
+                std::fprintf(raw, "%08X\t%d", sample.eip, sample.phase);
+                for (const uint32_t r : sample.ret) {
+                    std::fprintf(raw, "\t%08X", r);
+                }
+                std::fprintf(raw, "\n");
+            }
+            std::fclose(raw);
+        }
         gStats = {};
         gSamples.clear();
     }
@@ -192,7 +264,7 @@ extern "C" void __cdecl ProfEnter(const uint32_t id, uint32_t* retSlot)
     }
     const bool main = GetCurrentThreadId() == gMainThread;
     if (id == kLoadCity && main && !gSampling.load()) {
-        gSamples.reserve(60000);  // a minute of samples
+        gSamples.reserve(60000);  // a minute of samples (12 MB)
         gSampling = true;
         gSampler = std::thread(SamplerMain);
     }
@@ -289,6 +361,14 @@ public:
         wchar_t path[MAX_PATH]{};
         GetModuleFileNameW(self, path, MAX_PATH);
         gDir = std::filesystem::path(path).parent_path();
+        {
+            const auto* image = reinterpret_cast<const uint8_t*>(GetModuleHandleW(nullptr));
+            const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(
+                image + reinterpret_cast<const IMAGE_DOS_HEADER*>(image)->e_lfanew);
+            const IMAGE_SECTION_HEADER* text = IMAGE_FIRST_SECTION(nt);
+            gTextBegin = reinterpret_cast<uintptr_t>(image) + text->VirtualAddress;
+            gTextEnd = gTextBegin + text->Misc.VirtualSize;
+        }
 
         FILE* log = nullptr;
         _wfopen_s(&log, (gDir / L"SC4LoadProfiler.log").c_str(), L"a");

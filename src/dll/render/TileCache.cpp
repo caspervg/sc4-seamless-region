@@ -294,6 +294,36 @@ const TileTexture* TileCache::Acquire(const TileKey& key)
     return nullptr;
 }
 
+const TileTexture* TileCache::Peek(const TileKey& key)
+{
+    Impl& s = *impl_;
+    if (!s.initialized || !s.cityActive) {
+        return nullptr;
+    }
+    return s.lru.Find(key, s.passStamp);
+}
+
+void TileCache::DropQueued()
+{
+    Impl& s = *impl_;
+    if (!s.initialized) {
+        return;
+    }
+    {
+        std::lock_guard lock(s.mutex);
+        ++s.epoch;  // the tile being decoded right now is dropped when it finishes
+        s.requests.clear();
+        for (const Impl::Done& d : s.done) {
+            if (d.buffer >= 0) {
+                s.freeBuffers.push_back(d.buffer);
+            }
+        }
+        s.done.clear();
+    }
+    s.wake.notify_one();
+    s.pending.clear();
+}
+
 void TileCache::BeginDrawPass()
 {
     if (impl_->initialized) {
