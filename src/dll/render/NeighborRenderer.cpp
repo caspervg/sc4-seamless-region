@@ -5,6 +5,7 @@
 #include <cmath>
 #include <unordered_map>
 
+#include "cIGZGDriver.h"
 #include "cISC43DRender.h"
 #include "core/GameAddresses.hpp"
 #include "core/Guard.hpp"
@@ -30,6 +31,7 @@ namespace
     // Tiles lie on a camera-facing plane this far into the depth range, just behind the near
     // plane. Front tiles write that depth, so everything the game draws later is behind them.
     constexpr double kDepthFraction = 0.002;
+    constexpr uint32_t kClearDepthBit = 0x1000;  // cIGZGDriver::Clear: 0x4000 colour, 0x1000 depth, 0x2000 stencil
 
     // Moves every quad a quarter pixel up and left. Drivers do not agree on whether a pixel
     // centre is at a whole coordinate (DirectX 7) or at a half one (Direct3D 11, Vulkan).
@@ -587,6 +589,17 @@ void NeighborRenderer::DrawGroup_(const bool front)
     const std::vector<int>& order = front ? front_[frame.rotation] : back_[frame.rotation];
     if (order.empty()) {
         return;
+    }
+    if (!front) {
+        // A dirty rectangle or pan strip does not clear depth: ClearViewport (0x007c3f80) draws a
+        // rectangle at z -32500 instead (DrawViewportRectangle 0x007c3400). The back tiles write no
+        // depth, so that plane stays under them and SCD3D11's LiveShadows darkens them as ground,
+        // inside the rectangle, until the next full redraw. A real depth clear (the driver clears
+        // only the viewport) leaves them as background. The depth mask is still on from that
+        // rectangle. Harmless in a full redraw, which cleared depth already.
+        if (cIGZGDriver* driver = GameAccess::GDriver()) {
+            driver->Clear(kClearDepthBit);
+        }
     }
     const void* camera =
         GameAccess::ReadField<const void*>(GameAccess::CameraControl(), GameAddresses::CameraControl::kS3DCamera);

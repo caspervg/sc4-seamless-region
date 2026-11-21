@@ -68,6 +68,14 @@ drops (a full decode queue, or over the memory limit when it was asked for in an
 is reported like a ready tile: the renderer queues its rectangle and the redraw asks for it
 again. Before this, fast scrolls left holes until the next full redraw.
 
+A dirty rectangle or pan strip clears no depth through the driver: `BuildDrawFrustumDataFromViewportRect`
+(`0x007f9f50`) sets frustum `+0x228` for a rectangle smaller than the viewport, and `ClearViewport`
+(`0x007c3f80`) then calls `DrawViewportRectangle` (`0x007c3400`, vtable `+0xc4`): a quad at z -32500
+through the 2D camera, depth func always, depth write on. The back neighbor tiles write no depth, so
+SCD3D11's LiveShadows composite took that plane for ground and darkened the tiles inside the rectangle
+(it skips only depth >= 0.999999). The renderer clears depth (`Clear(0x1000)`) before the back tiles.
+High (decompile, SCD3D11 source), the effect in game not measured.
+
 Driver audit (2026-11-20, source): scvk 0.7.1 clears, clips and copies regions within the
 scissor, the same as GL. SCD3D11 `ba5b350` `cGDriver::Clear` (`cGDriver.cpp:213`) clears the
 whole surface under a sub-viewport (`ClearRenderTargetView`/`ClearDepthStencilView` ignore the
