@@ -213,7 +213,12 @@ TEST_CASE(CaptureBlockSizeIsTheWholeTilesOfTheWindow)
     CHECK(w == 1 && h == 1);
     CaptureMath::BlockSize(512, 0, 0, w, h);
     CHECK(w == 1 && h == 1);
-    CaptureMath::BlockSize(512, 7680, 4320, w, h);
+    CaptureMath::BlockSize(512, 3840, 2160, w, h);  // 4K: 7 x 4 fits the memory cap
+    CHECK(w == 7 && h == 4);
+    CaptureMath::BlockSize(512, 7680, 4320, w, h);  // 8K: 15 x 8, capped per side, then in memory
+    CHECK(w <= CaptureMath::kMaxBlockSide && h <= CaptureMath::kMaxBlockSide);
+    CHECK(static_cast<int64_t>(w) * h * 512 * 512 <= CaptureMath::kMaxBlockPixels && w * h >= 30);
+    CaptureMath::BlockSize(256, 7680, 4320, w, h);  // small tiles: the side cap
     CHECK(w == CaptureMath::kMaxBlockSide && h == CaptureMath::kMaxBlockSide);
 }
 

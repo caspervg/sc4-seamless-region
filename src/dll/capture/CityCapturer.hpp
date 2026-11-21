@@ -105,6 +105,8 @@ public:
     // The "Transport layer" check box (Settings::captureTransportLayer). The batch panel shows it
     // too.
     static void DrawTransportChoice(Settings& settings);
+    // The "Rotations" check boxes (Settings::renderRotation). The batch panel shows them too.
+    static void DrawRotationChoice(Settings& settings);
 
 private:
     enum class Phase
@@ -197,6 +199,7 @@ private:
     // Samples the terrain along the city edges for meta.json (CityRenderMeta::edges).
     void SampleEdges_(CityRenderMeta::Edges& edges) const;
     int maxZoom_ = 3;  // zoom index, the highest this render makes
+    uint32_t rotations_ = 0xF;  // bit r: this render makes rotation r
     bool transport_ = false;  // this render makes the transport layer
 
     // Pushes data view 0xF3, pumps and checks that it took. False when it did not (logged) or
@@ -209,6 +212,11 @@ private:
     void SkipLevel_();
 
     void SetClearColor_(uint32_t rgba);
+    // The key color for the next draw of the block, without throwing the backing store away: that
+    // draw forces a full redraw itself or redraws dirty rectangles.
+    void SetKeyColor_(uint32_t rgba);
+    // Partial passes: the tiles on the city edge as dirty rectangles, the block at (x, y).
+    void QueueEdgeTiles_(cISC43DRender* renderer, int x, int y) const;
     void RestoreClearColor_();
     // Sets the time of day of the lighting, when the render changed it.
     void SetTimeOfDay_(float time) const;
@@ -283,7 +291,14 @@ private:
     int handIndex_ = 0;              // the next tile of the block for the store
     std::vector<CaptureMath::TileRead> reads_;
     size_t readIndex_ = 0;
-    int pass_ = 0;                   // 0: over the first key color, 1: over the second
+    // 0: the whole window over the first key color. 1: over the second. 2: over the first again,
+    // drawn like pass 1 (partial_ only).
+    int pass_ = 0;
+    // Passes 2 and 1 redraw only the tiles on the city edge, as dirty rectangles. Both colors of
+    // those tiles then come from the same kind of draw.
+    bool partial_ = false;
+    bool partialOff_ = false;        // a partial pass did not clear the key color: off for this level
+    bool partialOffLogged_ = false;
     int viewportW_ = 0, viewportH_ = 0;
     int shakeTicks_ = 0;
 

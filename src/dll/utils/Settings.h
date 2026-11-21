@@ -6,6 +6,7 @@
 // MarkChanged() so modules that cache a value can notice through Revision(). Save() writes
 // every key back and keeps the other content of the file.
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 
@@ -53,13 +54,22 @@ public:
     // Keep the cliffs and water walls of the two front edges in renders. Where the neighbor in
     // front is lower, the seam then shows a cliff. Off: every edge is transparent.
     bool captureEdgeWalls = true;
+    // Draw the tiles on the city edge again as dirty rectangles (both key colors), instead of the
+    // whole window over the second key color. Off: the whole window, as before.
+    bool capturePartialRedraw = true;
     // The highest zoom a render makes, as the game counts zooms: 3, 4 or 5. Zoom 5 has 4 times
     // the pixels of zoom 4. Without zoom 5 tiles, zoom 5 shows zoom 4 at twice the size. Without
     // zoom 4 tiles neighbors do not show at zoom 4 and 5.
     int maxRenderZoom = 4;
+    // The rotations a render makes, [0] is the game's rotation 1. A neighbor shows only in the
+    // rotations it has a render for. Each rotation is a quarter of the render time.
+    std::array<bool, 4> renderRotation{true, true, true, true};
+    // Region render: save each city the batch opened when it moves on. Off: those cities close
+    // without a save (the game was paused during their render), about 3 seconds faster each.
+    bool batchSaveCities = true;
     // GPU tile cache limit in megabytes. A 512 px tile takes 2 MB (with the CPU copy). 96 MB was
     // too little at 4K: one neighbor can show more tiles than that holds.
-    int tileCacheMB = 256;
+    int tileCacheMB = 512;
     // Texture uploads per frame: at most this many tiles...
     int uploadTilesPerFrame = 4;
     // ...or this many milliseconds, whichever comes first.
@@ -87,6 +97,15 @@ public:
 
     // maxRenderZoom as a zoom index (2..4).
     [[nodiscard]] int MaxRenderZoomIndex() const { return maxRenderZoom - 1; }
+    // renderRotation as a mask, bit r for rotation index r. All four when none is on.
+    [[nodiscard]] uint32_t RenderRotationMask() const
+    {
+        uint32_t mask = 0;
+        for (int r = 0; r < 4; ++r) {
+            mask |= renderRotation[r] ? 1u << r : 0u;
+        }
+        return mask ? mask : 0xFu;
+    }
 
 private:
     uint32_t revision_ = 0;

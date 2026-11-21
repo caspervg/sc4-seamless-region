@@ -93,6 +93,9 @@ private:
     void Log_(const std::string& line) const;
     // No render, out of date, or a level up to Settings::maxRenderZoom is missing.
     [[nodiscard]] bool NeedsRender_(const CityInfo& city) const;
+    // Save the current city when the batch leaves it: always the player's own city, a city the
+    // batch opened only with Settings::batchSaveCities.
+    [[nodiscard]] bool SaveOnLeave_() const;
     // Adding the transport layer: no render yet, or a transport level up to the chosen zoom is
     // missing. The save time does not count.
     [[nodiscard]] bool NeedsTransport_(const CityInfo& city) const;

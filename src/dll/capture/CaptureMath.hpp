@@ -285,9 +285,11 @@ namespace CaptureMath
     // them. The read area is always blockW x blockH tiles, also when fewer tiles of the block
     // touch the city: the driver then reuses its buffer of the same size.
     // -----------------------------------------------------------------------------------------
-    // At most this many tiles per side. Every tile of a block costs two block buffers of 1 MB
-    // (both passes) plus 1 MB in the driver's own buffer, in a 32 bit process.
-    constexpr int kMaxBlockSide = 4;
+    // At most this many tiles per side, and at most kMaxBlockPixels in all. Every tile of a block
+    // costs two block buffers of 1 MB (both passes) plus 1 MB in the driver's own buffer, in a
+    // 32 bit process: 32 tiles of 512 px are about 96 MB.
+    constexpr int kMaxBlockSide = 8;
+    constexpr int64_t kMaxBlockPixels = 32ll * 512 * 512;
 
     struct BlockTile
     {
@@ -303,11 +305,16 @@ namespace CaptureMath
         int count = 0;       // tiles to render, row by row
     };
 
-    // Whole tiles the viewport holds per side, at least 1 and at most kMaxBlockSide.
+    // Whole tiles the viewport holds per side, at least 1 and at most kMaxBlockSide, together at
+    // most kMaxBlockPixels (the longer side gives way).
     inline void BlockSize(const int tileSize, const int viewportW, const int viewportH, int& w, int& h)
     {
         w = tileSize > 0 ? std::clamp(viewportW / tileSize, 1, kMaxBlockSide) : 1;
         h = tileSize > 0 ? std::clamp(viewportH / tileSize, 1, kMaxBlockSide) : 1;
+        const int64_t tilePixels = static_cast<int64_t>(tileSize) * tileSize;
+        while (w * h > 1 && w * h * tilePixels > kMaxBlockPixels) {
+            (w >= h ? w : h) -= 1;
+        }
     }
 
     // Plans the next block of a level and takes its tiles out of `pending` (tilesX * tilesY

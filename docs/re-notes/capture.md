@@ -219,6 +219,30 @@ buffer changes the color, and a city pixel can have the key color. The capture:
 Only blocks with a tile on the edge of the city pay for the second draw, and only their edge
 tiles pay for the compose. The opaque tiles of such a block are taken from the first pass.
 
+**Partial second pass (`CapturePartialRedraw`, on by default).** When the edge tiles are at
+most a third of the block (and the block is one read), the second pass does not draw the
+whole window again. The edge tiles are queued as dirty rectangles (`AddDirtyRectangle`
+`0x007c9540`, kind 3, `delayFrames` 2^20 so the next `Draw` processes them whatever the merge
+delay of the render properties: `AddDirtyRectangleInternal` `0x007c8f30` sets `+0x1f8` to the
+frame counter minus it, `Draw` processes when `+0x1f8 + delay < counter`). They are drawn twice:
+over key A, then over key B. Both colors of an edge tile then come from the same subview
+draw, so a pixel the full draw and the subview draw rasterize differently cannot turn into a
+false alpha. The opaque tiles stay from the full first pass.
+
+- `SetViewportClearColor` only stores the color. A `Draw` over a valid backing store does not
+  hand it to the driver (`Draw` `0x007cb530`, the `+0x1a0` flag), and the dirty rectangles clear
+  with the driver's color, so the capture also calls `cIGZGDriver::ClearColor`. The key color
+  changes inside a block no longer call `ForceFullRedraw` (the first pass forces its own), so the
+  game's frame between ticks reuses the backing store.
+- A dirty rectangle clears the color only when the game sees the view reach past the city
+  (`ClearViewport` `0x007c3f80` with 0, the bounds test). A small city seen whole could keep key
+  A there. So every edge tile must show some key B after the partial pass, or the block is drawn
+  again in whole windows and the partial pass stays off for the rest of the level (logged once).
+- Driver caveat: SCD3D11 before caspervg/scd3d11#41 clears the whole surface on a partial
+  `Clear`. A partial pass then wipes the frame outside the rectangles too. The capture reads only
+  the edge tiles from it, so the tiles are still right, but only with the fix are the colors of
+  the rest of the screen kept.
+
 **Tiles.** `ViewMath::TileGrid::ForCity` with tile size 512 (`CityRenderMeta::tileSize`),
 heights from `cISTETerrain::MinHeight()` to `max(MaxHeight(), GetSeaLevel()) + 600 m`. 600 m is
 room for buildings: taller than every lot of the game, and a larger value only adds tiles that
@@ -233,7 +257,7 @@ more than 0.05 px off the grid. It waits up to 60 ticks for a screen shake to en
 
 **Blocks.** One drawn frame gives every tile that fits in the game window, not one tile.
 `CaptureMath::NextTileBlock` takes `viewportW / 512` by `viewportH / 512` tiles (at least 1,
-at most 4 per side) from the tiles of the level that touch the outline and wait for their
+at most 8 per side and 32 tiles of 512 px in all, `kMaxBlockPixels`: a 4K window gives 7 x 4) from the tiles of the level that touch the outline and wait for their
 render. The block starts at the first row with a waiting tile, at the leftmost waiting tile
 of the rows it covers. The read area is always the full block, also when only some of its
 tiles touch the city: the driver then reuses its read buffer of the same size (a reused DX7

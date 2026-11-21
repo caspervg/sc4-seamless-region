@@ -110,13 +110,14 @@ namespace CityMeta
     // no level fits.
     [[nodiscard]] const CityRenderMeta::Level* ChooseLevel(const std::vector<CityRenderMeta::Level>& levels,
                                                            int rotation, int viewZoom);
-    // Every rotation has every zoom index from 0 to maxZoom, with transport = true also in the
-    // transport layer.
-    [[nodiscard]] bool HasLevelsUpTo(const CityRenderMeta& meta, int maxZoom, bool transport = false);
+    // Every rotation in rotations (bit r for rotation r) has every zoom index from 0 to maxZoom,
+    // with transport = true also in the transport layer.
+    [[nodiscard]] bool HasLevelsUpTo(const CityRenderMeta& meta, int maxZoom, bool transport = false,
+                                     uint32_t rotations = 0xF);
     // The batch rule: a city needs a render when its render is stale (IsStale) or a level up to
     // maxZoom (zoom index) is missing. With transport, a missing transport level counts too.
     [[nodiscard]] bool NeedsRender(const std::optional<CityRenderMeta>& meta, int64_t saveFileTime, int maxZoom,
-                                   bool transport = false);
+                                   bool transport = false, uint32_t rotations = 0xF);
     // An earlier render has `wanted` already: a level of the same rotation, zoom and layer on the
     // same tile grid (tile counts, origin within half a pixel, magnification). The save time is
     // not checked: the caller decides that the city did not change.
@@ -128,8 +129,10 @@ namespace CityMeta
     // levels when the new render has none. All of them must go when the city was saved after
     // that render (its saveFileTime differs from saveFileTime), else none. They stay while they
     // still show the city as it is.
+    // A rotation outside rotations (bit r for rotation r) goes the same way.
     [[nodiscard]] std::vector<CityRenderMeta::Level> LevelsToDrop(const CityRenderMeta& earlier, int maxZoom,
-                                                                  int64_t saveFileTime, bool transport = false);
+                                                                  int64_t saveFileTime, bool transport = false,
+                                                                  uint32_t rotations = 0xF);
 }
 
 class TileStore final : public Module
@@ -163,7 +166,8 @@ public:
     [[nodiscard]] bool IsStale(const CityInfo& city) const;
     // CityMeta::NeedsRender for the city's save file: stale, or a level up to maxZoom (zoom
     // index) is missing, with transport also a transport level.
-    [[nodiscard]] bool NeedsRender(const CityInfo& city, int maxZoom, bool transport = false) const;
+    [[nodiscard]] bool NeedsRender(const CityInfo& city, int maxZoom, bool transport = false,
+                                   uint32_t rotations = 0xF) const;
     // Cached directory index, no disk hit and no allocation per call once a city is indexed.
     // The first call for a city that the background scan has not reached yet scans that city.
     [[nodiscard]] bool HasTile(const TileKey& key) const;

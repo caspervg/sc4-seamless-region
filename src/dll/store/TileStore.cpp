@@ -424,14 +424,14 @@ namespace CityMeta
         return best;
     }
 
-    bool HasLevelsUpTo(const CityRenderMeta& meta, const int maxZoom, const bool transport)
+    bool HasLevelsUpTo(const CityRenderMeta& meta, const int maxZoom, const bool transport, const uint32_t rotations)
     {
         for (const bool layer : {false, true}) {
             if (layer && !transport) {
                 break;
             }
             for (int r = 0; r < ViewMath::kRotationCount; ++r) {
-                for (int z = 0; z <= maxZoom; ++z) {
+                for (int z = 0; z <= maxZoom && (rotations >> r & 1u); ++z) {
                     if (std::ranges::none_of(meta.levels, [&](const CityRenderMeta::Level& l) {
                             return l.rotation == r && l.zoom == z && l.transport == layer;
                         })) {
@@ -444,18 +444,19 @@ namespace CityMeta
     }
 
     bool NeedsRender(const std::optional<CityRenderMeta>& meta, const int64_t saveFileTime, const int maxZoom,
-                     const bool transport)
+                     const bool transport, const uint32_t rotations)
     {
-        return IsStale(meta, saveFileTime) || !HasLevelsUpTo(*meta, maxZoom, transport);
+        return IsStale(meta, saveFileTime) || !HasLevelsUpTo(*meta, maxZoom, transport, rotations);
     }
 
     std::vector<CityRenderMeta::Level> LevelsToDrop(const CityRenderMeta& earlier, const int maxZoom,
-                                                    const int64_t saveFileTime, const bool transport)
+                                                    const int64_t saveFileTime, const bool transport,
+                                                    const uint32_t rotations)
     {
         std::vector<CityRenderMeta::Level> drop;
         if (earlier.saveFileTime != saveFileTime) {
             for (const CityRenderMeta::Level& level : earlier.levels) {
-                if (level.zoom > maxZoom || (level.transport && !transport)) {
+                if (level.zoom > maxZoom || (level.transport && !transport) || !(rotations >> level.rotation & 1u)) {
                     drop.push_back(level);
                 }
             }
@@ -700,10 +701,11 @@ bool TileStore::IsStale(const CityInfo& city) const
     return CityMeta::IsStale(LoadMeta(city.key), city.savePath.empty() ? 0 : FileTime(city.savePath));
 }
 
-bool TileStore::NeedsRender(const CityInfo& city, const int maxZoom, const bool transport) const
+bool TileStore::NeedsRender(const CityInfo& city, const int maxZoom, const bool transport,
+                            const uint32_t rotations) const
 {
     return CityMeta::NeedsRender(LoadMeta(city.key), city.savePath.empty() ? 0 : FileTime(city.savePath), maxZoom,
-                                 transport);
+                                 transport, rotations);
 }
 
 bool TileStore::WriteMeta(const std::string& cityKey, const CityRenderMeta& meta)

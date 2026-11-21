@@ -376,7 +376,7 @@ driver, SCD3D11 and scvk. Panel: Tools, group "Neighbors".
 
 ### Start and city load
 
-1. Log at start: `Tile cache: ready, limit 256 MB` and
+1. Log at start: `Tile cache: ready, limit 512 MB` and
    `Neighbors: draw callbacks registered (back at the start of PreStatic, front at the end of PostStatic)`.
 2. Open a city with rendered neighbors. Log: `Neighbors: N of M founded neighbor cities have a render`.
 3. The neighbors appear around the city once the store has indexed the renders folder (a second or
@@ -604,6 +604,20 @@ city with roads, rail, a highway and zones.
 4. With "Render at noon" on, save the city (Ctrl+S) during a full render. The region picture
    looks as after a normal save, and the render goes on at noon.
 
+### Faster renders
+
+1. Settings: "Rotations" 1 only, render a city. The log names only rotation 0 levels, the
+   render takes about a quarter of the time, and the neighbor shows in rotation 1 only. Turn
+   rotation 2 on: the batch counts the city as out of date (rotation 2 is missing).
+2. With "Rotations" 1 to 4 again, render a city on the edge of the map. The log line
+   `Capture: time in ms: ...` has a lower draw time than before for the same city. Compare the
+   edge tiles with a render with `CapturePartialRedraw=false`: the same alpha along the city
+   edge, no holes or magenta or green specks.
+3. A small city at zoom 1 (the whole city on screen): if the log says `a partial redraw kept
+   the first key color`, the tiles of that level are still right (whole windows from there).
+4. A 4K window: the log line `Capture: rotation r zoom 5: N tiles` and the frame count in the
+   finish line show about 28 tiles per frame for 512 px tiles.
+
 ## Batch
 
 Use a small test region with 3 to 5 founded cities and one empty tile. Copy the region first:
@@ -704,6 +718,9 @@ Start the game and stay in the region view. Open the panel with Ctrl+Shift+F9.
    it opens the next city from there and at the end opens its start city.
 9. A city that cannot be saved (for example a tutorial city) in a region view run: the run goes
    on to the next city without a save of it.
+10. "Save each city" off: the log says `Switching: step 2, '<city>' is not saved, as asked` for
+    the cities the run opened, the save files of those cities keep their time, and their renders
+    count as up to date afterwards. The city the run started in is still saved.
 
 
 

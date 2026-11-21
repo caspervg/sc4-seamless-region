@@ -222,6 +222,16 @@ TEST_CASE(BatchUpToDateNeedsEveryLevelUpToTheMaxZoom)
     }
     CHECK(!CityMeta::NeedsRender(meta, 1000, 4));
     CHECK(CityMeta::HasLevelsUpTo(meta, 4));
+
+    // Only the chosen rotations count: rotation 1 alone is up to date without rotations 2 to 4.
+    CityRenderMeta oneRotation;
+    oneRotation.saveFileTime = 1000;
+    for (int z = 0; z < 4; ++z) {
+        oneRotation.levels.push_back({0, z, 0.0f, 0.0f, 1, 1});
+    }
+    CHECK(!CityMeta::NeedsRender(oneRotation, 1000, 3, false, 0x1));
+    CHECK(CityMeta::NeedsRender(oneRotation, 1000, 3, false, 0x3));
+    CHECK(CityMeta::NeedsRender(oneRotation, 1000, 3));  // all four
 }
 
 // With the transport layer on, a city also needs every transport level up to the max zoom. With

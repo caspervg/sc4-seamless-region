@@ -33,6 +33,8 @@
 #include "capture/SnapshotReader.hpp"
 #include "core/GameAddresses.hpp"
 #include "core/Guard.hpp"
+#include "cIGZGDriver.h"
+#include "render/RenderAddresses.hpp"
 #include "core/IdleScheduler.hpp"
 #include "core/Messages.hpp"
 #include "imgui.h"
@@ -72,7 +74,11 @@ namespace
     constexpr float kOccupantTopMarginMetres = 10.0f;
     constexpr uint32_t kFloraOccupantType = 0x74758926u;
     // Work per idle tick while steps make progress. The window repaints between ticks.
-    constexpr double kTickBudgetMs = 200.0;
+    // The game draws a frame of its own between ticks, so longer ticks waste fewer frames.
+    constexpr double kTickBudgetMs = 500.0;
+    // delayFrames for AddDirtyRectangle: the next Draw processes the rectangles whatever the
+    // merge delay of the render properties is (AddDirtyRectangleInternal 0x007c8f30).
+    constexpr int kDirtyAgeFrames = 1 << 20;
 
     // Everything but flora: trees are low and a city has very many of them.
     class NoFloraFilter final : public cSC4BaseOccupantFilter
@@ -497,6 +503,8 @@ bool CityCapturer::Begin_(const bool testTile, const CaptureRequest& request)
 
 void CityCapturer::BuildLevels_(const CaptureRequest& request)
 {
+    partialOff_ = false;
+    partialOffLogged_ = false;
     maxZoom_ = request.maxZoom >= 0 ? request.maxZoom : ctx_.settings ? ctx_.settings->MaxRenderZoomIndex() : 3;
     maxZoom_ = std::clamp(maxZoom_, Settings::kMinRenderZoom - 1, Settings::kMaxRenderZoom - 1);
     // Adding the transport layer: the normal levels of the earlier render stay where the grid is
@@ -508,7 +516,23 @@ void CityCapturer::BuildLevels_(const CaptureRequest& request)
             earlier.reset();
         }
     }
-    for (const auto& [r, z] : CaptureMath::LevelOrder(maxZoom_, request.rotations)) {
+    std::vector<int> rotations = request.rotations;
+    if (rotations.empty() && ctx_.settings) {
+        rotations_ = ctx_.settings->RenderRotationMask();
+        for (int r = 0; r < ViewMath::kRotationCount; ++r) {
+            if (rotations_ >> r & 1u) {
+                rotations.push_back(r);
+            }
+        }
+    }
+    else {
+        rotations_ = 0;
+        for (const int r : rotations) {
+            rotations_ |= ViewMath::IsValidRotation(r) ? 1u << r : 0u;
+        }
+        rotations_ = rotations_ ? rotations_ : 0xFu;
+    }
+    for (const auto& [r, z] : CaptureMath::LevelOrder(maxZoom_, rotations)) {
         Level level;
         level.rotation = r;
         level.zoom = z;
@@ -1122,11 +1146,17 @@ bool CityCapturer::StepBlock_()
 
     // 4. Draw and read. This is the one draw and the one read of this tick.
     const auto drawStart = Clock::now();
-    game.renderer->ForceFullRedraw();
+    if (partial_ && pass_ != 0) {
+        QueueEdgeTiles_(game.renderer, screenX, screenY);
+    }
+    else {
+        game.renderer->ForceFullRedraw();
+    }
     DrawScene(game.renderer);
     ++framesDrawn_;
     const auto readStart = Clock::now();
     timing_.drawMs += MsSince(drawStart);
+    // Pass 2 goes to blockB_ first: only its edge tiles go on to blockA_.
     std::vector<uint8_t>& pass = pass_ == 0 ? blockA_ : blockB_;
     if (reads_.size() == 1) {
         // The read is the whole block: straight into the block buffer.
@@ -1153,28 +1183,68 @@ bool CityCapturer::StepBlock_()
 // Every part of the block is read for this pass.
 bool CityCapturer::BlockRead_()
 {
+    const int blockW = block_.w * tileSize_;
     if (pass_ == 0) {
-        const int blockW = block_.w * tileSize_;
         const size_t pixels = static_cast<size_t>(tileSize_) * tileSize_;
-        bool second = false;
+        int edgeTiles = 0;
         for (int i = 0; i < block_.count; ++i) {
             const CaptureMath::BlockTile& tile = block_.tiles[i];
             const size_t keys =
                 CaptureMath::CountKeyPixelsIn(blockA_.data(), blockW, tile.x, tile.y, tileSize_, tileSize_, keyA_);
             tileKinds_[i] = keys == pixels ? TileKind::Empty : keys == 0 ? TileKind::Opaque : TileKind::TwoPass;
-            second = second || tileKinds_[i] == TileKind::TwoPass;
+            edgeTiles += tileKinds_[i] == TileKind::TwoPass ? 1 : 0;
         }
-        if (second) {
-            // Part of a tile shows the area outside the city. Draw the block again over the
-            // second color to tell that area from city pixels that happen to have the key color.
-            pass_ = 1;
+        if (edgeTiles > 0) {
+            // Part of a tile shows the area outside the city. Draw it again over the second color
+            // to tell that area from city pixels that happen to have the key color. Two partial
+            // passes cost less than one whole window while the edge tiles are a third of it.
+            partial_ = ctx_.settings && ctx_.settings->capturePartialRedraw && !partialOff_ && reads_.size() == 1 &&
+                       edgeTiles * 3 <= block_.w * block_.h;
+            pass_ = partial_ ? 2 : 1;
             readIndex_ = 0;
-            SetClearColor_(kKeyColorB);
+            SetKeyColor_(partial_ ? kKeyColorA : kKeyColorB);
             return true;
         }
     }
+    else if (pass_ == 2) {
+        for (int i = 0; i < block_.count; ++i) {
+            if (tileKinds_[i] == TileKind::TwoPass) {
+                const CaptureMath::BlockTile& tile = block_.tiles[i];
+                CaptureMath::CropRgba(blockB_.data(), blockW, tile.x, tile.y, tileSize_, tileSize_, tileB_.data());
+                CaptureMath::BlitRgba(tileB_.data(), tileSize_, tileSize_, blockA_.data(), blockW, tile.x, tile.y);
+            }
+        }
+        pass_ = 1;
+        readIndex_ = 0;
+        SetKeyColor_(kKeyColorB);
+        return true;
+    }
     else {
-        SetClearColor_(kKeyColorA);
+        if (partial_) {
+            // A dirty rectangle clears the color only where the game sees the view reach past
+            // the city (ClearViewport 0x007c3f80). Every edge tile shows some of the second color,
+            // or the block is drawn again in whole windows.
+            for (int i = 0; i < block_.count; ++i) {
+                const CaptureMath::BlockTile& tile = block_.tiles[i];
+                if (tileKinds_[i] == TileKind::TwoPass &&
+                    CaptureMath::CountKeyPixelsIn(blockB_.data(), blockW, tile.x, tile.y, tileSize_, tileSize_,
+                                                  keyB_) == 0) {
+                    if (!partialOffLogged_) {
+                        partialOffLogged_ = true;
+                        LOG_INFO("Capture: a partial redraw kept the first key color at tile ({}, {}). Whole "
+                                 "windows for the rest of rotation {} zoom {}.",
+                                 tile.tx, tile.ty, levels_[levelIndex_].rotation, levels_[levelIndex_].zoom + 1);
+                    }
+                    partialOff_ = true;
+                    partial_ = false;
+                    pass_ = 0;
+                    readIndex_ = 0;
+                    SetKeyColor_(kKeyColorA);
+                    return true;
+                }
+            }
+        }
+        SetKeyColor_(kKeyColorA);
     }
     handIndex_ = 0;
     waiting_ = false;
@@ -1357,7 +1427,7 @@ bool CityCapturer::WriteMeta_(const bool final)
             meta.renderTime = NowFileTime();
         }
         if (usable) {
-            higher = CityMeta::LevelsToDrop(*earlier, maxZoom_, meta.saveFileTime, transport_);
+            higher = CityMeta::LevelsToDrop(*earlier, maxZoom_, meta.saveFileTime, transport_, rotations_);
             dropped.insert(dropped.end(), higher.begin(), higher.end());
         }
     }
@@ -1397,6 +1467,7 @@ bool CityCapturer::NextBlock_()
     }
     readIndex_ = 0;
     pass_ = 0;
+    partial_ = false;
     shakeTicks_ = 0;
     waiting_ = false;
     handIndex_ = 0;
@@ -1423,6 +1494,7 @@ void CityCapturer::NextLevel_()
     levelRetries_ = 0;
     levelTilesDone_ = 0;
     levelBegun_ = false;
+    partialOff_ = false;
     block_.count = 0;
     phase_ = levelIndex_ < levels_.size() ? Phase::LevelBegin : Phase::Finish;
 }
@@ -1476,6 +1548,35 @@ void CityCapturer::SetClearColor_(const uint32_t rgba)
         const std::array<float, 4> color = RgbaToFloats(rgba);
         renderer->SetViewportClearColor(color.data());
         saved_.clearColorDirect = true;
+    }
+}
+
+void CityCapturer::SetKeyColor_(const uint32_t rgba)
+{
+    clearColorNow_ = rgba;
+    const std::array<float, 4> color = RgbaToFloats(rgba);
+    if (cISC43DRender* renderer = GameAccess::Renderer()) {
+        renderer->SetViewportClearColor(color.data());
+    }
+    // A Draw over a valid backing store does not hand the color to the driver (Draw 0x007cb530),
+    // and the dirty rectangles clear with the driver's color.
+    if (cIGZGDriver* driver = GameAccess::GDriver()) {
+        driver->ClearColor(color[0], color[1], color[2], color[3]);
+    }
+}
+
+void CityCapturer::QueueEdgeTiles_(cISC43DRender* renderer, const int x, const int y) const
+{
+    // void cSC43DRender::AddDirtyRectangle(int kind, cRZRect const&, cIS3DModelInstance*, int),
+    // {left, top, right, bottom} in viewport pixels.
+    using Fn = void(__thiscall*)(cISC43DRender*, int, const int*, void*, int);
+    const auto add = reinterpret_cast<Fn>(RenderAddresses::Renderer::kAddDirtyRectangle);
+    for (int i = 0; i < block_.count; ++i) {
+        if (tileKinds_[i] == TileKind::TwoPass) {
+            const CaptureMath::BlockTile& tile = block_.tiles[i];
+            const int rect[4] = {x + tile.x, y + tile.y, x + tile.x + tileSize_, y + tile.y + tileSize_};
+            add(renderer, RenderAddresses::Renderer::kDirtyKindRegion, rect, nullptr, kDirtyAgeFrames);
+        }
     }
 }
 
@@ -1865,6 +1966,36 @@ void CityCapturer::DrawMaxZoomChoice(Settings& settings)
     }
 }
 
+void CityCapturer::DrawRotationChoice(Settings& settings)
+{
+    ImGui::TextUnformatted("Rotations");
+    for (int r = 0; r < 4; ++r) {
+        ImGui::SameLine();
+        ImGui::PushID(r);
+        const char label[2] = {static_cast<char>('1' + r), 0};
+        bool on = settings.renderRotation[r];
+        // The last rotation that is on stays on.
+        const bool last = on && settings.RenderRotationMask() == 1u << r;
+        ImGui::BeginDisabled(last);
+        if (ImGui::Checkbox(label, &on)) {
+            settings.renderRotation[r] = on;
+            settings.MarkChanged();
+        }
+        ImGui::EndDisabled();
+        ImGui::PopID();
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::BeginItemTooltip()) {
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+        ImGui::TextUnformatted("The rotations a render makes. Rotation 1 is the view a city opens in. Each rotation "
+                               "takes a quarter of the render time and disk space. A neighbor shows only in the "
+                               "rotations it has a render for. Save the settings to keep your choice.");
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+    }
+}
+
 void CityCapturer::DrawTransportChoice(Settings& settings)
 {
     if (ImGui::Checkbox("Transport layer", &settings.captureTransportLayer)) {
@@ -1916,6 +2047,7 @@ void CityCapturer::DrawPanelSection()
     if (ctx_.settings) {
         ImGui::BeginDisabled(batchRuns);
         DrawMaxZoomChoice(*ctx_.settings);
+        DrawRotationChoice(*ctx_.settings);
         DrawTransportChoice(*ctx_.settings);
         ImGui::EndDisabled();
     }

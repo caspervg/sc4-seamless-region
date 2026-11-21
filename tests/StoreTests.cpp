@@ -735,6 +735,11 @@ TEST_CASE(MetaLevelsToDrop)
     CHECK(std::ranges::all_of(drop, [](const CityRenderMeta::Level& l) { return l.zoom == 4; }));
     CHECK(CityMeta::LevelsToDrop(earlier, 2, 600).size() == 8);
     CHECK(CityMeta::LevelsToDrop(earlier, 4, 600).empty());
+    // Rotations a render no longer makes go the same way, only once the city was saved since.
+    CHECK(CityMeta::LevelsToDrop(earlier, 4, 500, false, 0x1).empty());
+    const auto otherRotations = CityMeta::LevelsToDrop(earlier, 4, 600, false, 0x1);
+    CHECK(otherRotations.size() == 15);
+    CHECK(std::ranges::none_of(otherRotations, [](const CityRenderMeta::Level& l) { return l.rotation == 0; }));
 
     // Transport levels of an earlier render: a render without the transport layer drops them
     // once the city was saved since, a render with it keeps those up to its zoom.

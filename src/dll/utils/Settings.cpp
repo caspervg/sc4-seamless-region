@@ -143,7 +143,13 @@ void Settings::Load(const std::filesystem::path& settingsFilePath)
         r.Bool("CaptureSnapshotFlag", captureSnapshotFlag);
         r.Bool("CaptureTransportLayer", captureTransportLayer);
         r.Bool("CaptureEdgeWalls", captureEdgeWalls);
+        r.Bool("CapturePartialRedraw", capturePartialRedraw);
         r.Int("MaxRenderZoom", maxRenderZoom, kMinRenderZoom, kMaxRenderZoom);
+        r.Bool("RenderRotation1", renderRotation[0]);
+        r.Bool("RenderRotation2", renderRotation[1]);
+        r.Bool("RenderRotation3", renderRotation[2]);
+        r.Bool("RenderRotation4", renderRotation[3]);
+        r.Bool("BatchSaveCities", batchSaveCities);
         r.Int("TileCacheMB", tileCacheMB, kMinTileCacheMB, kMaxTileCacheMB);
         r.Int("UploadTilesPerFrame", uploadTilesPerFrame, kMinUploadTiles, kMaxUploadTiles);
         r.Int("UploadMsPerFrame", uploadMsPerFrame, kMinUploadMs, kMaxUploadMs);
@@ -182,7 +188,13 @@ bool Settings::Save(const std::filesystem::path& settingsFilePath) const
         s["CaptureSnapshotFlag"] = b(captureSnapshotFlag);
         s["CaptureTransportLayer"] = b(captureTransportLayer);
         s["CaptureEdgeWalls"] = b(captureEdgeWalls);
+        s["CapturePartialRedraw"] = b(capturePartialRedraw);
         s["MaxRenderZoom"] = std::to_string(maxRenderZoom);
+        s["RenderRotation1"] = b(renderRotation[0]);
+        s["RenderRotation2"] = b(renderRotation[1]);
+        s["RenderRotation3"] = b(renderRotation[2]);
+        s["RenderRotation4"] = b(renderRotation[3]);
+        s["BatchSaveCities"] = b(batchSaveCities);
         s["TileCacheMB"] = std::to_string(tileCacheMB);
         s["UploadTilesPerFrame"] = std::to_string(uploadTilesPerFrame);
         s["UploadMsPerFrame"] = std::to_string(uploadMsPerFrame);

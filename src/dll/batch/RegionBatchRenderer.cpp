@@ -280,6 +280,7 @@ bool RegionBatchRenderer::Start(const bool force, const bool addTransport)
     run_.addTransport = addTransport;
     run_.transport = ctx_.settings->captureTransportLayer;
     run_.maxZoom = ctx_.settings->MaxRenderZoomIndex();
+    run_.rotations = ctx_.settings->RenderRotationMask();
     if (run_.pending.empty()) {
         message_ = "Every city has a render that is up to date. Nothing to do.";
         LOG_INFO("Batch: not started. {}", message_);
@@ -440,7 +441,8 @@ void RegionBatchRenderer::Next_()
 bool RegionBatchRenderer::Open_(const CityInfo& city)
 {
     // Without a city (the region view) the city opens without a save and a close.
-    return GameAccess::City() ? ctx_.switcher->RequestSwitch(city.cellX, city.cellZ, openedByBatch_)
+    return GameAccess::City() ? ctx_.switcher->RequestSwitch(city.cellX, city.cellZ, openedByBatch_, nullptr,
+                                                             SaveOnLeave_())
                               : ctx_.switcher->RequestOpen(city.cellX, city.cellZ);
 }
 
@@ -457,7 +459,7 @@ void RegionBatchRenderer::GoBack_()
         if (!GameAccess::City()) {
             Finish_(end, std::string());
         }
-        else if (!ctx_.switcher->RequestRegionView(openedByBatch_)) {
+        else if (!ctx_.switcher->RequestRegionView(openedByBatch_, SaveOnLeave_())) {
             Finish_(end, "The game could not go to the region view: " + ctx_.switcher->LastError());
         }
         else {
@@ -628,6 +630,11 @@ void RegionBatchRenderer::StepSettle_()
     request.addTransport = run_.addTransport;
     request.transport = run_.transport;
     request.maxZoom = run_.maxZoom;
+    for (int r = 0; r < 4; ++r) {
+        if (run_.rotations >> r & 1u) {
+            request.rotations.push_back(r);
+        }
+    }
     if (!ctx_.capturer->Start(request)) {
         const std::string error = ctx_.capturer->Progress().error;
         BatchQueue::Fail(run_, current_, "The render did not start: " + (error.empty() ? "no reason given." : error));
@@ -827,16 +834,19 @@ std::optional<BatchQueue::Run> RegionBatchRenderer::LoadRun_() const
     return run;
 }
 
+bool RegionBatchRenderer::SaveOnLeave_() const { return !openedByBatch_ || ctx_.settings->batchSaveCities; }
+
 bool RegionBatchRenderer::NeedsRender_(const CityInfo& city) const
 {
     return ctx_.tileStore->NeedsRender(city, ctx_.settings->MaxRenderZoomIndex(),
-                                       ctx_.settings->captureTransportLayer);
+                                       ctx_.settings->captureTransportLayer, ctx_.settings->RenderRotationMask());
 }
 
 bool RegionBatchRenderer::NeedsTransport_(const CityInfo& city) const
 {
     const std::optional<CityRenderMeta> meta = ctx_.tileStore->LoadMeta(city.key);
-    return !meta || !CityMeta::HasLevelsUpTo(*meta, ctx_.settings->MaxRenderZoomIndex(), true);
+    return !meta || !CityMeta::HasLevelsUpTo(*meta, ctx_.settings->MaxRenderZoomIndex(), true,
+                                             ctx_.settings->RenderRotationMask());
 }
 
 void RegionBatchRenderer::Log_(const std::string& line) const
@@ -863,7 +873,21 @@ void RegionBatchRenderer::DrawPanelSection()
     else {
         const char* why = WhyNotBegin_();
         CityCapturer::DrawMaxZoomChoice(*ctx_.settings);
+        CityCapturer::DrawRotationChoice(*ctx_.settings);
         CityCapturer::DrawTransportChoice(*ctx_.settings);
+        if (ImGui::Checkbox("Save each city", &ctx_.settings->batchSaveCities)) {
+            ctx_.settings->MarkChanged();
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        if (ImGui::BeginItemTooltip()) {
+            ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+            ImGui::TextUnformatted("Save each city the region render opened before it moves on. The game is paused "
+                                   "during the render, so off loses nothing but a moment of the simulation and is "
+                                   "about 3 seconds faster per city. The city you started in is always saved.");
+            ImGui::PopTextWrapPos();
+            ImGui::EndTooltip();
+        }
         ImGui::BeginDisabled(why != nullptr);
         bool open = false;
         if (ImGui::Button("Render the region")) {

@@ -58,6 +58,7 @@ namespace BatchQueue
         // (-1: the setting of now, for files of older versions).
         bool transport = false;
         int maxZoom = -1;
+        uint32_t rotations = 0xF;    // bit r: render rotation r (all four for files of older versions)
         Entry start;                 // the city the run started in, and ends in. Empty when regionView
         bool regionView = false;     // started in the region view: it ends there and renders every city
         std::vector<Entry> pending;  // in render order, the first is the next
@@ -234,6 +235,7 @@ namespace BatchQueue
             {"addTransport", run.addTransport},
             {"transport", run.transport},
             {"maxZoom", run.maxZoom},
+            {"rotations", run.rotations},
             {"start", EntryJson(run.start)},
             {"regionView", run.regionView},
             {"pending", std::move(pending)},
@@ -295,6 +297,8 @@ namespace BatchQueue
             run.addTransport = j.value("addTransport", false);  // not in files of older versions
             run.transport = j.value("transport", false);
             run.maxZoom = j.value("maxZoom", -1);
+            run.rotations = j.value("rotations", 0xFu) & 0xFu;
+            run.rotations = run.rotations ? run.rotations : 0xFu;
             run.start = entry(j.at("start"));
             run.regionView = j.value("regionView", false);  // not in files of older versions
             for (const nlohmann::json& e : j.at("pending")) {
