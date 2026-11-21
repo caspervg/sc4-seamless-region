@@ -75,8 +75,6 @@ enable_testing()
 
 add_subdirectory(src/dll)
 add_subdirectory(src/tools)
-add_subdirectory(src/profiler)
-add_subdirectory(src/loadcache)
 add_subdirectory(tests)
 
 install(TARGETS ${PROJECT_NAME}

@@ -172,7 +172,7 @@ pixels. The meta stores a magnification per level for this. To do:
 ## Speed
 
 1. Batch overhead: most of it is the city load itself (about 11 s warm, 30 s for the first
-   load after the game starts, see the load profiler in `src/profiler`).
+   load after the game starts). The sc4-load-cache plugin brings that to 2-4 s and 23 s.
 2. Check the timing log on a large built city (model loading was 0 ms in empty cities).
 
 ## Region map
