@@ -107,6 +107,26 @@ TEST_CASE(CaptureTwoPassesSeparateCityFromBackground)
     CHECK(a[16 + 3] == 255 && a[16 + 0] == 50);
 }
 
+// A shadow in one pass only (all channels darker) is not background: opaque, as in pass A.
+TEST_CASE(CaptureTwoPassesIgnoreContentThatDiffers)
+{
+    const Rgb keyA{255, 0, 255};
+    const Rgb keyB{0, 255, 0};
+    std::vector<uint8_t> a(3 * 4), b(3 * 4);
+    Put(a, 0, 150, 140, 120);  // lit in pass A
+    Put(b, 0, 60, 56, 48);     // in a shadow in pass B
+    Put(a, 1, 60, 56, 48);     // the other way round
+    Put(b, 1, 150, 140, 120);
+    // A true half blend still composes.
+    Put(a, 2, Blend(100, 255, 128), Blend(100, 0, 128), Blend(100, 255, 128));
+    Put(b, 2, Blend(100, 0, 128), Blend(100, 255, 128), Blend(100, 0, 128));
+    CHECK(CaptureMath::ComposeTwoPasses(a.data(), b.data(), 3, keyA, keyB) == 3);
+    CHECK(a[3] == 255 && a[0] == 150 && a[1] == 140);
+    CHECK(a[7] == 255 && a[4] == 60);
+    CHECK_NEAR(a[11], 128, 2);
+    CHECK_NEAR(a[8], 100, 3);
+}
+
 TEST_CASE(CaptureTwoPassesWorkWithQuantizedKeys)
 {
     // Keys as a 5:6:5 back buffer gives them back, with the contrast on a channel that falls.

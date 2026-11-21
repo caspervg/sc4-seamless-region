@@ -1090,6 +1090,7 @@ bool CityCapturer::StepBlock_()
         if (pass_ == 1) {
             SetClearColor_(kKeyColorA);
         }
+        DropParked_();
         phase_ = Phase::LevelBegin;
         return true;
     };
@@ -1105,6 +1106,7 @@ bool CityCapturer::StepBlock_()
             if (pass_ == 1) {
                 SetClearColor_(kKeyColorA);
             }
+            DropParked_();
             CaptureMath::ReturnTileBlock(pending_, level.grid.tilesX, block_);
             if (!NextBlock_()) {
                 NextLevel_();
@@ -1191,6 +1193,14 @@ bool CityCapturer::StepBlock_()
     ++framesDrawn_;
     const auto readStart = Clock::now();
     timing_.drawMs += MsSince(drawStart);
+    // The first pass of a one-read block: start its copy and draw the next block meanwhile.
+    if (pass_ == 0 && reads_.size() == 1 && !testTile_ && ctx_.settings && ctx_.settings->captureAsyncReadback) {
+        if (const uint32_t ticket = ctx_.snapshotReader->BeginRead(screenX, screenY, read.w, read.h)) {
+            timing_.readMs += MsSince(readStart);
+            shakeTicks_ = 0;
+            return ParkBlock_(ticket, read.w, read.h);
+        }
+    }
     // Pass 2 goes to blockB_ first: only its edge tiles go on to blockA_.
     std::vector<uint8_t>& pass = pass_ == 0 ? blockA_ : blockB_;
     if (reads_.size() == 1) {
@@ -1233,11 +1243,18 @@ bool CityCapturer::BlockRead_()
             // Part of a tile shows the area outside the city. Draw it again over the second color
             // to tell that area from city pixels that happen to have the key color. Two partial
             // passes cost less than one whole window while the edge tiles are a third of it.
+            // A block collected after another block was drawn has that block in the backing store:
+            // its second pass draws the whole window.
             partial_ = ctx_.settings && ctx_.settings->capturePartialRedraw && !partialOff_ && reads_.size() == 1 &&
-                       edgeTiles * 3 <= block_.w * block_.h;
-            pass_ = partial_ ? 2 : 1;
+                       !drawnOver_ && edgeTiles * 3 <= block_.w * block_.h;
+            // A partial second pass draws the first color again as well, so both colors of an edge
+            // tile come from the same kind of draw. A block collected late keeps its first pass:
+            // where the game drew different content after the view came back (live shadows), the
+            // compose takes the first pass (CaptureMath::ComposeTwoPasses).
+            const bool againOverA = partial_;
+            pass_ = againOverA ? 2 : 1;
             readIndex_ = 0;
-            SetKeyColor_(partial_ ? kKeyColorA : kKeyColorB);
+            SetKeyColor_(againOverA ? kKeyColorA : kKeyColorB);
             return true;
         }
     }
@@ -1357,6 +1374,13 @@ bool CityCapturer::StepWaitStore_()
     }
     if (NextBlock_()) {
         phase_ = Phase::Block;
+    }
+    else if (parked_) {
+        // The last block of the level is still parked: collect it before the level ends.
+        ParkedBlock last = std::move(*parked_);
+        parked_.reset();
+        phase_ = Phase::Block;
+        return Collect_(std::move(last), true);
     }
     else {
         NextLevel_();
@@ -1515,11 +1539,61 @@ bool CityCapturer::NextBlock_()
     readIndex_ = 0;
     pass_ = 0;
     partial_ = false;
+    drawnOver_ = false;
     shakeTicks_ = 0;
     waiting_ = false;
     handIndex_ = 0;
     CaptureMath::PlanReads(block_.w * tileSize_, block_.h * tileSize_, viewportW_, viewportH_, reads_);
     return true;
+}
+
+bool CityCapturer::ParkBlock_(const uint32_t ticket, const int w, const int h)
+{
+    ParkedBlock now{block_, reads_, ticket, w, h};
+    if (parked_) {
+        ParkedBlock older = std::move(*parked_);
+        parked_ = std::move(now);
+        return Collect_(std::move(older), true);
+    }
+    parked_ = std::move(now);
+    if (NextBlock_()) {
+        return true;  // the next block is drawn while this copy runs
+    }
+    ParkedBlock only = std::move(*parked_);
+    parked_.reset();
+    return Collect_(std::move(only), false);
+}
+
+bool CityCapturer::Collect_(ParkedBlock block, const bool late)
+{
+    block_ = block.block;
+    reads_ = std::move(block.reads);
+    readIndex_ = reads_.size();
+    pass_ = 0;
+    partial_ = false;
+    drawnOver_ = late;
+    handIndex_ = 0;
+    waiting_ = false;
+    shakeTicks_ = 0;
+    const auto readStart = Clock::now();
+    const bool read = ctx_.snapshotReader->EndRead(block.ticket, block.w, block.h, blockA_);
+    timing_.readMs += MsSince(readStart);
+    if (!read) {
+        return Fail_("The screen could not be read back: " + ctx_.snapshotReader->LastError());
+    }
+    return BlockRead_();
+}
+
+void CityCapturer::DropParked_()
+{
+    if (!parked_) {
+        return;
+    }
+    ctx_.snapshotReader->CancelRead(parked_->ticket);
+    if (levelIndex_ < levels_.size()) {
+        CaptureMath::ReturnTileBlock(pending_, levels_[levelIndex_].grid.tilesX, parked_->block);
+    }
+    parked_.reset();
 }
 
 void CityCapturer::TileDone_()
@@ -1834,6 +1908,10 @@ void CityCapturer::End_(const bool ok, std::string phase, std::string error, con
     }
     // Idle first: Restore_ pumps messages, and one of them can close the city and come back here.
     phase_ = Phase::Idle;
+    if (parked_) {
+        ctx_.snapshotReader->CancelRead(parked_->ticket);
+        parked_.reset();
+    }
     cancelRequested_ = false;
     saveInsideRender_ = false;
     if (stepId_ != 0) {

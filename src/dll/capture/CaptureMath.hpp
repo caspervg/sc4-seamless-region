@@ -105,7 +105,15 @@ namespace CaptureMath
     //
     // Differences below kOpaqueSlack of the contrast count as opaque, so render noise between
     // the two passes does not make holes. Differences above 1 - kOpaqueSlack count as empty.
+    //
+    // A pixel that really shows some background changes like the clear color on every channel
+    // with contrast, by the same fraction: from magenta to green red and blue fall as much as
+    // green rises. When the two passes drew different content there (a shadow that SCD3D11's
+    // live shadows put in one pass and not the other, an effect), the channels disagree: such a
+    // pixel is opaque, with the color of the first pass. A disagreement above kFollowTolerance
+    // percent of the contrast counts.
     constexpr int kOpaqueSlackPercent = 6;
+    constexpr int kFollowTolerancePercent = 20;
     inline size_t ComposeTwoPasses(uint8_t* a, const uint8_t* b, const size_t pixelCount, const Rgb keyA, const Rgb keyB)
     {
         int channel = 0;
@@ -118,13 +126,29 @@ namespace CaptureMath
         const int sign = contrast > 0 ? 1 : -1;
         const int span = std::abs(contrast);
         const std::array<int, 3> key{keyA.r, keyA.g, keyA.b};
+        const std::array<int, 3> keyDifference{keyB.r - keyA.r, keyB.g - keyA.g, keyB.b - keyA.b};
+        // The fraction of the background on channel c agrees with follow / span.
+        const auto agrees = [&](const uint8_t* pa, const uint8_t* pb, const int follow) {
+            for (int c = 0; c < 3; ++c) {
+                const int dc = keyDifference[c];
+                if (c == channel || std::abs(dc) < kMinKeyContrast / 2) {
+                    continue;
+                }
+                const int64_t followC = static_cast<int64_t>(pb[c] - pa[c]) * (dc > 0 ? 1 : -1);
+                const int64_t off = std::abs(followC * span - static_cast<int64_t>(follow) * std::abs(dc));
+                if (off * 100 > static_cast<int64_t>(kFollowTolerancePercent) * span * std::abs(dc)) {
+                    return false;
+                }
+            }
+            return true;
+        };
 
         size_t visible = 0;
         const uint8_t* const end = a + pixelCount * 4;
         for (; a != end; a += 4, b += 4) {
             // How far the pixel follows the clear color, 0..span.
             const int follow = (b[channel] - a[channel]) * sign;
-            if (follow <= slack) {
+            if (follow <= slack || !agrees(a, b, follow)) {
                 ++visible;  // a[3] is already 255
                 continue;
             }

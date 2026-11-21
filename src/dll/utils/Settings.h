@@ -70,6 +70,9 @@ public:
     // Draw the tiles on the city edge again as dirty rectangles (both key colors), instead of the
     // whole window over the second key color. Off: the whole window, as before.
     bool capturePartialRedraw = true;
+    // With a driver that reads the screen back without waiting (SCD3D11's async snapshot
+    // extension): draw the next block while the copy of the one before is on the way.
+    bool captureAsyncReadback = true;
     // Render at a date: timed props (seasonal lot and painted props) show the state of
     // captureMonth/captureDay, the same in every city of the region. The city's own date stays.
     bool captureAtDate = false;

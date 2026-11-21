@@ -19,6 +19,7 @@
 #include "core/GameAccess.hpp"
 
 class cIGZBuffer;
+class cIGZGAsyncSnapshotExtension;
 class cIGZGSnapshotExtension;
 
 class SnapshotReader final : public Module
@@ -40,6 +41,16 @@ public:
     // drivers then give a smaller picture (Read fails), the DX7 driver gives a shifted one
     // that Read cannot tell apart. The capturer checks the rectangle against the viewport.
     bool Read(int x, int y, int w, int h, std::vector<uint8_t>& rgba);
+    // The driver has SCD3D11's async snapshot extension (0xA5C1D3E7): BeginRead starts a copy of
+    // the frame drawn so far, EndRead collects it later. Up to 4 copies at a time.
+    bool AsyncAvailable();
+    // A ticket, or 0 when the driver cannot start the copy (no extension, a bad rectangle, 4 on
+    // the way): then read with Read.
+    uint32_t BeginRead(int x, int y, int w, int h);
+    // Waits for the copy (up to 2 s) and writes it to rgba (w * h * 4 bytes, RGBA, alpha 255). The
+    // ticket is used up either way.
+    bool EndRead(uint32_t ticket, int w, int h, std::vector<uint8_t>& rgba);
+    void CancelRead(uint32_t ticket);
     // Why the last Read failed. Empty after a success.
     [[nodiscard]] const std::string& LastError() const { return lastError_; }
 
@@ -51,11 +62,14 @@ private:
     ModuleContext ctx_;
     const void* driver_ = nullptr;                 // the driver extension_ came from, not owned
     cIGZGSnapshotExtension* extension_ = nullptr;  // one reference
+    cIGZGAsyncSnapshotExtension* async_ = nullptr;  // one reference, null on other drivers
+    cIGZBuffer* reuse_ = nullptr;  // with async_: the buffer of the last Read, one reference
     bool unavailableLogged_ = false;
     std::string lastError_;
     // Panel numbers.
     uint32_t reads_ = 0;
     uint32_t failures_ = 0;
+    uint32_t asyncReads_ = 0;
     int lastW_ = 0;
     int lastH_ = 0;
     uint32_t lastStride_ = 0;

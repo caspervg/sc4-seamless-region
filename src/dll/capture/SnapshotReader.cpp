@@ -20,6 +20,25 @@ public:
     virtual cIGZBuffer* CopyColorBuffer(int32_t x, int32_t y, int32_t w, int32_t h, cIGZBuffer* reuse) = 0;
 };
 
+// SCD3D11's async snapshot extension (IID 0xA5C1D3E7, scd3d11 ext/cIGZGAsyncSnapshotExtension.h).
+// A copy is queued behind the draws already made and read later, so the CPU does not wait for
+// the GPU at the call. Pixels: packed RGBA8 rows, alpha 255, top row first. A driver with it
+// also declares cIGZBuffer::GetColorType as the game implements it, so a `reuse` buffer is safe.
+class cIGZGAsyncSnapshotExtension : public cIGZUnknown
+{
+public:
+    virtual uint32_t GetAsyncSnapshotVersion() = 0;
+    virtual uint32_t BeginCopy(int32_t x, int32_t y, int32_t width, int32_t height) = 0;
+    virtual bool EndCopy(uint32_t ticket, uint8_t* pixels, uint32_t capacity, uint32_t timeoutMs) = 0;
+    virtual void CancelCopy(uint32_t ticket) = 0;
+};
+
+namespace
+{
+    constexpr uint32_t kAsyncSnapshotIid = 0xA5C1D3E7;
+    constexpr uint32_t kAsyncTimeoutMs = 2000;
+}
+
 bool SnapshotReader::Initialize(const ModuleContext& ctx)
 {
     ctx_ = ctx;
@@ -46,7 +65,7 @@ void SnapshotReader::DrawPanelSection()
         ImGui::TextWrapped("This graphics driver does not give its picture to the plugin. Use the DirectX "
                            "driver of the game, or SCD3D11.");
     }
-    ImGui::Text("Reads: %u (failed: %u)", reads_, failures_);
+    ImGui::Text("Reads: %u (without waiting: %u, failed: %u)", reads_, asyncReads_, failures_);
     if (reads_ > 0) {
         ImGui::Text("Last read: %d x %d pixels, row length %u bytes", lastW_, lastH_, lastStride_);
     }
@@ -66,17 +85,27 @@ bool SnapshotReader::Read(const int x, const int y, const int w, const int h, st
         return Fail_("The graphics driver cannot read the screen back.");
     }
 
-    // Always a new buffer, never `reuse`. SCD3D11 (v0.5.0) checks a passed buffer with
-    // GetColorType declared as returning an enum, but the game's slot returns the
-    // cGZBufferColorType struct through a hidden pointer (0x008268f0, slots 14 and 15 of
-    // 0x00ac1400). The game then writes 8 bytes through a stack value: an access violation
-    // or quiet memory damage. The game's own photo code passes no buffer either. See
-    // docs/re-notes/capture.md, Replacement drivers.
-    cIGZBuffer* const result = extension_->CopyColorBuffer(x, y, w, h, nullptr);
+    // A new buffer, never `reuse`, unless the driver has the async extension. SCD3D11 before it
+    // checks a passed buffer with GetColorType declared as returning an enum, but the game's slot
+    // returns the cGZBufferColorType struct through a hidden pointer (0x008268f0, slots 14 and 15
+    // of 0x00ac1400). The game then writes 8 bytes through a stack value: an access violation or
+    // quiet memory damage. See docs/re-notes/capture.md, Replacement drivers.
+    const bool reuse = async_ && reuse_ && static_cast<int>(reuse_->Width()) == w &&
+                       static_cast<int>(reuse_->Height()) == h;
+    cIGZBuffer* const result = extension_->CopyColorBuffer(x, y, w, h, reuse ? reuse_ : nullptr);
     if (!result) {
         return Fail_("The graphics driver gave no picture.");
     }
-    const std::unique_ptr<cIGZBuffer, decltype([](cIGZBuffer* b) { b->Release(); })> owned(result);
+    // A reused buffer comes back without a new reference. A new one is ours: kept for the next
+    // read of the same size when the driver allows it, else released after this read.
+    if (!reuse && async_) {
+        if (reuse_) {
+            reuse_->Release();
+        }
+        reuse_ = result;
+    }
+    const std::unique_ptr<cIGZBuffer, void (*)(cIGZBuffer*)> owned(
+        async_ ? nullptr : result, [](cIGZBuffer* b) { b->Release(); });
 
     if (static_cast<int>(result->Width()) != w || static_cast<int>(result->Height()) != h) {
         // The driver clamped the rectangle to the back buffer. The picture then starts at the
@@ -134,6 +163,12 @@ bool SnapshotReader::AcquireExtension_()
     void* extension = nullptr;
     if (driver->QueryInterface(GameAddresses::Renderer::kSnapshotExtensionIID, &extension) && extension) {
         extension_ = static_cast<cIGZGSnapshotExtension*>(extension);
+        void* async = nullptr;
+        if (driver->QueryInterface(kAsyncSnapshotIid, &async) && async) {
+            async_ = static_cast<cIGZGAsyncSnapshotExtension*>(async);
+            LOG_INFO("Snapshot: the graphics driver reads the screen back without waiting (version {})",
+                     async_->GetAsyncSnapshotVersion());
+        }
         return true;
     }
     unavailableLogged_ = true;
@@ -142,8 +177,52 @@ bool SnapshotReader::AcquireExtension_()
     return false;
 }
 
+bool SnapshotReader::AsyncAvailable() { return AcquireExtension_() && async_ != nullptr; }
+
+uint32_t SnapshotReader::BeginRead(const int x, const int y, const int w, const int h)
+{
+    if (w <= 0 || h <= 0 || x < 0 || y < 0 || !AsyncAvailable()) {
+        return 0;
+    }
+    return async_->BeginCopy(x, y, w, h);
+}
+
+bool SnapshotReader::EndRead(const uint32_t ticket, const int w, const int h, std::vector<uint8_t>& rgba)
+{
+    if (!ticket || !async_) {
+        return Fail_("The graphics driver has no read on the way.");
+    }
+    const size_t bytes = static_cast<size_t>(w) * static_cast<size_t>(h) * 4;
+    rgba.resize(bytes);
+    if (!async_->EndCopy(ticket, rgba.data(), static_cast<uint32_t>(bytes), kAsyncTimeoutMs)) {
+        return Fail_("The graphics driver did not finish a read in time.");
+    }
+    ++reads_;
+    ++asyncReads_;
+    lastW_ = w;
+    lastH_ = h;
+    lastStride_ = static_cast<uint32_t>(w) * 4;
+    lastError_.clear();
+    return true;
+}
+
+void SnapshotReader::CancelRead(const uint32_t ticket)
+{
+    if (ticket && async_) {
+        async_->CancelCopy(ticket);
+    }
+}
+
 void SnapshotReader::ReleaseAll_()
 {
+    if (reuse_) {
+        reuse_->Release();
+        reuse_ = nullptr;
+    }
+    if (async_) {
+        async_->Release();
+        async_ = nullptr;
+    }
     if (extension_) {
         extension_->Release();
         extension_ = nullptr;

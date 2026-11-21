@@ -133,6 +133,7 @@ void Settings::Read_(mINI::INIMap<std::string>& section, const std::filesystem::
     r.Bool("CaptureTransportLayer", captureTransportLayer);
     r.Bool("CaptureEdgeWalls", captureEdgeWalls);
     r.Bool("CapturePartialRedraw", capturePartialRedraw);
+    r.Bool("CaptureAsyncReadback", captureAsyncReadback);
     r.Bool("CaptureAtDate", captureAtDate);
     r.Int("CaptureMonth", captureMonth, 1, 12);
     r.Int("CaptureDay", captureDay, 1, 31);
@@ -172,6 +173,7 @@ void Settings::Write_(mINI::INIMap<std::string>& s) const
     s["CaptureTransportLayer"] = b(captureTransportLayer);
     s["CaptureEdgeWalls"] = b(captureEdgeWalls);
     s["CapturePartialRedraw"] = b(capturePartialRedraw);
+    s["CaptureAsyncReadback"] = b(captureAsyncReadback);
     s["CaptureAtDate"] = b(captureAtDate);
     s["CaptureMonth"] = std::to_string(captureMonth);
     s["CaptureDay"] = std::to_string(captureDay);

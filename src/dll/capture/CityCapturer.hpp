@@ -197,6 +197,15 @@ private:
 
     // Plans the next block of the level for the window size of now. False when no tile waits.
     bool NextBlock_();
+    struct ParkedBlock;
+    // Pass 0 of block_ is drawn and its copy is on the way: park it and go on with the block
+    // parked before (its copy had a whole draw to finish) or with the next block.
+    bool ParkBlock_(uint32_t ticket, int w, int h);
+    // Makes `block` the current block with its first pass read. late: another block was drawn
+    // after it.
+    bool Collect_(ParkedBlock block, bool late);
+    // Cancels the parked copy and gives its tiles back to the level.
+    void DropParked_();
     void NextLevel_();
     bool BlockRead_();
     void TileDone_();
@@ -308,6 +317,18 @@ private:
     // those tiles then come from the same kind of draw.
     bool partial_ = false;
     bool partialOff_ = false;        // a partial pass did not clear the key color: off for this level
+    // Async readback (SnapshotReader::BeginRead): the first pass of a block is drawn, its copy
+    // started and the block parked here while the next block is drawn. Then it is collected and
+    // goes on as if it had been read at once.
+    struct ParkedBlock
+    {
+        CaptureMath::TileBlock block;
+        std::vector<CaptureMath::TileRead> reads;
+        uint32_t ticket = 0;
+        int w = 0, h = 0;
+    };
+    std::optional<ParkedBlock> parked_;
+    bool drawnOver_ = false;  // block_ was collected after another block was drawn
     bool partialOffLogged_ = false;
     int viewportW_ = 0, viewportH_ = 0;
     int shakeTicks_ = 0;
