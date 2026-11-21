@@ -186,10 +186,15 @@ namespace
         bool quit_ = false;
     };
 
-    // Map layers: the normal view and the transport view, each with its own tile pyramid.
+    // Map layers, each with its own tile pyramid: the normal view, the transport view and the
+    // season renders (kSeason0 + season - 1, for spring to winter).
     constexpr int kNormal = 0;
     constexpr int kTransport = 1;
-    constexpr const wchar_t* kTilesDir[] = {L"tiles", L"tiles-transport"};
+    constexpr int kSeason0 = 2;
+    constexpr int kLayerCount = 6;
+    constexpr const wchar_t* kTilesDir[kLayerCount] = {L"tiles",        L"tiles-transport", L"tiles-spring",
+                                                       L"tiles-summer", L"tiles-fall",      L"tiles-winter"};
+    constexpr const char* kLayerName[kLayerCount] = {"normal", "transport", "spring", "summer", "fall", "winter"};
 
     // One city level that is on the map.
     struct Placed
@@ -199,10 +204,10 @@ namespace
         float groundHeight = MapMath::kDefaultGroundHeight;
         CityRenderMeta::Edges edges;
         MapMath::Source source;
-        std::array<fs::path, 2> levelDir;  // per layer
+        std::array<fs::path, kLayerCount> levelDir;  // per layer
         // Per layer: tilesX * tilesY, 1 when the tile file exists. Empty for a city without that
         // layer.
-        std::array<std::vector<uint8_t>, 2> present;
+        std::array<std::vector<uint8_t>, kLayerCount> present;
 
         [[nodiscard]] bool Has(const int layer, const int tx, const int ty) const
         {
@@ -268,7 +273,8 @@ namespace
             workers_ = std::clamp(static_cast<int>(std::thread::hardware_concurrency()) - 2, 1, kMaxWorkers);
             pool_ = std::make_unique<WorkPool>(workers_, static_cast<size_t>(workers_) * 2);
             bool done = ReadCities_(result) && Layout_(result);
-            for (layer_ = kNormal; done && layer_ < layers_; ++layer_) {
+            for (size_t i = 0; done && i < layers_.size(); ++i) {
+                layer_ = layers_[i];
                 progress_.layer = layer_;
                 MarkCandidates_();
                 done = Base_(result) && Pyramid_(result);
@@ -307,7 +313,7 @@ namespace
             result.bytesWritten = bytesWritten_;
             result.indexHtml = finalDir_ / L"index.html";
             result.sourceZoom = zoom_;
-            result.transportCities = layers_ > 1 ? transportCities_ : 0;
+            result.transportCities = std::ranges::count(layers_, kTransport) ? transportCities_ : 0;
             char text[200];
             std::snprintf(text, sizeof(text), "The map is ready: %d cities from zoom %d, %lld tiles, %.1f MB.",
                           result.cities, zoom_ + 1, static_cast<long long>(tilesWritten_),
@@ -382,7 +388,7 @@ namespace
                     mask |= !l.transport && Usable_(l) ? 1u << l.zoom : 0u;
                 }
                 if (mask != 0) {
-                    rendered.emplace_back(city, std::move(*meta));
+                    rendered.emplace_back(stored, std::move(*meta));
                     masks.push_back(mask);
                 }
             }
@@ -411,7 +417,7 @@ namespace
                 p.source.tilesX = level->tilesX;
                 p.source.tilesY = level->tilesY;
                 p.source.tileSize = meta.tileSize;
-                sourceBytes += ScanLevel_(p, kNormal);
+                sourceBytes += ScanLevel_(p, kNormal, p.info.key);
                 // The transport level lies on the grid of the normal level. One with another grid
                 // is from another render: it is left out.
                 const auto transport = std::ranges::find_if(meta.levels, [&](const CityRenderMeta::Level& l) {
@@ -419,12 +425,34 @@ namespace
                            l.tilesY == level->tilesY && l.originX == level->originX && l.originY == level->originY;
                 });
                 if (req_.transport && transport != meta.levels.end()) {
-                    sourceBytes += ScanLevel_(p, kTransport);
+                    sourceBytes += ScanLevel_(p, kTransport, p.info.key);
                     ++transportCities_;
+                }
+                // Season layers: the season render of the city on the same grid, else the nearest
+                // season, else its main render, as the neighbors in the game.
+                for (int s = 1; !mosaic_ && s < static_cast<int>(Seasons::kNames.size()); ++s) {
+                    const std::string cityKey(Seasons::Split(p.info.key).first);
+                    for (const Season fallback : Seasons::FallbackOrder(static_cast<Season>(s))) {
+                        const std::string key = Seasons::StorageKey(cityKey, fallback);
+                        if (SameGrid_(key, *level)) {
+                            sourceBytes += ScanLevel_(p, kSeason0 + s - 1, key);
+                            seasonCities_[s] += fallback == static_cast<Season>(s) ? 1 : 0;
+                            break;
+                        }
+                    }
                 }
                 cities_.push_back(std::move(p));
             }
-            layers_ = transportCities_ > 0 ? 2 : 1;
+            // A season layer is on the map when at least one city has a render of that season.
+            layers_ = {kNormal};
+            for (int s = 1; s < static_cast<int>(Seasons::kNames.size()); ++s) {
+                if (seasonCities_[s] > 0) {
+                    layers_.push_back(kSeason0 + s - 1);
+                }
+            }
+            if (transportCities_ > 0) {
+                layers_.push_back(kTransport);
+            }
             if (cities_.empty()) {
                 return Fail_(result, "No city of the region has a render at this zoom in this rotation. Choose "
                                      "another zoom or render the cities first.");
@@ -434,9 +462,10 @@ namespace
             const int64_t estimate = static_cast<int64_t>(sourceBytes / 3 * 4);
             progress_.estimateBytes = estimate;
             LOG_INFO("Export: {} cities have a render at zoom {} in rotation {}, {} of them with the transport "
-                     "layer, the map will be about {} MB",
-                     cities_.size(), zoom_ + 1, req_.rotation, layers_ > 1 ? transportCities_ : 0,
-                     estimate / (1024 * 1024));
+                     "layer, season renders {} / {} / {} / {} (spring / summer / fall / winter), the map will be "
+                     "about {} MB",
+                     cities_.size(), zoom_ + 1, req_.rotation, transportCities_, seasonCities_[1], seasonCities_[2],
+                     seasonCities_[3], seasonCities_[4], estimate / (1024 * 1024));
             if (!leftOut_.empty()) {
                 LOG_INFO("Export: {} rendered cities have no render at zoom {} and are not on the map", leftOut_.size(),
                          zoom_ + 1);
@@ -448,10 +477,26 @@ namespace
             return true;
         }
 
-        // Lists the tile files of one layer of a city level. Returns their bytes.
-        uint64_t ScanLevel_(Placed& p, const int layer) const
+        // The render in storage key `key` has a normal level on the grid of `level`.
+        [[nodiscard]] bool SameGrid_(const std::string& key, const CityRenderMeta::Level& level) const
         {
-            TileKey key{p.info.key, req_.rotation, zoom_, 0, 0};
+            std::vector<uint8_t> bytes;
+            if (!ReadFile(TileStore::CityDirectory(req_.rendersDir, key) / L"meta.json", bytes)) {
+                return false;
+            }
+            const std::optional<CityRenderMeta> meta =
+                CityMeta::Parse(std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
+            return meta && std::ranges::any_of(meta->levels, [&](const CityRenderMeta::Level& l) {
+                       return !l.transport && l.rotation == level.rotation && l.zoom == level.zoom &&
+                              l.tilesX == level.tilesX && l.tilesY == level.tilesY &&
+                              std::fabs(l.originX - level.originX) < 0.5f && std::fabs(l.originY - level.originY) < 0.5f;
+                   });
+        }
+
+        // Lists the tile files of one layer of a city level. Returns their bytes.
+        uint64_t ScanLevel_(Placed& p, const int layer, const std::string& storageKey) const
+        {
+            TileKey key{storageKey, req_.rotation, zoom_, 0, 0};
             key.transport = layer == kTransport;
             p.levelDir[layer] = TileStore::TilePathIn(req_.rendersDir, key).parent_path();
             std::vector<uint8_t>& present = p.present[layer];
@@ -559,7 +604,8 @@ namespace
                                       MapExport::kMemoryCapBytes - kFixedBytes - static_cast<size_t>(flagBytes));
 
             int64_t total = 0;
-            for (layer_ = kNormal; layer_ < layers_; ++layer_) {
+            for (const int layer : layers_) {
+                layer_ = layer;
                 total += MarkCandidates_();
             }
             layer_ = kNormal;
@@ -569,7 +615,7 @@ namespace
             progress_.total = total;
             LOG_INFO("Export: canvas {} x {} px, zoom 0 to {}, {} tiles to make in {} layers, cache {} MB, {} encode "
                      "workers", width_,
-                     height_, maxZoom_, total, layers_, cacheBudget_ / (1024 * 1024), workers_);
+                     height_, maxZoom_, total, layers_.size(), cacheBudget_ / (1024 * 1024), workers_);
             return true;
         }
 
@@ -751,7 +797,7 @@ namespace
                 return false;
             }
             LOG_INFO("Export: full size level of the {} layer done, {} city tiles decoded so far",
-                     layer_ == kTransport ? "transport" : "normal", decodes_);
+                     kLayerName[layer_], decodes_);
             return true;
         }
 
@@ -919,7 +965,12 @@ namespace
             page.upscaleLevels = req_.upscaleLevels;
             page.rotation = req_.rotation;
             page.sourceZoom = zoom_;
-            page.transport = layers_ > 1;
+            page.transport = std::ranges::count(layers_, kTransport) > 0;
+            for (const int layer : layers_) {
+                if (layer >= kSeason0) {
+                    page.seasons.emplace_back(kLayerName[layer]);
+                }
+            }
             for (const Placed& c : cities_) {
                 page.cities.push_back({c.info.name.empty() ? c.info.key : c.info.name,
                                        MapMath::Outline(projection_, c.info, c.level.originX, c.level.originY,
@@ -965,7 +1016,8 @@ namespace
         std::vector<Placed> cities_;
         std::vector<std::string> leftOut_;  // rendered cities without a render at zoom_
         int zoom_ = -1;                     // the source zoom index
-        int layers_ = 1;                    // 2 with the transport layer
+        std::vector<int> layers_{kNormal};  // the layers on the map, in order
+        std::array<int, 5> seasonCities_{};  // per Season: cities with a render of that season
         int layer_ = kNormal;               // the layer being made
         int transportCities_ = 0;           // cities with a transport level at zoom_
         std::vector<int> order_;  // indices into cities_, back to front
@@ -1102,14 +1154,18 @@ namespace
     });
   }
   var NORMAL = 'Map', TRANSPORT = 'Transport';
-  var bases = {};
-  bases[NORMAL] = tiles('tiles', true);
+  // The views: the map, the season renders and the transport view. The link names them in lower case.
+  var folders = {};
+  folders[NORMAL] = 'tiles';
+  (data.seasons || []).forEach(function (s) { folders[s.charAt(0).toUpperCase() + s.slice(1)] = 'tiles-' + s; });
   if (data.transport) {
-    bases[TRANSPORT] = tiles('tiles-transport', true);
+    folders[TRANSPORT] = 'tiles-transport';
   }
+  var bases = {}, nameOf = {};
+  Object.keys(folders).forEach(function (n) { bases[n] = tiles(folders[n], true); nameOf[n.toLowerCase()] = n; });
   var current = NORMAL;
 
-  // The position in the link: #zoom/x/y in map pixels, and /transport for the transport view.
+  // The position in the link: #zoom/x/y in map pixels, then the view when it is not the map.
   function readHash() {
     var parts = location.hash.replace(/^#/, '').split('/');
     var z = parseFloat(parts[0]), x = parseFloat(parts[1]), y = parseFloat(parts[2]);
@@ -1117,12 +1173,12 @@ namespace
       return null;
     }
     return { zoom: Math.min(Math.max(z, lowZoom), topZoom), center: toLatLng([x, y]),
-             transport: parts[3] === 'transport' && data.transport };
+             base: nameOf[parts[3]] || NORMAL };
   }
   function writeHash() {
     var c = toPixel(map.getCenter());
     var text = '#' + Math.round(map.getZoom() * 100) / 100 + '/' + c[0] + '/' + c[1] +
-               (current === TRANSPORT ? '/transport' : '');
+               (current !== NORMAL ? '/' + current.toLowerCase() : '');
     if (text === location.hash) {
       return;
     }
@@ -1148,8 +1204,8 @@ namespace
   }
 
   var start = readHash();
-  if (start && start.transport) {
-    current = TRANSPORT;
+  if (start) {
+    current = start.base;
   }
   bases[current].addTo(map);
   if (start) {
@@ -1171,7 +1227,8 @@ namespace
   }
   if (stored('outlines')) { outlines.addTo(map); }
   if (stored('names')) { names.addTo(map); }
-  L.control.layers(data.transport ? bases : null, overlays, { collapsed: false, position: 'topright' }).addTo(map);
+  L.control.layers(Object.keys(bases).length > 1 ? bases : null, overlays, { collapsed: false, position: 'topright' })
+    .addTo(map);
   map.on('overlayadd overlayremove', function (e) {
     store(e.layer === outlines ? 'outlines' : 'names', e.type === 'overlayadd');
     updateLabels();
@@ -1356,10 +1413,7 @@ namespace
     doubleClickZoom: false, boxZoom: false, keyboard: false
   });
   var miniBases = {};
-  miniBases[NORMAL] = tiles('tiles', false);
-  if (data.transport) {
-    miniBases[TRANSPORT] = tiles('tiles-transport', false);
-  }
+  Object.keys(folders).forEach(function (n) { miniBases[n] = tiles(folders[n], false); });
   Object.keys(miniBases).forEach(function (k) { miniBases[k].options.minZoom = -8; });
   miniBases[current].addTo(mini);
   mini.fitBounds(ground);
@@ -1379,7 +1433,7 @@ namespace
     if (!to) {
       return;
     }
-    showBase(to.transport ? TRANSPORT : NORMAL);
+    showBase(to.base);
     map.setView(to.center, to.zoom);
   });
   updateLabels();
@@ -1451,7 +1505,8 @@ namespace MapExport
         const json data = {
             {"region", page.regionName},     {"width", page.width},           {"height", page.height},
             {"maxZoom", page.maxZoom},       {"upscale", page.upscaleLevels}, {"rotation", page.rotation},
-            {"sourceZoom", page.sourceZoom}, {"transport", page.transport},   {"cities", cities}};
+            {"sourceZoom", page.sourceZoom}, {"transport", page.transport},   {"seasons", page.seasons},
+            {"cities", cities}};
         // Bad UTF-8 in a name becomes U+FFFD. "<" is escaped so no name can end the script block.
         std::string dataText = data.dump(-1, ' ', false, json::error_handler_t::replace);
         ReplaceAll(dataText, "<", "\\u003c");

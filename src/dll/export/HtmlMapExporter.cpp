@@ -199,11 +199,11 @@ void HtmlMapExporter::DrawPanelSection()
         case MapExport::Phase::Reading: ImGui::TextUnformatted("Reading the city renders..."); break;
         case MapExport::Phase::Base:
             ImGui::Text("Making the full size level (zoom %d)%s...", progress_.zoom.load(),
-                        progress_.layer.load() == 1 ? " of the transport view" : "");
+                        MapExport::LayerText(progress_.layer.load()));
             break;
         case MapExport::Phase::Pyramid:
             ImGui::Text("Making the smaller level %d%s...", progress_.zoom.load(),
-                        progress_.layer.load() == 1 ? " of the transport view" : "");
+                        MapExport::LayerText(progress_.layer.load()));
             break;
         default: ImGui::TextUnformatted("Writing the page..."); break;
         }

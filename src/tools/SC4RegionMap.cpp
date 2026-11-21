@@ -223,7 +223,7 @@ int wmain(const int argc, wchar_t** argv)
         }
         const int64_t total = progress.total.load();
         if (total > 0) {
-            std::printf("\r  %s zoom %d: %lld of %lld tiles   ", progress.layer.load() == 1 ? "transport" : "normal",
+            std::printf("\r  %s zoom %d: %lld of %lld tiles   ", progress.layer.load() == 0 ? " normal" : MapExport::LayerText(progress.layer.load()),
                         progress.zoom.load(), static_cast<long long>(progress.done.load()),
                         static_cast<long long>(total));
             std::fflush(stdout);

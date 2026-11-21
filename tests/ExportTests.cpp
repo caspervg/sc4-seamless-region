@@ -268,7 +268,8 @@ TEST_CASE(MapPageIsSelfContained)
     CHECK(html.find("http://") == std::string::npos);
     CHECK(html.find("L.CRS.Simple") != std::string::npos);
     CHECK(html.find("'/{z}/{x}/{y}.webp'") != std::string::npos);
-    CHECK(html.find("tiles('tiles'") != std::string::npos && html.find("tiles('tiles-transport'") != std::string::npos);
+    CHECK(html.find("folders[NORMAL] = 'tiles'") != std::string::npos && html.find("'tiles-transport'") != std::string::npos);
+    CHECK(html.find("'tiles-' + s") != std::string::npos);  // the season views
     CHECK(html.find("map.fitBounds(ground") != std::string::npos);
     CHECK(html.find("requestFullscreen") != std::string::npos && html.find("replaceState") != std::string::npos);
     CHECK(html.find("L.control.layers") != std::string::npos && html.find("datalist") != std::string::npos);
@@ -546,6 +547,26 @@ TEST_CASE(MapExportEndToEnd)
     CHECK(!fs::exists(map / L"tiles-transport"));
     CHECK(ReadText(map / L"index.html").find("\"transport\":false") != std::string::npos);
     request.transport = true;
+
+    // A winter render of West on the same grid: a winter layer. East has none and shows its main
+    // render there.
+    CityInfo westWinter = west;
+    westWinter.key = Seasons::StorageKey(west.key, Season::Winter);
+    CityRenderMeta winterMeta = westMeta;
+    std::erase_if(winterMeta.levels, [](const CityRenderMeta::Level& l) { return l.transport; });
+    region.WriteMeta(westWinter, winterMeta);
+    const std::array<uint8_t, 4> white{240, 240, 240, 255};
+    region.WriteTile(westWinter, 0, 0, 0, kSource, white);
+    const MapExport::Result seasons = MapExport::Run(request, progress, stop);
+    CHECK(seasons.ok && seasons.cities == 2);
+    CHECK(PixelAt(map, maxZoom, westAt.x - minX + 5, westAt.y - minY + 5, pixel, L"tiles-winter"));
+    CHECK(Near(pixel, white));
+    CHECK(PixelAt(map, maxZoom, px - minX, py - minY, pixel, L"tiles-winter"));
+    CHECK(Near(pixel, green));  // East, from its main render
+    CHECK(PixelAt(map, maxZoom, westAt.x - minX + 5, westAt.y - minY + 5, pixel));
+    CHECK(Near(pixel, red));  // the map itself is unchanged
+    CHECK(!fs::exists(map / L"tiles-summer"));
+    CHECK(ReadText(map / L"index.html").find("\"seasons\":[\"winter\"]") != std::string::npos);
 
     // Rotation 2: only Turned has a render there.
     request.rotation = 2;
