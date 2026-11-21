@@ -72,9 +72,10 @@ public:
     // The rotations a render makes, [0] is the game's rotation 1. A neighbor shows only in the
     // rotations it has a render for. Each rotation is a quarter of the render time.
     std::array<bool, 4> renderRotation{true, true, true, true};
-    // Region render: save each city the batch opened when it moves on. Off: those cities close
-    // without a save (the game was paused during their render), about 3 seconds faster each.
-    bool batchSaveCities = true;
+    // Region render: save each city the batch opened when it moves on. Off (default): those
+    // cities close without a save. The game is paused during their render, so nothing is lost,
+    // and it is about 3 seconds faster per city. The city the run started in is always saved.
+    bool batchSaveCities = false;
     // GPU tile cache limit in megabytes. A 512 px tile takes 2 MB (with the CPU copy). 96 MB was
     // too little at 4K: one neighbor can show more tiles than that holds.
     int tileCacheMB = 512;

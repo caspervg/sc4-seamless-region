@@ -883,9 +883,9 @@ void RegionBatchRenderer::DrawPanelSection()
         ImGui::TextDisabled("(?)");
         if (ImGui::BeginItemTooltip()) {
             ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
-            ImGui::TextUnformatted("Save each city the region render opened before it moves on. The game is paused "
-                                   "during the render, so off loses nothing but a moment of the simulation and is "
-                                   "about 3 seconds faster per city. The city you started in is always saved.");
+            ImGui::TextUnformatted("Save each city the region render opened before it moves on. Off by default: the "
+                                   "game is paused during the render, so a save adds nothing to the city and costs "
+                                   "about 3 seconds per city. The city you started in is always saved.");
             ImGui::PopTextWrapPos();
             ImGui::EndTooltip();
         }

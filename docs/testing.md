@@ -636,7 +636,7 @@ city with roads, rail, a highway and zones.
 ## Batch
 
 Use a small test region with 3 to 5 founded cities and one empty tile. Copy the region first:
-the batch saves every city. The log lines start with `Batch:` in the plugin log. The same lines
+the batch saves the city it starts in, and every city with "Save each city" on. The log lines start with `Batch:` in the plugin log. The same lines
 (without the prefix) go to `<Region>/RegionRenders/batch.log`.
 
 ### Start
@@ -733,7 +733,7 @@ Start the game and stay in the region view. Open the panel with Ctrl+Shift+F9.
    it opens the next city from there and at the end opens its start city.
 9. A city that cannot be saved (for example a tutorial city) in a region view run: the run goes
    on to the next city without a save of it.
-10. "Save each city" off: the log says `Switching: step 2, '<city>' is not saved, as asked` for
+10. "Save each city" off (the default): the log says `Switching: step 2, '<city>' is not saved, as asked` for
     the cities the run opened, the save files of those cities keep their time, and their renders
     count as up to date afterwards. The city the run started in is still saved.
 

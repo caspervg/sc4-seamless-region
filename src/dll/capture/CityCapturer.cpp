@@ -1899,7 +1899,7 @@ double CityCapturer::EtaSeconds_() const
 // ---- render on save ----------------------------------------------------------------------------
 
 // A city switch or the region render works with the cities: no render on save then. The
-// region render saves every city it leaves and renders each city itself.
+// region render renders each city itself (and saves only the cities it must, BatchSaveCities).
 bool CityCapturer::OtherWorkRuns_() const
 {
     return (ctx_.switcher && ctx_.switcher->IsBusy()) || (ctx_.batch && ctx_.batch->IsRunning());
