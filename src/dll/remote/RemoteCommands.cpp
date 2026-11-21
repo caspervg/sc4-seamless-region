@@ -1,5 +1,6 @@
 #include "remote/RemoteCommands.hpp"
 
+#include <algorithm>
 #include <format>
 #include <string>
 #include <vector>
@@ -34,7 +35,7 @@ namespace
 
     cIGZCommandServer::cGZCommandInfo kCommands[] = {
         {kStatus, "SeamlessStatus", ""},
-        {kRenderRegion, "SeamlessRenderRegion", "[force]"},
+        {kRenderRegion, "SeamlessRenderRegion", "[force] [transport]"},
         {kRenderCity, "SeamlessRenderCity", ""},
         {kCancel, "SeamlessCancel", ""},
         {kSet, "SeamlessSet", "<INI key> <value>"},
@@ -137,8 +138,9 @@ bool RemoteCommands::Run_(const uint32_t id, cIGZCommandParameterSet* input, std
         return true;
     }
     case kRenderRegion: {
-        const bool force = !args.empty() && args[0] == "force";
-        if (!ctx_.batch || !ctx_.batch->Start(force)) {
+        const bool force = std::ranges::find(args, "force") != args.end();
+        const bool transport = std::ranges::find(args, "transport") != args.end();
+        if (!ctx_.batch || !ctx_.batch->Start(force, transport)) {
             reply = ctx_.batch ? ctx_.batch->Message() : std::string("no region render");
             return false;
         }
