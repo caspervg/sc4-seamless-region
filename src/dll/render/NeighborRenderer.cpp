@@ -479,7 +479,7 @@ void NeighborRenderer::FlushDirty_()
                 reinterpret_cast<AddDirtyRectangleFn>(RenderAddresses::Renderer::kAddDirtyRectangle);
             for (int i = 0; i < dirty_.Count(); ++i) {
                 addDirtyRectangle(renderer, RenderAddresses::Renderer::kDirtyKindRegion, &dirty_[i], nullptr,
-                                  0);  // BISECT
+                                  RenderAddresses::Renderer::kDirtyNow);
             }
             dirtySent_ += static_cast<uint64_t>(dirty_.Count());
         }
