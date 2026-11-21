@@ -150,9 +150,9 @@ class TileStore final : public Module
 public:
     // Encode queue capacity in tiles. QueueWrite returns false when it is full, and then
     // leaves the caller's rgba buffer intact so the caller can retry with it. Room for a whole
-    // capture block (up to 32 tiles, CaptureMath::kMaxBlockPixels) and the next one's start, so
+    // capture block (up to 32 tiles, CaptureMath::kMaxBlockPixels) and two more, so
     // the capture does not wait on every block. 1 MB per 512 px tile.
-    static constexpr size_t kQueueCapacity = 48;
+    static constexpr size_t kQueueCapacity = 96;
     static constexpr const char* kFolderName = "RegionRenders";
 
     TileStore() = default;

@@ -588,11 +588,11 @@ bool TileStore::Initialize(const ModuleContext& ctx)
         stop_ = false;
         running_ = true;
     }
-    // WebP encoding is the slowest part of a render: one worker per spare core, at most 8. With
+    // WebP encoding is the slowest part of a render: one worker per spare core, at most 12. With
     // 4, a large city (about 3000 tiles a layer) spent most of its render waiting for them.
     // ponytail: fixed cap, each worker needs some MB of encoder memory in a 32-bit process.
     const unsigned cores = std::thread::hardware_concurrency();
-    const int count = std::clamp(static_cast<int>(cores) - 2, 1, 8);
+    const int count = std::clamp(static_cast<int>(cores) - 2, 1, 12);
     for (int i = 0; i < count; ++i) {
         workers_.emplace_back([this] { WorkerMain(); });
     }
