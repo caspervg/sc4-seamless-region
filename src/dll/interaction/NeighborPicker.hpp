@@ -1,6 +1,6 @@
 #pragma once
 
-// Interaction (W3-F): hover and click on neighbors outside the current city.
+// Interaction: hover and click on neighbors outside the current city.
 //
 // - Input: a persistent cISC4ViewInputControl (cISC4View3DWin::AddPersistentViewInputControl).
 //   The city view gives persistent controls the left button before the tool stack, in view

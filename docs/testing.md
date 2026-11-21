@@ -1,7 +1,7 @@
 # In-game tests
 
-Nothing in this plugin has run in the game yet. Start with "First run": it tests the parts
-that can go wrong hardest first, with the least work. Each step points to the module section
+On a new install, a new game build or a new driver, start with "First run": it tests the
+parts that can go wrong hardest first, with the least work. Each step points to the module section
 below it, which has the full checks and the log lines that prove them. The log file is
 `SC4SeamlessRegion.log` in the folder above Plugins (the SimCity 4 user folder).
 
@@ -26,7 +26,7 @@ below it, which has the full checks and the log lines that prove them. The log f
    `SC4SeamlessRegion.dll` into `SC4_PLUGINS_DIR` (default `Documents\SimCity 4\Plugins`) and
    copies `dist/SC4SeamlessRegion.ini` next to it when no INI is there yet. For another
    install pass `-DSC4_PLUGINS_DIR=<its Plugins folder>`. With
-   `-DSC4_ENABLE_PLUGIN_DEPLOYMENT=OFF` (what the agents use) nothing is copied: copy
+   `-DSC4_ENABLE_PLUGIN_DEPLOYMENT=OFF` nothing is copied: copy
    `cmake-build-release-visual-studio/src/dll/Release/SC4SeamlessRegion.dll` and
    `dist/SC4SeamlessRegion.ini` into the Plugins folder by hand. A DLL in the root of the
    game's own Plugins folder loads too, so keep only one copy.
@@ -618,6 +618,17 @@ city with roads, rail, a highway and zones.
    save`. Load the save: props and trees show the city's own date, no tree is missing.
 5. Close the city during such a render, and a render that is cancelled: no tree is missing
    afterwards, and the monthly flora update after a month of play keeps every tree.
+
+### Render all seasons
+
+1. Defaults (June 15), "Render all seasons" on, rotations 1 to 4. Render a city. The log has
+   three `Capture: next render, <season> at <month>/15` lines after the first render (spring,
+   fall, winter), and the city stays open between them. The city folder gets `@spring`,
+   `@fall` and `@winter` subfolders with levels in all four rotations.
+2. Play a neighbor while its date is in winter: the rendered city shows its winter render in
+   every rotation.
+3. Region render with "Render all seasons" on, then continue it after a quit: a city whose
+   main render is done but whose winter render is missing renders only winter.
 
 ### Faster renders
 

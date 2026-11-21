@@ -1,9 +1,8 @@
 # Overlay: a map image on the ground
 
-Module W3-I: `src/dll/overlay/*`. All addresses are SimCity 4 1.1.641 for Windows unless marked
+Module `src/dll/overlay/*`. All addresses are SimCity 4 1.1.641 for Windows unless marked
 Mac, read with `ghx` (read only). Pure parts in `overlay/OverlayMath.hpp`, tests in
-`tests/OverlayTests.cpp`. In-game checks: `docs/testing.md`, "Map overlay". Nothing here was run
-in game yet.
+`tests/OverlayTests.cpp`. In-game checks: `docs/testing.md`, "Map overlay".
 
 ## Terrain facts
 

@@ -112,7 +112,7 @@ bool SC4SeamlessRegionDirector::PostAppInit()
     InitializeLogger_();
     const uint16_t gameVersion = GameAccess::GameVersion();
     const bool supported = GameAccess::IsSupportedGame();
-    LOG_INFO("Seamless Region {} starting, game version {}", SC4_TEMPLATE_DLL_VERSION_LABEL, gameVersion);
+    LOG_INFO("Seamless Region {} starting, game version {}", SC4SR_DLL_VERSION_LABEL, gameVersion);
 
     ctx_.settings = &settings_;
     ctx_.pluginDirectory = GetUserPluginsPath_();
@@ -408,7 +408,7 @@ void SC4SeamlessRegionDirector::RegisterPanel_()
         return;
     }
     SeamlessPanel::Info info;
-    info.versionLabel = SC4_TEMPLATE_DLL_VERSION_LABEL;
+    info.versionLabel = SC4SR_DLL_VERSION_LABEL;
     info.gameVersion = GameAccess::GameVersion();
     info.supported = GameAccess::IsSupportedGame();
     info.enabled = !panelModules_.empty();

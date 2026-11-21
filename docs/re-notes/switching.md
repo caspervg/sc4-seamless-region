@@ -56,9 +56,8 @@ PreCityShutdown is sent, so it reaches the director inside CloseCity: every modu
 OnCityShutdown runs inside the switch task. PostCityInit and PostCityInitComplete are posted, but
 LoadCity pumps both queues at its end. So the modules' OnCityInit **normally runs inside
 LoadCity**, inside the switch task, while `IsBusy()` is true. When the pump stops early (500
-messages or 5 s) they come on a later pump, after the switch task. The wave 4 review read only
-the PostCityMessage calls and concluded "after", the first in-game test showed "inside", and the
-pump at `0x00455964` explains it. Code must work with both orders.
+messages or 5 s) they come on a later pump, after the switch task. The pump is the
+call at `0x00455964`. Code must work with both orders.
 
 What holds until PostCityInit arrives (inside LoadCity, or in the gap after the switch task):
 

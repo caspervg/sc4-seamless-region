@@ -4,7 +4,7 @@ All addresses are SimCity 4 1.1.641 for Windows. The Mac build (symbolized) agre
 constant below. Code: `src/dll/view/ViewMath.*` (pure) and `src/dll/view/CameraReader.*`
 (live). Tests: `tests/ViewMathTests.cpp`.
 
-## Correction to docs/plan.md
+## Correction to the first plan (fixed in docs/plan.md since)
 
 **The view is trimetric, not isometric.** The yaw offset and the view angle table are
 -pi/8 (-22.5 degrees), not -pi/4.

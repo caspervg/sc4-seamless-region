@@ -1,7 +1,7 @@
 #pragma once
 
-// The capture's view of the camera module (camera/CameraExtender, W2-B) and of the two static
-// time helpers of the store (store/TileStore, W2-D).
+// The capture's view of the camera module (camera/CameraExtender) and of the two static
+// time helpers of the store (store/TileStore).
 //
 // The capture was written in parallel with those modules, against these final signatures:
 //     void     CameraExtender::SetFreeRoam(bool enabled);            // counted: true, then false

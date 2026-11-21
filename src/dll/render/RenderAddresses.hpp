@@ -1,6 +1,6 @@
 #pragma once
 
-// Game addresses, offsets and driver constants the render module (W2-E) uses, for the
+// Game addresses, offsets and driver constants the render module uses, for the
 // Windows build 1.1.641 only. Evidence for each value is in docs/re-notes/render.md.
 
 #include <cstdint>

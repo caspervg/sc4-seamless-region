@@ -1,6 +1,6 @@
 #pragma once
 
-// Export (W3-H): a browsable map of the whole region from the tiles of one zoom (3, 4 or 5, by
+// Export: a browsable map of the whole region from the tiles of one zoom (3, 4 or 5, by
 // default the highest that every rendered city has) and one rotation.
 //
 // Start snapshots everything the export needs (renders folder, region name, cities, settings)

@@ -4,7 +4,7 @@ Windows addresses are for SimCity 4 1.1.641. Mac addresses are from the symboliz
 and were used for the logic only. Code: `src/dll/capture/*`. Addresses that only the capture
 uses are in `src/dll/capture/CaptureAddresses.hpp`. Tests: `tests/CaptureTests.cpp`.
 
-## Corrections to docs/plan.md
+## Corrections to the first plan (fixed in docs/plan.md since)
 
 | plan.md says | Found | Confidence |
 |---|---|---|

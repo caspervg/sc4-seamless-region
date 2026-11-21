@@ -1,6 +1,6 @@
 #pragma once
 
-// Overlay (W3-I): the pure parts of the map overlay, header only so the tests need no extra
+// Overlay: the pure parts of the map overlay, header only so the tests need no extra
 // sources. Image split into power-of-two textures, placement math, the draped mesh and the
 // per-city JSON file. No game calls here. Facts and choices: docs/re-notes/overlay.md.
 

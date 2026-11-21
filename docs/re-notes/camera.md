@@ -1,6 +1,6 @@
 # Camera: scroll bounds, clip planes, edge walls, clear color
 
-Facts found for the camera module (W2-B). Windows 1.1.641, read with `ghx` from the Windows
+Facts found for the camera module. Windows 1.1.641, read with `ghx` from the Windows
 program unless a row says Mac. Code: `src/dll/camera/*`. New addresses:
 `src/dll/camera/CameraAddresses.hpp`. Tests: `tests/CameraBoundsTests.cpp`.
 
@@ -200,7 +200,6 @@ or 0xFF per channel for a key color that survives the driver's conversion exactl
 
 ## Open points
 
-- All of this is untested in the game. See docs/testing.md, "Camera".
 - The exact capacity of the scroll bounds vector (expected 6).
 - Whether a larger eye distance changes anything outside the camera code besides fog (sound,
   picking). The view direction SC4ViewUtilities keeps is normalized, and the eye distance to

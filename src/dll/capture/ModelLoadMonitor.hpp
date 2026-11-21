@@ -1,6 +1,6 @@
 #pragma once
 
-// Capture (W2-C): tells when the game finished loading models, and makes it load them at once.
+// Capture: tells when the game finished loading models, and makes it load them at once.
 //
 // The game only keeps the models around the visible area (the load rectangle of
 // cSC4ModelMaker). A zoom, rotation or view change starts a task on the background loader and

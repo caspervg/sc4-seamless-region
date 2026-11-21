@@ -644,7 +644,6 @@ table and road grey with that NAM table, as with the patch of 9.2, but with real
 
 ### 10.4 Risks
 
-- Not run in the game yet (`docs/testing.md`, Transport layer, step 12).
 - A dirt road piece whose edge store has no entry for type 11 is a full square (the same rule
   as for the other networks). With the patch of 9.2 every dirt road cell was a full square, so
   this cannot be worse.

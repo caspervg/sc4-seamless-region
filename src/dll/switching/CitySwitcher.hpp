@@ -1,6 +1,6 @@
 #pragma once
 
-// Switching (W2-A): saves, closes and loads another city of the region.
+// Switching: saves, closes and loads another city of the region.
 //
 // The sequence and its traps are in docs/plan.md "Switching", the evidence is in
 // docs/re-notes/switching.md. RequestSwitch only validates and posts the work to the idle

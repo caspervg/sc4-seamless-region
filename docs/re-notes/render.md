@@ -1,8 +1,8 @@
 # Render: neighbor tiles in the city view
 
-Module W2-E: `src/dll/render/*`. All addresses are SimCity 4 1.1.641 for Windows, read with
+Module `src/dll/render/*`. All addresses are SimCity 4 1.1.641 for Windows, read with
 `ghx` (read only). New addresses live in `src/dll/render/RenderAddresses.hpp`. Tests:
-`tests/RenderTests.cpp`. Nothing here was run in game yet: see `docs/testing.md`,
+`tests/RenderTests.cpp`. In-game checks: `docs/testing.md`,
 "Neighbor rendering".
 
 ## How a frame is drawn (cSC43DRender::Draw `0x007cb530`)

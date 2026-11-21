@@ -1,6 +1,6 @@
 #pragma once
 
-// Render (W2-E): draws the neighbor cities from their tiles.
+// Render: draws the neighbor cities from their tiles.
 //
 // Back neighbors at the start of PreStatic, front neighbors at the end of PostStatic with
 // depth always passing and written (docs/plan.md "Draw order"). Neighbors sorted back to

@@ -19,7 +19,7 @@ namespace CaptureAddresses
         // vtable 0x00ac47dc. Locks the IDirectDrawSurface7 at driver +0x22c, which is the
         // device's render target (the back buffer).
         constexpr uintptr_t kDX7CopyColorBuffer = 0x00883950;
-        // The software driver (nSGLSoft). docs/plan.md calls this one the DX7 driver.
+        // The software driver (nSGLSoft).
         constexpr uintptr_t kSoftwareCopyColorBuffer = 0x008eb340;
         constexpr uintptr_t kOpenGLCopyColorBuffer = 0x0087d880;
         // cIGZBuffer::Lock flags the game uses around pixel access.

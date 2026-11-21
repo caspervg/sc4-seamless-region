@@ -1,6 +1,6 @@
 #pragma once
 
-// Render (W2-E): a bounded cache of neighbor tile textures.
+// Render: a bounded cache of neighbor tile textures.
 //
 // Decodes on up to three worker threads (below normal priority, only while a city is open),
 // uploads on the game thread within the per-frame budget (Settings::uploadTilesPerFrame,

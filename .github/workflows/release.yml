@@ -65,11 +65,6 @@ jobs:
           .\vendor\vcpkg\bootstrap-vcpkg.bat
           echo "VCPKG_ROOT=${{ github.workspace }}/vendor/vcpkg" >> $env:GITHUB_ENV
 
-      - name: Rename template for release build
-        if: github.event.repository.is_template
-        shell: powershell
-        run: py -3 tools/rename_project.py SC4TemplateRelease --ui imgui
-
       - name: Build DLL
         shell: powershell
         run: |
@@ -162,7 +157,7 @@ jobs:
 
   # Points the sc4pac package at the new release on a branch of your fork of the channel, and links
   # to a prefilled pull request in the job summary. Off until the repository variable SC4PAC_ASSET_ID
-  # names the package's asset in the channel; see "Publishing to sc4pac" in the README.
+  # names the package's asset in the channel; see "Releases" in the README.
   sc4pac:
     if: ${{ vars.SC4PAC_ASSET_ID != '' && !contains(github.ref_name, '-') }}
     needs: release-win32

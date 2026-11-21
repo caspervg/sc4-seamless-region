@@ -1,6 +1,6 @@
 #pragma once
 
-// Capture (W2-C): reads pixels of the last drawn frame back from the graphics driver.
+// Capture: reads pixels of the last drawn frame back from the graphics driver.
 //
 // Queries the driver (GameAccess::GDriver) for the snapshot extension 0xE69BFE2A and calls
 // slot 3, cIGZBuffer* CopyColorBuffer(x, y, w, h, cIGZBuffer* reuse). The DX7 driver

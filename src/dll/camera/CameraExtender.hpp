@@ -1,6 +1,6 @@
 #pragma once
 
-// Camera (W2-B): lets the camera look past the city edge.
+// Camera: lets the camera look past the city edge.
 //
 // - Scroll bounds: after cSC4CameraControl::UpdateScrollBounds (0x007ccc60), the polygon at
 //   camera +0x14c is replaced with the wanted bounds. Zoom 1 to 3: the whole region. Zoom 4

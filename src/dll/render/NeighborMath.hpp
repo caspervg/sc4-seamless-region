@@ -1,6 +1,6 @@
 #pragma once
 
-// Render (W2-E): the pure math of neighbor drawing. No game calls, header only, unit tested
+// Render: the pure math of neighbor drawing. No game calls, header only, unit tested
 // in tests/RenderTests.cpp. The derivations are in docs/re-notes/render.md.
 
 #include <algorithm>
