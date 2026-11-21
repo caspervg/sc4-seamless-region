@@ -266,7 +266,7 @@ int SeasonalFloraStage(float p0, float p5, int anchorMonth, int anchorDay, int m
 }
 ```
 
-Anchor default Sep 1 (pack convention). Leave flora in stage 3 or 4 (dying, burnt) and all
+Anchor fixed at Sep 1: the community standard is to plant seasonal flora on September 1st, in its fall stage (confirmed by the player, 2026-11-21), so no setting. Leave flora in stage 3 or 4 (dying, burnt) and all
 non-seasonal flora (long p[5]) alone, their stage is real growth.
 
 Seasonal test: `*(float*)(*(char**)(flora + 0x54) + 0x24)` (p[5]) in 360..366. The occupant
