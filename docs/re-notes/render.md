@@ -49,8 +49,13 @@ Consequences for this module:
 | The bounding box overload is `0x007c95b0` (projects with `0x007f7a40`, then `0x007c9540`) | decompile | high |
 | `ForceFullRedraw` `0x007c7dd0` is cISC43DRender vtable `+0x50` (`Draw` is `+0x54`): sets `+0x109`, clears `+0x65` and the queue. Callable through the gzcom-dll header | decompile, the thumbnail writer calls `+0x50` then `+0x54` | high |
 
-The module calls `0x007c9540` with kind 3, no model, delay 0, from the begin callback of
-PreDynamic (once per frame, the queue is processed in the next `Draw`). The game does the
+The module calls `0x007c9540` with kind 3, no model and delay `1 << 20`, from the begin callback
+of PreDynamic (once per frame). `Draw` processes the queue when `+0x1f8 + kDirtyRectMergeFrames`
+(`*(*(this+0x48)+0x18)+0x2ec`) `< +0x158` (the frame counter). The first rectangle in an empty
+queue sets `+0x1f8 = counter - delay`, later ones subtract their delay. With delay 0 every loaded
+tile waited the merge time: a visible pause between the end of a scroll and the first tiles.
+The large delay makes the next `Draw` that does not pan process the queue. A `Draw` that pans
+(`AttemptTranslatedViewUpdate_` succeeds) skips the queue entirely. The game does the
 same from `ProcessModelChangeQueue_` inside `Draw`.
 
 While the view pans, `AttemptTranslatedViewUpdate_` `0x007cabe0` moves every queued rectangle
