@@ -411,6 +411,69 @@ AddRef'd. Cost: one pass over all occupants, about 5 to 20 ms for a large city (
 model rebuilds dominate (0.2 to 1 s per 20k changed trees per direction, speculative). When the
 chosen date is the city's own date, nothing changes.
 
+## Plugin audit (2026-11-21, the playtest Plugins folder)
+
+Read with the DBPF tools and a read-only exemplar/S3D reader (Plugins only, Plugins_UC has no
+index). The property IDs of section 2 are right.
+
+**Seasonal flora.** 956 of 2056 flora exemplars have p[5] = 363 (no other value in 360..366).
+672 of them have one RKT1 model (no seasonal look; about 250 are cars, people or garbage shipped
+as flora). 269 RKT4 and 10 RKT5 have three state models, all in `180-flora.dat`:
+
+| Pack | p0 / p5 / p6 | States 0 / 1 / 2 |
+|---|---|---|
+| Girafe deciduous (maple, ash, birch, beech, larch, oak, elm, plane, walnut, poplar, rowan, chestnut, honey locust, linden, norway maple, bush, berry; about 140) | 180/363/15051 | autumn / bare / summer (names and texture colours agree) |
+| Girafe conifers (conifer, subalpine, grand fir, Serbian and common spruce) | 180/363/15051 | green / snow / green |
+| VIP_Or Aesculus, Or_VIP Populus | 180/363/15051 | autumn / winter / summer |
+| PNW pack (86, Girafe bush and chestnut models) | 181/363/15050 | autumn / bare / summer |
+| VV_TSC ferns, VV_VIP genets | 180/363/15051 | winter / winter / summer |
+
+So the Sep 1 anchor with 0/1/2 = fall/winter/summer holds for the trees. The game moves flora on
+the 1st of a month only, so p0 180 and 181 both give Sep-Nov 0, Dec-Feb 1, Mar-Aug 2 (the day
+boundaries Nov 30 / Feb 28 of p0 180 never show). Exceptions, which the override renders the same
+way the game shows them when planted on Sep 1:
+
+- Girafe flowers and wheat (lupin, sparaxis, poppies, narcissus, daisy, wheat; E83E0437-AF448050,
+  -AF448480/1, -AF448500, -AF448520/1, ...): stage 1 (Dec-Feb) is the bloom or ripe model.
+- No state 2 model (invisible Mar-Aug): sparaxis, poppies, narcissus, daisy, Grfe_liden A/B/D.
+  No state 1 model: Grfe_Serbian_spruce_seasonal_*2, grand_firs_seasonal_*2 (AF481020...). No
+  model at all at 00030000: Grfe_linden_seasonal_A-E (AF448320-24).
+- VIP_VV_Cherry_Tree (E83E0437-19620286): spring / summer / winter. Grfe_alder_seasonal_A-E
+  (AF447730-34): state 0 uses a spruce model. Grfe_vine_seasonal_A: 0, 0, 0. VIP_Man_Cow: the
+  states are cow variants.
+- RKT5 packs (Grfe_maple_seasonal, Grfe_abies_grandis_seasonal, 33AA0010-19): state models at the
+  base instance + state * 0x10000 (maple fall / bare / summer). The override sets the state like
+  the game does, so the model maker's RKT5 mapping applies unchanged.
+
+About 75 flora named `_summer`/`_winter` have p[5] = 6570: one fixed season. Most seasonal
+trees in this folder are **timed props**, not flora (about 1218 timed props with tree names: CP
+Seas*, Grfe, Neko, JENXPROP, csx, VIP_VV, SFBT Birke, CAL, AGC).
+
+**Timed props.** 2991 unique TGIs. Interval 365: 2399; 364: 23; 366: 6; 362: 128 (Fz); 0x10000000:
+130 (start Jan 1, one day: hidden after their first year); 1000000: 5; 14600: 8; short periods
+(10 to 182 days): about 290; interval 0: none. Durations from 1 day to over a year (61-92 days:
+1243). Flags: month 13 to 18 on 29 props (KSpd docks 16-18, SFBT_Pz_Diagonale*, one ALN, one FvU;
+`Jday` gives 0, so the game toggles them, see section 2); 21 `zzoff_Or_TSC_*` with an interval
+but no start or duration; duration >= interval on Gnome_CensusRepository (C977C536-8956A699) and
+SG_Prop_PumpkinGreat_THE (AD4BA465-8F81374E); random chance on 40 props (75 x31 KSpd, 50 x4, 2
+x1, **117 x4** SG_Farmprop_Vehicle_Melons01-04: always passes); Time of Day on 15 props (SFBT
+party props, some across midnight). Families: Grfe summer Mar 1 + 184, fall Sep 1 + 91, winter
+Dec 1 + 92 or + 89 (small overlaps or gaps by design); CP staggered starts (Feb/May/Sep/Nov 19 to
+28); Neko Mar 1 / May 1 / Sep 1 / Nov 1; JENXPROP and PK Mar 20 / Oct 1 / Dec 1; csx quarters
+(some interval 364); JFM Christmas Nov 20 + 42.
+
+Rules for the override from this: the calendar rule for intervals 360 to 370 (it removes the
+drift of 362/364/366 for every city alike); every other interval, an invalid start (month 0 or
+over 12, day past the month) and a missing start or duration: leave the live state; chance
+clamped to 100. About 420 props with season names have no date properties: their lot fixes
+the season, nothing to override.
+
+**Other DLLs.** `SC4SeasonJumper.dll` (caspervg/sc4-season-jumper, `FixSeasonalPropVisibility`)
+detours `SetSimulatorDateRange` `0x005eeff0` and, after the original, makes a prop created inside
+its active window visible (pulls the end back one interval, `SetPropTimerState(2, true)`). That
+runs at insert only, so it does not meet a render-time `SetState` override, and the restore guard
+of section 6 still holds. `SC4DateJumper.dll` is loaded too (not read).
+
 ## Proposed implementation
 
 New `src/dll/capture/SeasonOverride.{hpp,cpp}` with pure rules in a header the tests can use
