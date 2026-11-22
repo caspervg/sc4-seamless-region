@@ -1,22 +1,22 @@
 name: Release
 
+# Builds the release zip for a vMAJOR.MINOR.PATCH tag with the reusable workflow of
+# memo33/sc4-dll-actions, which attests it and leaves it in a draft release. See "Releases" in the
+# README.
+
 on:
   push:
     tags:
       - 'v*'
 
-permissions:
-  contents: read
-
-env:
-  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+permissions: {}
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  validate-tag:
+  check:
     runs-on: ubuntu-latest
     steps:
       - name: Validate semantic version tag
@@ -28,147 +28,100 @@ jobs:
             exit 1
           fi
 
-  release-win32:
-    needs: validate-tag
-    runs-on: windows-2022
+      # The reusable workflow always attests, and a private repository cannot (without GitHub
+      # Enterprise Cloud). Its release job depends on the attestation, so stop here with a reason.
+      - name: Require a public repository
+        if: ${{ github.event.repository.private }}
+        run: |
+          echo "::error::Release attestations need a public repository. Make the repository public before tagging a release."
+          exit 1
+
+  build:
+    needs: check
+    # The head of the v1 branch on 2026-11-22. Review the diff before moving the pin, and change the
+    # --signer-digest in the README with it.
+    uses: memo33/sc4-dll-actions/.github/workflows/attested-build.yaml@c7aa3d2d748a9bd52a573a79f1f6ba78dde6f25f
+    with:
+      build-os: windows-2022
+      build-script: |
+        $PSNativeCommandUseErrorActionPreference = $true
+        # The DLL's version comes from `git describe --tags`, and vcpkg reads its builtin-baseline
+        # from its own history: the reusable workflow checks out shallow.
+        if ((git rev-parse --is-shallow-repository) -eq 'true') { git fetch --unshallow --tags --no-recurse-submodules }
+        if ((git -C vendor/vcpkg rev-parse --is-shallow-repository) -eq 'true') { git -C vendor/vcpkg fetch --unshallow }
+
+        # No binary cache: the workflow has no cache step, so a release builds its packages from source.
+        $env:VCPKG_BINARY_SOURCES = 'clear'
+        .\vendor\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+        cmake --preset vs2022-win32-release
+        cmake --build --preset vs2022-win32-release-build --parallel
+
+        $dlls = @(Get-ChildItem cmake-build-release-visual-studio/src/dll/Release/*.dll)
+        if ($dlls.Count -ne 1 -or $dlls[0].Length -le 0) { throw "Expected one non-empty DLL, found $($dlls.Count)" }
+        if ($dlls[0].Name -ne 'SC4SeamlessRegion.dll') { throw "Unexpected DLL name $($dlls[0].Name)" }
+
+        $out = New-Item -ItemType Directory -Force -Path release-package
+        Copy-Item $dlls[0].FullName -Destination $out
+        Copy-Item dist/SC4SeamlessRegion.ini, README.md, LICENSE.txt, THIRD_PARTY_NOTICES.txt -Destination $out
+        Copy-Item vendor/gzcom-dll/LICENSE -Destination (Join-Path $out 'LICENSE-gzcom-dll')
+        Copy-Item vendor/sc4-render-services/LICENSE.txt -Destination (Join-Path $out 'LICENSE-sc4-render-services.txt')
+        Get-ChildItem -File $out | Get-FileHash -Algorithm SHA256 |
+          ForEach-Object { "$($_.Hash.ToLowerInvariant())  $(Split-Path -Leaf $_.Path)" } |
+          Set-Content -Path (Join-Path $out 'SHA256SUMS.txt') -Encoding ascii
+      build-output: release-package
+      artifact-name: SC4SeamlessRegion-${{ github.ref_name }}-win32.zip
+      attestation-subject-path: SC4SeamlessRegion.dll
+      prerelease: ${{ contains(github.ref_name, '-') }}
     permissions:
-      contents: write
-      # For the signed attestations.
-      id-token: write
-      attestations: write
-      artifact-metadata: write
+      id-token: write          # attestation
+      attestations: write      # attestation
+      artifact-metadata: write # attestation
+      contents: write          # draft release
 
+  # The SBOM of the DLL, attested and added to the draft release, as the release had before.
+  sbom:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write          # upload to the draft release
+      id-token: write          # attestation
+      attestations: write      # attestation
+      artifact-metadata: write # attestation
+    env:
+      ARTIFACT_NAME: SC4SeamlessRegion-${{ github.ref_name }}-win32.zip
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download the release zip
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          submodules: recursive
-          fetch-depth: 0
-          fetch-tags: true
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: dist
+          skip-decompress: true
 
-      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-        with:
-          script: |
-            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
-            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
-
-      - name: Fetch full vcpkg history
-        shell: powershell
+      - name: Verify SHA256 and extract the DLL
+        env:
+          ARTIFACT_SHA256: ${{ needs.build.outputs.artifact-sha256 }}
         run: |
-          $isShallow = (git -C vendor/vcpkg rev-parse --is-shallow-repository).Trim()
-          if ($isShallow -eq "true") {
-            git -C vendor/vcpkg fetch --unshallow
-          }
-
-      - name: Bootstrap vcpkg
-        shell: powershell
-        run: |
-          .\vendor\vcpkg\bootstrap-vcpkg.bat
-          echo "VCPKG_ROOT=${{ github.workspace }}/vendor/vcpkg" >> $env:GITHUB_ENV
-
-      - name: Build DLL
-        shell: powershell
-        run: |
-          cmake --preset vs2022-win32-release
-          cmake --build --preset vs2022-win32-release-build --parallel
-
-      - name: Verify DLL output
-        shell: powershell
-        run: |
-          $dlls = @(Get-ChildItem "cmake-build-release-visual-studio/src/dll/Release/*.dll")
-          if ($dlls.Count -ne 1) {
-            throw "Expected one DLL, found $($dlls.Count)"
-          }
-          $dll = $dlls[0]
-          if ((Get-Item -LiteralPath $dll).Length -le 0) {
-            throw "DLL is empty: $dll"
-          }
-          "DLL_PATH=$($dll.FullName)" >> $env:GITHUB_ENV
-          "PROJECT_NAME=$($dll.BaseName)" >> $env:GITHUB_ENV
+          cd dist
+          echo "$ARTIFACT_SHA256  $ARTIFACT_NAME" | sha256sum --check --status -
+          unzip -j "$ARTIFACT_NAME" '*SC4SeamlessRegion.dll' -d ../dll
 
       - name: Generate SBOM (SPDX)
         uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
-          file: cmake-build-release-visual-studio/src/dll/Release/${{ env.PROJECT_NAME }}.dll
+          file: dll/SC4SeamlessRegion.dll
           format: spdx-json
-          output-file: ${{ env.PROJECT_NAME }}.spdx.json
+          output-file: SC4SeamlessRegion.spdx.json
           upload-artifact: false
 
-      - name: Package release assets
-        shell: powershell
-        run: |
-          $tag = "${{ github.ref_name }}"
-          $packageDir = Join-Path "${{ github.workspace }}" "release-package"
-          New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
-
-          Copy-Item $env:DLL_PATH -Destination $packageDir
-          Copy-Item "$($env:PROJECT_NAME).spdx.json" -Destination $packageDir
-          Copy-Item "dist/$($env:PROJECT_NAME).ini" -Destination $packageDir
-          Copy-Item "README.md" -Destination $packageDir
-          Copy-Item "LICENSE.txt" -Destination $packageDir
-          Copy-Item "THIRD_PARTY_NOTICES.txt" -Destination $packageDir
-          Copy-Item "vendor/gzcom-dll/LICENSE" -Destination (Join-Path $packageDir "LICENSE-gzcom-dll")
-          Copy-Item "vendor/sc4-render-services/LICENSE.txt" -Destination (Join-Path $packageDir "LICENSE-sc4-render-services.txt")
-
-          $archivePath = Join-Path "${{ github.workspace }}" ("$($env:PROJECT_NAME)-" + $tag + "-win32.zip")
-          if (Test-Path $archivePath) {
-            Remove-Item -LiteralPath $archivePath
-          }
-
-          Get-FileHash -Algorithm SHA256 (Join-Path $packageDir '*') |
-            ForEach-Object { "$($_.Hash.ToLowerInvariant())  $($_.Path | Split-Path -Leaf)" } |
-            Set-Content -Path (Join-Path $packageDir 'SHA256SUMS.txt') -Encoding ascii
-
-          Compress-Archive -Path (Join-Path $packageDir '*') -DestinationPath $archivePath
-          "RELEASE_ARCHIVE=$archivePath" >> $env:GITHUB_ENV
-
-      # Build provenance: proves that this workflow built these files from this commit. Check a download
-      # with `gh attestation verify <file> --repo <owner>/<repo>`. A private repository cannot attest.
-      - name: Attest build provenance
-        if: ${{ !github.event.repository.private }}
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-path: |
-            ${{ env.PROJECT_NAME }}-${{ github.ref_name }}-win32.zip
-            cmake-build-release-visual-studio/src/dll/Release/${{ env.PROJECT_NAME }}.dll
-
-      # Links the SBOM to the DLL and the zip.
       - name: Attest SBOM
-        if: ${{ !github.event.repository.private }}
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: |
-            ${{ env.PROJECT_NAME }}-${{ github.ref_name }}-win32.zip
-            cmake-build-release-visual-studio/src/dll/Release/${{ env.PROJECT_NAME }}.dll
-          sbom-path: ${{ env.PROJECT_NAME }}.spdx.json
+            dist/${{ env.ARTIFACT_NAME }}
+            dll/SC4SeamlessRegion.dll
+          sbom-path: SC4SeamlessRegion.spdx.json
 
-      - name: Publish GitHub release
-        shell: powershell
+      - name: Add the SBOM to the draft release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # A tag such as v1.0.0-rc.1 becomes a prerelease.
-          $prerelease = @()
-          if ("${{ github.ref_name }}" -like "*-*") { $prerelease = @("--prerelease") }
-          gh release create "${{ github.ref_name }}" "$env:RELEASE_ARCHIVE" "$($env:PROJECT_NAME).spdx.json" `
-            --repo "${{ github.repository }}" `
-            --title "${{ github.ref_name }}" `
-            --generate-notes @prerelease
-          if ($LASTEXITCODE -ne 0) { throw "gh release create failed with exit code $LASTEXITCODE" }
-
-  # Points the sc4pac package at the new release on a branch of your fork of the channel, and links
-  # to a prefilled pull request in the job summary. Off until the repository variable SC4PAC_ASSET_ID
-  # names the package's asset in the channel; see "Releases" in the README.
-  sc4pac:
-    if: ${{ vars.SC4PAC_ASSET_ID != '' && !contains(github.ref_name, '-') }}
-    needs: release-win32
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    environment: sc4pac
-    concurrency: sc4pac-${{ vars.SC4PAC_ASSET_ID }}
-    steps:
-      - uses: caspervg/sc4pac-release-action@af95bc5692cab0a3b32e50aac5b82eb8249ffca9 # v1.0.0
-        with:
-          channel: ${{ vars.SC4PAC_CHANNEL || 'sebamarynissen/simtropolis-channel' }}
-          asset-id: ${{ vars.SC4PAC_ASSET_ID }}
-          token: ${{ secrets.SC4PAC_FORK_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.ref_name }}" SC4SeamlessRegion.spdx.json --repo "${{ github.repository }}" --clobber
