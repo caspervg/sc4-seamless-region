@@ -1,8 +1,7 @@
 name: Release
 
-# Builds the release zip for a vMAJOR.MINOR.PATCH tag with the reusable workflow of
-# memo33/sc4-dll-actions, which attests it and leaves it in a draft release. See "Releases" in the
-# README.
+# Builds and attests the release zip for a vMAJOR.MINOR.PATCH tag with memo33/sc4-dll-actions, and
+# leaves it in a draft release. See "Releases" in the README.
 
 on:
   push:
@@ -19,109 +18,53 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - name: Validate semantic version tag
+      - name: Validate tag
         env:
           TAG_NAME: ${{ github.ref_name }}
         run: |
           if [[ ! "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
-            echo "Release tags must match vMAJOR.MINOR.PATCH[-PRERELEASE], for example v1.0.0 or v1.0.0-rc.1. Got: $TAG_NAME"
+            echo "::error::Release tags look like v1.0.0 or v1.0.0-rc.1, not $TAG_NAME"
             exit 1
           fi
 
-      # The reusable workflow always attests, and a private repository cannot (without GitHub
-      # Enterprise Cloud). Its release job depends on the attestation, so stop here with a reason.
       - name: Require a public repository
         if: ${{ github.event.repository.private }}
         run: |
-          echo "::error::Release attestations need a public repository. Make the repository public before tagging a release."
+          echo "::error::Attestations need a public repository"
           exit 1
 
   build:
     needs: check
-    # The head of the v1 branch on 2026-11-22. Review the diff before moving the pin, and change the
-    # --signer-digest in the README with it.
+    # Head of its v1 branch on 2026-11-22. Change --signer-digest in the README with the pin.
     uses: memo33/sc4-dll-actions/.github/workflows/attested-build.yaml@c7aa3d2d748a9bd52a573a79f1f6ba78dde6f25f
     with:
       build-os: windows-2022
       build-script: |
         $PSNativeCommandUseErrorActionPreference = $true
-        # The DLL's version comes from `git describe --tags`, and vcpkg reads its builtin-baseline
-        # from its own history: the reusable workflow checks out shallow.
+        # The checkout is shallow: the version comes from git describe, and vcpkg needs its history.
         if ((git rev-parse --is-shallow-repository) -eq 'true') { git fetch --unshallow --tags --no-recurse-submodules }
         if ((git -C vendor/vcpkg rev-parse --is-shallow-repository) -eq 'true') { git -C vendor/vcpkg fetch --unshallow }
-
-        # No binary cache: the workflow has no cache step, so a release builds its packages from source.
-        $env:VCPKG_BINARY_SOURCES = 'clear'
         .\vendor\vcpkg\bootstrap-vcpkg.bat -disableMetrics
         cmake --preset vs2022-win32-release
         cmake --build --preset vs2022-win32-release-build --parallel
 
-        $dlls = @(Get-ChildItem cmake-build-release-visual-studio/src/dll/Release/*.dll)
-        if ($dlls.Count -ne 1 -or $dlls[0].Length -le 0) { throw "Expected one non-empty DLL, found $($dlls.Count)" }
-        if ($dlls[0].Name -ne 'SC4SeamlessRegion.dll') { throw "Unexpected DLL name $($dlls[0].Name)" }
-
+        $dll = 'cmake-build-release-visual-studio/src/dll/Release/SC4SeamlessRegion.dll'
+        if (-not (Test-Path $dll)) { throw "$dll is missing" }
         $out = New-Item -ItemType Directory -Force -Path release-package
-        Copy-Item $dlls[0].FullName -Destination $out
-        Copy-Item dist/SC4SeamlessRegion.ini, README.md, LICENSE.txt, THIRD_PARTY_NOTICES.txt -Destination $out
-        Copy-Item vendor/gzcom-dll/LICENSE -Destination (Join-Path $out 'LICENSE-gzcom-dll')
-        Copy-Item vendor/sc4-render-services/LICENSE.txt -Destination (Join-Path $out 'LICENSE-sc4-render-services.txt')
+        Copy-Item $dll, dist/SC4SeamlessRegion.ini, README.md, LICENSE.txt, THIRD_PARTY_NOTICES.txt -Destination $out
+        Copy-Item vendor/gzcom-dll/LICENSE (Join-Path $out 'LICENSE-gzcom-dll')
+        Copy-Item vendor/sc4-dll-utilities/LICENSE.txt (Join-Path $out 'LICENSE-sc4-dll-utilities.txt')
+        Copy-Item vendor/sc4-render-services/LICENSE.txt (Join-Path $out 'LICENSE-sc4-render-services.txt')
+        python tools/make-sbom.py --dll $dll --version '${{ github.ref_name }}' --output (Join-Path $out 'SC4SeamlessRegion.spdx.json')
         Get-ChildItem -File $out | Get-FileHash -Algorithm SHA256 |
           ForEach-Object { "$($_.Hash.ToLowerInvariant())  $(Split-Path -Leaf $_.Path)" } |
-          Set-Content -Path (Join-Path $out 'SHA256SUMS.txt') -Encoding ascii
+          Set-Content (Join-Path $out 'SHA256SUMS.txt') -Encoding ascii
       build-output: release-package
       artifact-name: SC4SeamlessRegion-${{ github.ref_name }}-win32.zip
       attestation-subject-path: SC4SeamlessRegion.dll
       prerelease: ${{ contains(github.ref_name, '-') }}
     permissions:
-      id-token: write          # attestation
-      attestations: write      # attestation
-      artifact-metadata: write # attestation
-      contents: write          # draft release
-
-  # The SBOM of the DLL, attested and added to the draft release, as the release had before.
-  sbom:
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write          # upload to the draft release
-      id-token: write          # attestation
-      attestations: write      # attestation
-      artifact-metadata: write # attestation
-    env:
-      ARTIFACT_NAME: SC4SeamlessRegion-${{ github.ref_name }}-win32.zip
-    steps:
-      - name: Download the release zip
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          artifact-ids: ${{ needs.build.outputs.artifact-id }}
-          path: dist
-          skip-decompress: true
-
-      - name: Verify SHA256 and extract the DLL
-        env:
-          ARTIFACT_SHA256: ${{ needs.build.outputs.artifact-sha256 }}
-        run: |
-          cd dist
-          echo "$ARTIFACT_SHA256  $ARTIFACT_NAME" | sha256sum --check --status -
-          unzip -j "$ARTIFACT_NAME" '*SC4SeamlessRegion.dll' -d ../dll
-
-      - name: Generate SBOM (SPDX)
-        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
-        with:
-          file: dll/SC4SeamlessRegion.dll
-          format: spdx-json
-          output-file: SC4SeamlessRegion.spdx.json
-          upload-artifact: false
-
-      - name: Attest SBOM
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-path: |
-            dist/${{ env.ARTIFACT_NAME }}
-            dll/SC4SeamlessRegion.dll
-          sbom-path: SC4SeamlessRegion.spdx.json
-
-      - name: Add the SBOM to the draft release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.ref_name }}" SC4SeamlessRegion.spdx.json --repo "${{ github.repository }}" --clobber
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+      contents: write

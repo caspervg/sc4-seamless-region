@@ -1,9 +1,6 @@
 name: sc4pac
 
-# release.yml leaves a draft release. Publishing it points the sc4pac package at the release on a
-# branch of your fork of the channel, and links to a prefilled pull request in the job summary. Off
-# until the repository variable SC4PAC_ASSET_ID names the package's asset in the channel; see
-# "Releases" in the README. Prereleases are left alone.
+# Runs when a release is published. Off until SC4PAC_ASSET_ID is set; see "Releases" in the README.
 
 on:
   release:

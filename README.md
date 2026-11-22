@@ -81,10 +81,11 @@ Plugins folder.
 
 ## Releases
 
-`release.yml` builds a zip with the DLL, the INI and the licenses for every `vMAJOR.MINOR.PATCH`
-tag, with the reusable workflow of [sc4-dll-actions](https://github.com/memo33/sc4-dll-actions). It
-attests the zip and the DLL and leaves them in a draft release, with the SBOM. It needs a public
-repository. Anyone can check a download:
+`release.yml` builds a zip with the DLL, the INI, the licenses and an SPDX SBOM for every
+`vMAJOR.MINOR.PATCH` tag, with the reusable workflow of
+[sc4-dll-actions](https://github.com/memo33/sc4-dll-actions). It attests the zip and the DLL and
+leaves them in a draft release. `tools/make-sbom.py` writes the SBOM from the vcpkg ports and the
+vendored submodules. Anyone can check a download:
 
 ```sh
 gh attestation verify SC4SeamlessRegion-v1.0.0-win32.zip --repo caspervg/sc4-seamless-region \
@@ -95,7 +96,7 @@ gh attestation verify SC4SeamlessRegion-v1.0.0-win32.zip --repo caspervg/sc4-sea
 Publishing the draft starts `sc4pac.yml`, which updates the package in an
 [sc4pac](https://memo33.github.io/sc4pac/) channel with
 [sc4pac-release-action](https://github.com/caspervg/sc4pac-release-action). It skips prereleases and
-stays off until:
+is off until:
 
 1. a fork of the channel exists (default `sebamarynissen/simtropolis-channel`),
 2. the environment `sc4pac` (tags `v*` only) has the secret `SC4PAC_FORK_TOKEN`, a fine-grained
