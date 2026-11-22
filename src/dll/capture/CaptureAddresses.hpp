@@ -54,6 +54,15 @@ namespace CaptureAddresses
         constexpr uint32_t kViewChangesSuspended = 0xc3;
     }
 
+    // cSC4ModelBackgroundLoader: the cells it loaded, waiting for the main thread to swap their
+    // models in (std::vector<SC4Point<int>>, begin and end; ProcessLoadedCells reads them at
+    // 0x0048e1be).
+    namespace BackgroundLoader
+    {
+        constexpr uint32_t kBacklogBegin = 0xc8;
+        constexpr uint32_t kBacklogEnd = 0xcc;
+    }
+
     // ---------------------------------------------------------------------------------------
     // cSC43DRender fields and render properties
     // ---------------------------------------------------------------------------------------
