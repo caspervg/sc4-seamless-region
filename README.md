@@ -77,6 +77,7 @@ Plugins folder.
 - `docs/testing.md`: in-game tests and the log lines that prove them.
 - `docs/remote.md`: game commands for scripted renders.
 - `docs/todo.md`: open work.
+- `docs/partial-renders.md`: plan for rendering only what changed after a save.
 
 ## Releases
 
