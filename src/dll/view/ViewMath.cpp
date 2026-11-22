@@ -68,6 +68,8 @@ namespace ViewMath
         return (static_cast<float>(r) + 1.0f) * kHalfPi + std::bit_cast<float>(kYawOffsetBits);
     }
 
+    float YawOffsetRadians() { return std::bit_cast<float>(kYawOffsetBits); }
+
     cS3DVector3 BaseCorner(const int rotation, const float citySizeX, const float citySizeZ)
     {
         switch (((rotation % kRotationCount) + kRotationCount) % kRotationCount) {

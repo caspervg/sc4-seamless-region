@@ -1,6 +1,8 @@
 #include "export/MapExport.hpp"
 
 #include <windows.h>
+#include <wincodec.h>
+#include <wrl/client.h>
 
 #include <algorithm>
 #include <cmath>
@@ -25,6 +27,8 @@
 #include "store/TileStore.hpp"
 #include "store/WebpCodec.hpp"
 #include "utils/Logger.h"
+
+#pragma comment(lib, "windowscodecs.lib")
 
 namespace fs = std::filesystem;
 
@@ -274,7 +278,7 @@ namespace
                 pool_->Cancel();
                 pool_->Wait();
             }
-            done = done && Page_(result) && Swap_(result);
+            done = done && (mosaic_ ? Mosaic_(result) : Page_(result) && Swap_(result));
             if (!done) {
                 if (Stopped_()) {
                     result.cancelled = true;
@@ -287,6 +291,17 @@ namespace
             }
             result.ok = true;
             result.cities = static_cast<int>(cities_.size());
+            if (mosaic_) {
+                fs::remove_all(tmpDir_, ec);
+                result.mosaic = req_.rendersDir / L"mosaic.png";
+                result.sourceZoom = zoom_;
+                char text[200];
+                std::snprintf(text, sizeof(text), "The mosaic is ready: %d cities from zoom %d, %d x %d pixels.",
+                              result.cities, zoom_ + 1, mosaicW_, mosaicH_);
+                result.message = text;
+                result.message += LeftOutText_();
+                return result;
+            }
             result.tilesWritten = tilesWritten_;
             result.cityTilesDecoded = decodes_;
             result.bytesWritten = bytesWritten_;
@@ -493,6 +508,15 @@ namespace
             width_ = static_cast<int>(maxX - minX);
             height_ = static_cast<int>(maxY - minY);
             maxZoom_ = MapMath::MaxZoom(width_, height_);
+            if (mosaic_) {
+                lowZoom_ = maxZoom_;
+                while (lowZoom_ > 0 && std::max(PixelsAt_(width_, lowZoom_), PixelsAt_(height_, lowZoom_)) >
+                                           std::max(req_.mosaicMaxPixels, kTile)) {
+                    --lowZoom_;
+                }
+                mosaicW_ = PixelsAt_(width_, lowZoom_);
+                mosaicH_ = PixelsAt_(height_, lowZoom_);
+            }
 
             // Back to front, as the neighbor renderer sorts around the reference city.
             std::vector<NeighborMath::CellRect> rects;
@@ -530,6 +554,9 @@ namespace
                 total += MarkCandidates_();
             }
             layer_ = kNormal;
+            if (mosaic_) {
+                total += static_cast<int64_t>(levels_[lowZoom_].tilesX) * levels_[lowZoom_].tilesY;  // stitching
+            }
             progress_.total = total;
             LOG_INFO("Export: canvas {} x {} px, zoom 0 to {}, {} tiles to make in {} layers, cache {} MB, {} encode "
                      "workers", width_,
@@ -554,7 +581,7 @@ namespace
                     }
                 }
             }
-            for (int z = maxZoom_ - 1; z >= 0; --z) {
+            for (int z = maxZoom_ - 1; z >= lowZoom_; --z) {
                 const LevelFlags& child = levels_[z + 1];
                 LevelFlags& l = levels_[z];
                 for (int ty = 0; ty < child.tilesY; ++ty) {
@@ -763,7 +790,7 @@ namespace
         bool Pyramid_(MapExport::Result& result)
         {
             progress_.phase = static_cast<int>(MapExport::Phase::Pyramid);
-            for (int z = maxZoom_ - 1; z >= 0; --z) {
+            for (int z = maxZoom_ - 1; z >= lowZoom_; --z) {
                 progress_.zoom = z;
                 const LevelFlags& level = levels_[z];
                 for (int ty = 0; ty < level.tilesY && !Stopped_() && !pool_->Failed(); ++ty) {
@@ -780,6 +807,91 @@ namespace
                 if (Stopped_()) {
                     return false;
                 }
+            }
+            return true;
+        }
+
+        // ---- mosaic ------------------------------------------------------------------------
+
+        // Canvas pixels at zoom z.
+        [[nodiscard]] int PixelsAt_(const int size, const int z) const
+        {
+            const int shift = maxZoom_ - z;
+            return (size + (1 << shift) - 1) >> shift;
+        }
+
+        // Stitches the map tiles of lowZoom_ into mosaic.png, one row of tiles at a time.
+        bool Mosaic_(MapExport::Result& result)
+        {
+            using Microsoft::WRL::ComPtr;
+            progress_.phase = static_cast<int>(MapExport::Phase::Finishing);
+            cache_.Clear([](Decoded&) {});  // the strip takes its room under the cap
+            const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            const int w = mosaicW_;
+            const int h = mosaicH_;
+            const LevelFlags& level = levels_[lowZoom_];
+            const fs::path tmpFile = tmpDir_ / L"mosaic.png";
+            bool ok = false;
+            {
+                ComPtr<IWICImagingFactory> factory;
+                ComPtr<IWICStream> stream;
+                ComPtr<IWICBitmapEncoder> encoder;
+                ComPtr<IWICBitmapFrameEncode> frame;
+                WICPixelFormatGUID format = GUID_WICPixelFormat32bppBGRA;
+                ok = SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                                                IID_PPV_ARGS(&factory))) &&
+                     SUCCEEDED(factory->CreateStream(&stream)) &&
+                     SUCCEEDED(stream->InitializeFromFilename(tmpFile.c_str(), GENERIC_WRITE)) &&
+                     SUCCEEDED(factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder)) &&
+                     SUCCEEDED(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache)) &&
+                     SUCCEEDED(encoder->CreateNewFrame(&frame, nullptr)) && SUCCEEDED(frame->Initialize(nullptr)) &&
+                     SUCCEEDED(frame->SetSize(static_cast<UINT>(w), static_cast<UINT>(h))) &&
+                     SUCCEEDED(frame->SetPixelFormat(&format)) && format == GUID_WICPixelFormat32bppBGRA;
+                std::vector<uint8_t> strip, tile(kTileBytes);
+                for (int ty = 0; ok && ty < level.tilesY && !Stopped_(); ++ty) {
+                    const int rows = std::min(kTile, h - ty * kTile);
+                    strip.assign(static_cast<size_t>(w) * rows * 4, 0);
+                    for (int tx = 0; ok && tx < level.tilesX; ++tx) {
+                        if (!level.written[level.Index(tx, ty)]) {
+                            continue;  // nothing drawn here: transparent
+                        }
+                        const fs::path file = tmpDir_ / kTilesDir[kNormal] / std::to_wstring(lowZoom_) /
+                                              std::to_wstring(tx) / (std::to_wstring(ty) + L".webp");
+                        int tw = 0;
+                        int th = 0;
+                        ok = ReadFile(file, fileBytes_) &&
+                             WebpCodec::DecodeInto(fileBytes_, tile.data(), static_cast<int>(kTileBytes), tw, th) &&
+                             tw == kTile && th == kTile;
+                        const int cols = std::min(kTile, w - tx * kTile);
+                        for (int y = 0; ok && y < rows; ++y) {
+                            const uint8_t* src = tile.data() + static_cast<size_t>(y) * kTile * 4;
+                            uint8_t* dst =
+                                strip.data() + (static_cast<size_t>(y) * w + static_cast<size_t>(tx) * kTile) * 4;
+                            for (int x = 0; x < cols * 4; x += 4) {  // RGBA to BGRA
+                                dst[x] = src[x + 2];
+                                dst[x + 1] = src[x + 1];
+                                dst[x + 2] = src[x];
+                                dst[x + 3] = src[x + 3];
+                            }
+                        }
+                    }
+                    ok = ok && SUCCEEDED(frame->WritePixels(static_cast<UINT>(rows), static_cast<UINT>(w) * 4,
+                                                            static_cast<UINT>(strip.size()), strip.data()));
+                    progress_.done += level.tilesX;
+                }
+                ok = ok && !Stopped_() && SUCCEEDED(frame->Commit()) && SUCCEEDED(encoder->Commit());
+            }  // the file is closed here
+            if (SUCCEEDED(co)) {
+                CoUninitialize();
+            }
+            if (!ok) {
+                return Fail_(result, "Writing the mosaic picture failed. Check that the disk has free space.");
+            }
+            std::error_code ec;
+            bytesWritten_ += static_cast<uint64_t>(fs::file_size(tmpFile, ec));
+            if (!MoveFileExW(tmpFile.c_str(), (req_.rendersDir / L"mosaic.png").c_str(), MOVEFILE_REPLACE_EXISTING)) {
+                LOG_WARN("Export: moving the mosaic in place failed, error {}", GetLastError());
+                return Fail_(result, "The old mosaic.png cannot be replaced. Close it and try again.");
             }
             return true;
         }
@@ -850,6 +962,9 @@ namespace
         std::vector<int> order_;  // indices into cities_, back to front
         ViewMath::OrthoProjection projection_;
         int width_ = 0, height_ = 0, maxZoom_ = 0;
+        const bool mosaic_ = req_.mode == MapExport::Mode::Mosaic;
+        int lowZoom_ = 0;                // the smallest zoom made: 0, or the mosaic's
+        int mosaicW_ = 0, mosaicH_ = 0;  // mosaic pixels
         std::vector<LevelFlags> levels_;
 
         TileLru<Decoded> cache_;
@@ -1304,7 +1419,11 @@ namespace MapExport
         progress.done = 0;
         progress.total = 0;
         progress.layer = 0;
-        Exporter exporter(request, progress, stop);
+        Request copy = request;
+        if (copy.mode == Mode::Mosaic) {
+            copy.transport = false;  // the mosaic shows the normal view
+        }
+        Exporter exporter(copy, progress, stop);
         return exporter.Run();
     }
 

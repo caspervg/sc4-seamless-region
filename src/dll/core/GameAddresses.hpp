@@ -92,6 +92,9 @@ namespace GameAddresses
         constexpr uintptr_t kPitchTable = 0x00abaccc;
         // float32[5] radians (kSC4YViewAngle on Mac): -pi/8 (0xbec90fdb) for every zoom.
         constexpr uintptr_t kOrthoAngleTable = 0x00abcfc4;
+        // float32[5] radians: a second pitch table with the same values as kPitchTable.
+        // sc4-modern-camera writes its free yaw and pitch into all three tables.
+        constexpr uintptr_t kPitchTable2 = 0x00abcfd8;
     }
 
     // -------------------------------------------------------------------------------------

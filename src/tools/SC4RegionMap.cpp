@@ -2,7 +2,7 @@
 // plugin stored. The same export as the "Region map" section of the in-game panel.
 //
 //   SC4RegionMap.exe <region folder> [--rotation 1..4] [--zoom 3..5] [--quality 0..100] [--upscale 0..3]
-//                    [--transport | --no-transport] [--open]
+//                    [--transport | --no-transport] [--mosaic [pixels]] [--open]
 //
 // Without --zoom the map uses the highest zoom that every rendered city has. The transport view is
 // on the map when the cities have it, unless --no-transport.
@@ -117,11 +117,13 @@ namespace
         std::fprintf(stderr,
                      "Makes the browsable map of a region from the renders of SC4 Seamless Region.\n\n"
                      "  SC4RegionMap.exe <region folder> [--rotation 1..4] [--zoom 3..5] [--quality 0..100] "
-                     "[--upscale 0..3] [--transport | --no-transport] [--open]\n\n"
+                     "[--upscale 0..3] [--transport | --no-transport] [--mosaic [pixels]] [--open]\n\n"
                      "--zoom: the zoom of the city renders that the map uses. Zoom 5 gives the most detail. The\n"
                      "map is then about 4 times the size of zoom 4. Without --zoom: the highest zoom of all cities.\n\n"
                      "--transport (the default): also put the transport view on the map, when the cities have it.\n"
                      "--no-transport: only the normal view.\n\n"
+                     "--mosaic [pixels]: one picture, RegionRenders\\mosaic.png, instead of the map. The map at\n"
+                     "the largest size whose longest side fits the pixels (default 16384, up to 65536).\n\n"
                      "Example: SC4RegionMap.exe \"%%USERPROFILE%%\\Documents\\SimCity 4\\Regions\\Fairview\"\n");
         return 2;
     }
@@ -149,6 +151,12 @@ int wmain(const int argc, wchar_t** argv)
         }
         else if (arg == L"--upscale" && hasValue) {
             request.upscaleLevels = std::clamp(_wtoi(argv[++i]), 0, 3);
+        }
+        else if (arg == L"--mosaic") {
+            request.mode = MapExport::Mode::Mosaic;
+            if (hasValue && iswdigit(argv[i + 1][0])) {
+                request.mosaicMaxPixels = std::clamp(_wtoi(argv[++i]), 256, 65536);
+            }
         }
         else if (arg == L"--open") {
             open = true;
@@ -215,9 +223,10 @@ int wmain(const int argc, wchar_t** argv)
     if (!result.ok) {
         return 1;
     }
-    std::printf("%s\n", Utf8(result.indexHtml.wstring()).c_str());
+    const fs::path made = result.mosaic.empty() ? result.indexHtml : result.mosaic;
+    std::printf("%s\n", Utf8(made.wstring()).c_str());
     if (open) {
-        ShellExecuteW(nullptr, L"open", result.indexHtml.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        ShellExecuteW(nullptr, L"open", made.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     }
     return 0;
 }

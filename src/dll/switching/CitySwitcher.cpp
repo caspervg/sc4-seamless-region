@@ -1,5 +1,6 @@
 #include "switching/CitySwitcher.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <format>
@@ -9,6 +10,9 @@
 #include "SC4String.h"
 #include "cIGZGraphicSystem.h"
 #include "cISC4App.h"
+#include "cISC4City.h"
+#include "cISTETerrain.h"
+#include "core/GameAddresses.hpp"
 #include "cISC4Region.h"
 #include "cISC4RegionalCity.h"
 #include "cRZAutoRefCount.h"
@@ -61,7 +65,33 @@ void CitySwitcher::Shutdown()
 }
 
 // Normally inside LoadCity (it pumps the queues at its end), sometimes after the switch task.
-void CitySwitcher::OnCityInit() {}
+void CitySwitcher::OnCityInit()
+{
+    if (!hasArrival_) {
+        return;
+    }
+    hasArrival_ = false;
+    const CityInfo* current = ctx_.region->Current();
+    if (!current || current->cellX != targetX_ || current->cellZ != targetZ_ || !ctx_.idle) {
+        return;
+    }
+    // On the next idle tick, after the game has set up the camera of the new city itself.
+    ctx_.idle->Post([at = arrival_] {
+        cISC4City* city = GameAccess::City();
+        void* camera = GameAccess::CameraControl();
+        if (!city || !camera) {
+            return;
+        }
+        const float x = std::clamp(at.fX, 0.0f, city->SizeX());
+        const float z = std::clamp(at.fY, 0.0f, city->SizeZ());
+        cISTETerrain* terrain = city->GetTerrain();
+        const float target[3] = {x, terrain ? terrain->GetAltitude(x, z) : 0.0f, z};
+        // bool cSC4CameraControl::SetViewTargetPosition(const float* xyz), __thiscall.
+        using Fn = bool(__fastcall*)(void* self, void* edx, const float* position);
+        reinterpret_cast<Fn>(GameAddresses::CameraControl::kSetViewTargetPosition)(camera, nullptr, target);
+        LOG_INFO("Switching: the camera looks at ({:.0f}, {:.0f}), where the switch was clicked", x, z);
+    });
+}
 
 void CitySwitcher::OnCityShutdown()
 {
@@ -85,9 +115,15 @@ bool CitySwitcher::IsBusy() const { return busy_; }
 
 std::string CitySwitcher::LastError() const { return lastError_; }
 
-bool CitySwitcher::RequestSwitch(const int cellX, const int cellZ, const bool allowWithoutSave)
+bool CitySwitcher::RequestSwitch(const int cellX, const int cellZ, const bool allowWithoutSave,
+                                 const cS3DVector2* arrival)
 {
-    return Queue_(Kind::Switch, cellX, cellZ, allowWithoutSave);
+    if (!Queue_(Kind::Switch, cellX, cellZ, allowWithoutSave)) {
+        return false;
+    }
+    hasArrival_ = arrival != nullptr;
+    arrival_ = arrival ? *arrival : cS3DVector2();
+    return true;
 }
 
 bool CitySwitcher::RequestOpen(const int cellX, const int cellZ) { return Queue_(Kind::Open, cellX, cellZ, false); }
@@ -137,6 +173,7 @@ bool CitySwitcher::Queue_(const Kind kind, const int cellX, const int cellZ, con
     }
 
     busy_ = true;
+    hasArrival_ = false;
     kind_ = kind;
     targetX_ = cellX;
     targetZ_ = cellZ;
@@ -316,6 +353,7 @@ void CitySwitcher::GoToRegionView_(std::string error)
 
 void CitySwitcher::Fail_(std::string error)
 {
+    hasArrival_ = false;
     LOG_WARN("Switching: {}", error);
     lastError_ = std::move(error);
 }

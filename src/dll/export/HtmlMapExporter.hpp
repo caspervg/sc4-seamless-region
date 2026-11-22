@@ -60,6 +60,9 @@ private:
     int rotation_ = 0;
     int sourceZoom_ = -1;  // zoom index, -1: the highest that every rendered city has
     bool transport_ = true;  // the transport view too, when the cities have it
+    bool mosaic_ = false;    // one picture (mosaic.png) instead of the interactive map
+    int mosaicSize_ = 2;     // index into kMosaicSizes
+    std::filesystem::path mosaicPng_;   // the mosaic to open, empty when none was made
     std::filesystem::path rendersDir_;  // from the store at city load
     std::filesystem::path indexHtml_;   // the map to open, empty when there is none
     std::string message_;

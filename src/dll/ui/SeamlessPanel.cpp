@@ -224,9 +224,12 @@ void SeamlessPanel::DrawSettings_()
     changed |= ImGui::Checkbox("Render the city after each save", &s->renderOnSave);
     HelpMarker("A quick save (Ctrl+Alt+S) and the fast saves of SC4AutoSave do not start a render.");
     changed |= ImGui::Checkbox("Render at noon", &s->captureAtNoon);
+    HelpMarker("Render cities with noon light. Then all neighbors look the same, also when you render at night.");
     changed |= ImGui::Checkbox("Sun glare on water", &s->captureWaterGlare);
     HelpMarker("The game puts the glare on each city by itself. Neighbors then show hard seams on water.");
-    HelpMarker("Render cities with noon light. Then all neighbors look the same, also when you render at night.");
+    changed |= ImGui::Checkbox("Edge walls in renders", &s->captureEdgeWalls);
+    HelpMarker("Keep the cliff on the two front edges of a city. Where the neighbor in front is lower, the seam "
+               "shows that cliff. Off: the seam is transparent and shows the background. Render again to see it.");
     changed |= ImGui::SliderInt("Scroll past the edge (metres)", &s->zoom45BandMetres, Settings::kMinBandMetres,
                                 Settings::kMaxBandMetres, "%d", ImGuiSliderFlags_AlwaysClamp);
     HelpMarker("At zoom 4 and 5, the camera can move this far past the edge of your city.");

@@ -1,4 +1,6 @@
 #include <windows.h>
+#include <wincodec.h>
+#include <wrl/client.h>
 
 #include <algorithm>
 #include <array>
@@ -392,6 +394,37 @@ namespace
 // Two rendered cities that overlap on the canvas, one founded city without a render and one
 // with a render in another rotation only. The front city must cover the back one, and the
 // output must be a complete map folder.
+// Reads a PNG with WIC: size and one RGBA pixel.
+static bool PngPixel(const fs::path& file, const int x, const int y, int& w, int& h, std::array<uint8_t, 4>& rgba)
+{
+    using Microsoft::WRL::ComPtr;
+    const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    bool ok = false;
+    {
+        ComPtr<IWICImagingFactory> factory;
+        ComPtr<IWICBitmapDecoder> decoder;
+        ComPtr<IWICBitmapFrameDecode> frame;
+        ComPtr<IWICFormatConverter> rgbaFrame;
+        UINT uw = 0, uh = 0;
+        ok = SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                                        IID_PPV_ARGS(&factory))) &&
+             SUCCEEDED(factory->CreateDecoderFromFilename(file.c_str(), nullptr, GENERIC_READ,
+                                                          WICDecodeMetadataCacheOnDemand, &decoder)) &&
+             SUCCEEDED(decoder->GetFrame(0, &frame)) && SUCCEEDED(frame->GetSize(&uw, &uh)) &&
+             SUCCEEDED(factory->CreateFormatConverter(&rgbaFrame)) &&
+             SUCCEEDED(rgbaFrame->Initialize(frame.Get(), GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone,
+                                             nullptr, 0.0, WICBitmapPaletteTypeCustom));
+        w = static_cast<int>(uw);
+        h = static_cast<int>(uh);
+        const WICRect rect{x, y, 1, 1};
+        ok = ok && x < w && y < h && SUCCEEDED(rgbaFrame->CopyPixels(&rect, 4, 4, rgba.data()));
+    }
+    if (SUCCEEDED(co)) {
+        CoUninitialize();
+    }
+    return ok;
+}
+
 TEST_CASE(MapExportEndToEnd)
 {
     constexpr int kSource = 128;
@@ -539,6 +572,29 @@ TEST_CASE(MapExportEndToEnd)
     const MapExport::Result noZoom5 = MapExport::Run(request, progress, stop);
     CHECK(!noZoom5.ok && !noZoom5.cancelled && !noZoom5.message.empty());
     CHECK(fs::is_regular_file(map / L"index.html"));
+
+    // Mosaic at full size: one picture of the same canvas, the map stays as it is.
+    const fs::file_time_type mapTime = fs::last_write_time(map / L"index.html");
+    request.sourceZoom = -1;
+    request.mode = MapExport::Mode::Mosaic;
+    request.mosaicMaxPixels = 65536;
+    const MapExport::Result mosaic = MapExport::Run(request, progress, stop);
+    CHECK(mosaic.ok && mosaic.mosaic == region.renders / L"mosaic.png");
+    CHECK(progress.done == progress.total);
+    CHECK(fs::last_write_time(map / L"index.html") == mapTime);
+    CHECK(!fs::exists(region.renders / L"map.tmp"));
+    int mw = 0, mh = 0;
+    CHECK(PngPixel(mosaic.mosaic, px - minX, py - minY, mw, mh, pixel));
+    CHECK(mw == width && mh == height);
+    CHECK(Near(pixel, green));
+    CHECK(PngPixel(mosaic.mosaic, westAt.x - minX + 5, westAt.y - minY + 5, mw, mh, pixel));
+    CHECK(Near(pixel, red));
+    // A smaller mosaic: the longest side fits, halved from the map levels.
+    request.mosaicMaxPixels = std::max(width, height) / 2;
+    CHECK(MapExport::Run(request, progress, stop).ok);
+    CHECK(PngPixel(mosaic.mosaic, 0, 0, mw, mh, pixel));
+    CHECK(std::max(mw, mh) <= request.mosaicMaxPixels && mw >= width / 4);
+    request.mode = MapExport::Mode::Map;
 
     // The last map is the full one again, so SC4SR_KEEP_EXPORT_TEST keeps a map with both layers.
     request.sourceZoom = -1;

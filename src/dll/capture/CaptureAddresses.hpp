@@ -87,4 +87,9 @@ namespace CaptureAddresses
     constexpr uint32_t kTransportDataViewInstance = 0x4A0B6800u + kTransportDataView;
     // cSC4View3DWin view level 1: the surface (not an underground view).
     constexpr uint32_t kSurfaceViewLevel = 1;
+    // int32 zoom limits on cSC4View3DWin, stored by SetZoomLimits (no getter). From the
+    // sc4-modern-camera source, which pins both to the current zoom while its free camera is
+    // on. Not checked in Ghidra. Confidence: medium.
+    constexpr uint32_t kZoomLowerLimitOffset = 0x364;
+    constexpr uint32_t kZoomUpperLimitOffset = 0x368;
 }

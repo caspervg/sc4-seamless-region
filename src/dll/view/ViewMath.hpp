@@ -48,6 +48,8 @@ namespace ViewMath
     // (rotation + 1) * 90 - 22.5 degrees (camera +0x118 holds -pi/8), in float like the
     // game. Rotation is taken modulo 4.
     [[nodiscard]] float YawRadians(int rotation);
+    // -pi/8 as the game's float: camera +0x118 and every entry of the table 0x00abcfc4.
+    [[nodiscard]] float YawOffsetRadians();
     // cSC4CameraControl::GetBaseTargetPositionForRotation (0x007cba10): the city corner the
     // game snaps to a whole pixel. Rotation 0: (0,0), 1: (sizeX,0), 2: (sizeX,sizeZ), 3: (0,sizeZ).
     [[nodiscard]] cS3DVector3 BaseCorner(int rotation, float citySizeX, float citySizeZ);

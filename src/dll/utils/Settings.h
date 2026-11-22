@@ -50,6 +50,9 @@ public:
     // Also render the transport view of the game (the region view's transport map: networks as
     // colored lines on the terrain) into t<rot>z<zoom>/ tiles, for the region map.
     bool captureTransportLayer = false;
+    // Keep the cliffs and water walls of the two front edges in renders. Where the neighbor in
+    // front is lower, the seam then shows a cliff. Off: every edge is transparent.
+    bool captureEdgeWalls = true;
     // The highest zoom a render makes, as the game counts zooms: 3, 4 or 5. Zoom 5 has 4 times
     // the pixels of zoom 4. Without zoom 5 tiles, zoom 5 shows zoom 4 at twice the size. Without
     // zoom 4 tiles neighbors do not show at zoom 4 and 5.

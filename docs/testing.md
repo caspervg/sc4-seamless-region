@@ -188,6 +188,15 @@ lines. Every switch logs one line per step with its time in ms.
 4. Hover a button: "Save this city and play <name>." or, for an unfounded neighbor,
    "<name> is not founded. This saves this city and opens the region view."
 
+### Arrive where you clicked
+
+1. Double-click a spot on a neighbor a few hundred metres from the shared edge (a landmark helps).
+2. After the switch the camera looks at that spot in the new city, not at the spot the city was
+   saved with. Log: `Switching: the camera looks at (x, z), where the switch was clicked`.
+3. If the log line is there but the camera is elsewhere, the game sets its own camera after the
+   first idle tick: move the call later (kPostCityInitComplete or a few ticks).
+4. The panel buttons (north, south, east, west) and the batch open cities as before.
+
 ### Switch to a founded neighbor
 
 1. Press a button with a founded neighbor.

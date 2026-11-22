@@ -5,6 +5,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <thread>
 #include <unordered_map>
@@ -267,19 +268,27 @@ const TileTexture* TileCache::Acquire(const TileKey& key)
     }
 
     Impl::Request request{key, 0};
+    std::optional<TileKey> dropped;
     {
         std::lock_guard lock(s.mutex);
         request.epoch = s.epoch;
         if (s.requests.size() >= kMaxRequests) {
-            // The oldest request is the one most likely off screen by now. Forget it, so
-            // a later draw can ask again.
-            s.pending.erase(s.requests.front().key);
+            // The oldest request is the one most likely off screen by now. Forget it.
+            dropped = std::move(s.requests.front().key);
             s.requests.erase(s.requests.begin());
             ++s.queueDrops;
         }
         s.requests.push_back(std::move(request));
     }
     s.wake.notify_one();
+    if (dropped) {
+        s.pending.erase(*dropped);
+        // The backing store keeps its spot empty until that area is drawn again. The renderer
+        // redraws it when it is on screen, and that draw asks again.
+        if (s.onReady) {
+            s.onReady(*dropped);
+        }
+    }
     s.pending.emplace(key, s.passStamp);
     PumpUploads();
     return nullptr;
@@ -382,10 +391,18 @@ void TileCache::PumpInFrame_()
         }
 
         if (!s.lru.MakeRoom(TextureBytes(d.w, d.h), requestStamp, release)) {
-            // Everything in the cache is on screen. Drop the tile, a later draw asks again.
+            // Everything drawn since the tile was asked for fills the cache. Drop the tile.
             s.pending.erase(pendingIt);
             ++s.overBudget;
             s.ReleaseBuffer(d.buffer);
+            if (requestStamp < s.passStamp && s.onReady) {
+                // Asked for in an older pass (a fast scroll): the renderer redraws its spot and
+                // that draw asks again, protecting less. Asked for in the latest pass: the view
+                // does not fit the cache, asking again would loop.
+                // ponytail: can still repeat while other passes keep coming and the view is over
+                // budget; the warning below tells the player to raise TileCacheMB.
+                s.onReady(d.key);
+            }
             if (!s.loggedOverBudget) {
                 s.loggedOverBudget = true;
                 LOG_WARN("Tile cache: the limit of {} MB is too small for this view. Some neighbor tiles are "

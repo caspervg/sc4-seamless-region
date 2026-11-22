@@ -377,3 +377,14 @@ TEST_CASE(EdgeBitsMapToTheTerrainEdges)
     CHECK(CameraBounds::ToGameEdgeMask(CameraBounds::kAllEdges) == 0xFu);
     CHECK(CameraBounds::ToGameEdgeMask(0) == 0u);
 }
+
+TEST_CASE(BackEdgesFaceAwayFromTheEye)
+{
+    namespace CB = CameraBounds;
+    for (int rotation = 0; rotation < ViewMath::kRotationCount; ++rotation) {
+        // forward runs from the eye to the target: an eye at +x has the west edge at the back.
+        const cS3DVector3 f = ViewMath::OrthoProjection::For(0, rotation).forward;
+        const uint32_t expected = (f.fX < 0 ? CB::kEdgeXMin : CB::kEdgeXMax) | (f.fZ < 0 ? CB::kEdgeZMin : CB::kEdgeZMax);
+        CHECK(CB::BackEdges(rotation) == expected);
+    }
+}

@@ -1,5 +1,7 @@
 #include "capture/SnapshotReader.hpp"
 
+#include <memory>
+
 #include "capture/CaptureAddresses.hpp"
 #include "capture/CaptureMath.hpp"
 #include "cIGZBuffer.h"
@@ -32,11 +34,7 @@ void SnapshotReader::Shutdown() { ReleaseAll_(); }
 
 void SnapshotReader::OnCityInit() {}
 
-void SnapshotReader::OnCityShutdown()
-{
-    // Frees the megabyte of the reused buffer between cities.
-    ReleaseBuffer_();
-}
+void SnapshotReader::OnCityShutdown() {}
 
 void SnapshotReader::DrawPanelSection()
 {
@@ -68,29 +66,19 @@ bool SnapshotReader::Read(const int x, const int y, const int w, const int h, st
         return Fail_("The graphics driver cannot read the screen back.");
     }
 
-    // Only reuse a buffer of exactly this size. With a reused buffer the DX7 driver grows the
-    // rectangle to the buffer size and the OpenGL driver shrinks it.
-    if (buffer_ && (bufferW_ != w || bufferH_ != h)) {
-        ReleaseBuffer_();
-    }
-
-    cIGZBuffer* const passed = buffer_;
-    cIGZBuffer* const result = extension_->CopyColorBuffer(x, y, w, h, passed);
+    // Always a new buffer, never `reuse`. SCD3D11 (v0.5.0) checks a passed buffer with
+    // GetColorType declared as returning an enum, but the game's slot returns the
+    // cGZBufferColorType struct through a hidden pointer (0x008268f0, slots 14 and 15 of
+    // 0x00ac1400). The game then writes 8 bytes through a stack value: an access violation
+    // or quiet memory damage. The game's own photo code passes no buffer either. See
+    // docs/re-notes/capture.md, Replacement drivers.
+    cIGZBuffer* const result = extension_->CopyColorBuffer(x, y, w, h, nullptr);
     if (!result) {
-        // The software and OpenGL drivers release `reuse` on some of their failure paths and
-        // the DX7 driver never does. Dropping the pointer without a Release can leak one
-        // buffer. A Release could free it twice.
-        buffer_ = nullptr;
         return Fail_("The graphics driver gave no picture.");
     }
-    if (passed && result != passed) {
-        passed->Release();
-    }
-    buffer_ = result;
-    bufferW_ = result->Width();
-    bufferH_ = result->Height();
+    const std::unique_ptr<cIGZBuffer, decltype([](cIGZBuffer* b) { b->Release(); })> owned(result);
 
-    if (bufferW_ != w || bufferH_ != h) {
+    if (static_cast<int>(result->Width()) != w || static_cast<int>(result->Height()) != h) {
         // The driver clamped the rectangle to the back buffer. The picture then starts at the
         // clamped corner, so it cannot be used.
         return Fail_("The rectangle to read is larger than the game window.");
@@ -111,6 +99,13 @@ bool SnapshotReader::Read(const int x, const int y, const int w, const int h, st
     result->Unlock(CaptureAddresses::Snapshot::kBufferLockFlags);
     if (!usable) {
         return Fail_("The picture of the graphics driver has no pixels.");
+    }
+    // scvk never returns null: a failed read (fence timeout, lost device) is a black picture of
+    // the asked size. A real read of the game is never pure black: the clear color is a key
+    // color and terrain is never exactly 0, 0, 0.
+    const size_t pixels = static_cast<size_t>(w) * static_cast<size_t>(h);
+    if (CaptureMath::CountKeyPixels(rgba.data(), pixels, CaptureMath::Rgb{0, 0, 0}) == pixels) {
+        return Fail_("The graphics driver gave a black picture (a failed read).");
     }
 
     ++reads_;
@@ -147,19 +142,8 @@ bool SnapshotReader::AcquireExtension_()
     return false;
 }
 
-void SnapshotReader::ReleaseBuffer_()
-{
-    if (buffer_) {
-        buffer_->Release();
-        buffer_ = nullptr;
-    }
-    bufferW_ = 0;
-    bufferH_ = 0;
-}
-
 void SnapshotReader::ReleaseAll_()
 {
-    ReleaseBuffer_();
     if (extension_) {
         extension_->Release();
         extension_ = nullptr;

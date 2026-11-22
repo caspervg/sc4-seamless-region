@@ -13,6 +13,18 @@ must check the tables at start and put the native angles back for the render (an
 mod's per-frame update, or ask it to hand back, as its `PrepareForSave` does for a save), then
 restore. Same check for the batch.
 
+**Guard done (refuse):** the capture refuses to start, and fails mid-render, when the three
+tables or the camera control's yaw (+0x118) and pitch (+0x11c) are not native
+(`NonNativeAngles` in `CityCapturer.cpp`). It also refuses a full render when the view's zoom
+limits are pinned to one level, which the mod does while its free camera is on (the other
+levels would be left out). The batch goes through the same `Start`. Notes from the mod's
+source: it writes the tables only on input or a settle, not every frame, and it turns itself
+off at city shutdown, so later batch cities start native. Left: put the native angles back
+and restore the free ones after the render, instead of refusing. That means saving the three
+tables and the two control fields, writing the natives before `SetZoomAndRotation`, widening
+the zoom limits (save +0x364/+0x368), then restoring all of it in `Restore_` before the
+camera restore. Input during the render would still need blocking. Not checked in game yet.
+
 ## Vector layers and a top-down plan view (idea)
 
 Not started. Considered on 2026-11-19:
@@ -76,7 +88,13 @@ Not started. Considered on 2026-11-19:
    capture, make pixels on the ground outline of the city opaque (`CaptureMath::CityOutline`),
    so each city overlaps its neighbor by at most one pixel. Not for building silhouettes.
 2. **Cracks where terrain does not meet.** When two cities have different heights at their
-   shared edge, the render shows a dark gap (the edge walls are hidden). The game's
+   shared edge, the render showed a dark gap (the edge walls were hidden). Now the capture keeps
+   the two front walls (`CameraBounds::BackEdges`, setting `CaptureEdgeWalls`, on by
+   default), so the gap shows the back city's cliff. Not
+   checked in game: render two neighbors with a height step, look at the seam on the map and in
+   game. Still open: in game, the live city hides its own front walls toward a rendered
+   neighbor (automatic choice), so a gap can show there. Optional later: a gradient fill over the
+   cliff on the map export ("Blend city seams"). The game's
    "Reconcile Edges" tool fixes the data. Options: leave it, fill small holes on the map
    export only, or draw the edge cliff where the neighbor is lower.
 3. **Blue band and lake bed below the city edge.** With the edge walls hidden, the area below
@@ -184,7 +202,9 @@ pixels. The meta stores a magnification per level for this. To do:
 - The map overlay.
 - The in-game "Region map" button and "Open map".
 - Batch started from the region view, cancel and resume there.
-- SCD3D11 readback (pixel format and row order assumed).
+- SCD3D11 and scvk readback. Format and row order are now read from their source
+  (`re-notes/capture.md`, Replacement drivers), and so is the direct `Draw` call that keeps
+  their shadows and ReShade out of the tiles. Neither is checked in game yet.
 
 ## Upstream and housekeeping
 

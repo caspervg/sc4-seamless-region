@@ -95,7 +95,57 @@ OpenGL writes alpha 0xFF. `SnapshotReader` ignores the alpha byte. `cGZBuffer::L
 - A 24 bit surface is copied with the bytes in a different order (0xFF first). Not handled:
   24 bit back buffers do not exist on current Windows.
 
-SCD3D11 implements the same extension. It was not checked here.
+### Replacement drivers
+
+Read from source on 2026-11-20: SCD3D11 `v0.5.0` (`main` is the same commit, `ba5b350`) and
+scvk `aspctt/scvk` main `b869e75` (0.7.1). Both answer `QueryInterface(0xE69BFE2A)` with an
+AddRef.
+
+| | DX7 | SCD3D11 v0.5.0 | scvk 0.7.1 |
+|---|---|---|---|
+| Reads | back buffer | the offscreen render target the game draws into (copied to the swapchain in Flush) | the back buffer image. Mid-frame it ends the render pass, submits and waits. Between frames: the last presented frame |
+| Format | A8R8G8B8, alpha not reliable | A8R8G8B8, alpha 255, top row first | A8R8G8B8, alpha 255, top row first |
+| Rectangle off the window | same size, shifted | smaller buffer (null when wholly outside) | same size, shifted, black fill |
+| `reuse` of another size | grows the rectangle | null, `reuse` not released | copies min(rect, buffer) into it |
+| Failure | null | null, `reuse` not released | a **black buffer** of the asked size, never null when a buffer was passed |
+| Draw slot `0x00ababb4` | `0x007cb530` | patched: live prop shadows and ReShade after the scene | patched: live prop shadows, water reflections and ReShade after the scene |
+
+SCD3D11: `ext/cGDriver_Snapshot.cpp` (staging texture per call, polls `Map` with a 2 s
+timeout, per-pixel `SetPixel`), `cGDriver_ReShade.cpp:41` (slot hook). scvk:
+`src/cVKDriver_Ext.cpp:225-340`, `VulkanBackend.cpp:3508` (`ReadFramePixels`),
+`cVKDriver_ReShade.cpp` (slot hook). scvk reports the OpenGL class ID but clamps like DX7.
+
+**The crash on SCD3D11 (found 2026-11-20).** Exception reports of 2026-11-19 19:37, 20:57 and
+22:22 all stop at `0x008268f7` (`mov [eax],edx`), called from SCD3D11.dll + 0x68f7e. EDX = 9
+(A8R8G8B8), the read was 16 x 16 (the calibration size), and EAX is a garbage pointer. The
+function at `0x008268f0` is in slots 14 and 15 of the `cGZBuffer` vtable `0x00ac1400`: it
+copies `+0xc` (color type) and `+0x10` (bit depth) to the pointer at `[esp+4]` and returns with
+`RET 4`. Both `GetColorType` overloads land there because MSVC returns a class by value
+through a hidden pointer, so `cGZBufferColorType GetColorType()` (gzcom-dll) and
+`GetColorType(cGZBufferColorType&)` compile to the same code. SCD3D11's `cIGZBuffer.h`
+declares `eColorType GetColorType() const` (an enum in EAX, no pointer). It calls that only
+for a ready `reuse` buffer (`ext/cGDriver_Snapshot.cpp`, the size and type check). The game's
+photo code never passes one, but `SnapshotReader` did from the second read of a size on, so
+the game wrote 8 bytes through a stack value. Result: an access violation, or memory damage
+that crashes later elsewhere. The other crashes that night (`0x005b9feb`, `0x006c0229`, a
+`memmove` in this DLL) fit that pattern, but this is not proven. Fix here: never pass
+`reuse`. Fix in SCD3D11: declare `GetColorType` like gzcom-dll does, or use
+`GetBytesPerPixel` as scvk does.
+
+What the capture does about it:
+
+- `SnapshotReader::Read` always passes `reuse = nullptr` (see above).
+
+- It calls `0x007cb530` directly instead of `Draw` through the vtable (`DrawScene` in
+  `CityCapturer.cpp`), so the drivers' shadows, reflections and ReShade effects stay out of
+  the tiles. Spatial effects (bloom, vignette) would otherwise break the key color matting.
+  sc4-render-services hooks call sites inside Draw, so its passes still run.
+- `SnapshotReader::Read` treats a pure black picture as a failed read (scvk).
+- The rectangle check against the viewport stays: scvk shifts a clamped rectangle like DX7.
+- With no `reuse` buffer, every driver releases its own buffer on a failure, so nothing leaks.
+
+If SCD3D11 becomes as lenient as scvk (black buffer instead of null, any `reuse` size), the
+plugin already copes: the black check catches failures and no `reuse` buffer is passed.
 
 ## Model loading (cSC4ModelMaker)
 
@@ -233,7 +283,8 @@ transport levels when the transport layer is off. So stale tiles never show and 
 only levels that are on disk.
 
 **What stays out of the tiles.** Neighbor tiles (`NeighborRenderer::SetEnabled(false)`), the
-edge walls (`CameraExtender::SetEdgeWallsHidden(all)`), the hover tint and the map overlay (both
+back edge walls (`CameraExtender::SetEdgeWallsHidden(CameraBounds::BackEdges(rotation))`, set
+again for every level; it replaces the automatic choice), the hover tint and the map overlay (both
 check `CityCapturer::IsRunning()` themselves, the capture changes no setting for them).
 
 **A save during a render.** The game makes the region picture of the city inside the save,

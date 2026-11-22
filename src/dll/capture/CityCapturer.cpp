@@ -25,6 +25,7 @@
 #include "cISTETerrainView.h"
 #include "cIGZMessage2Standard.h"
 #include "public/cIGZWorldDrawService.h"
+#include "camera/CameraBounds.hpp"
 #include "capture/CameraAdapter.hpp"
 #include "capture/CaptureAddresses.hpp"
 #include "capture/ModelLoadMonitor.hpp"
@@ -57,7 +58,6 @@ namespace
     // never trusts these numbers: it reads both colors back from the screen (calibration).
     constexpr uint32_t kKeyColorA = 0xFF00FFFFu;  // magenta
     constexpr uint32_t kKeyColorB = 0x00FF00FFu;  // green
-    constexpr uint32_t kAllEdges = 0xF;
 
     // Room above the highest terrain for buildings. The tallest lots of the game and of
     // custom content stay below this. A larger value only adds tiles that are found empty
@@ -169,6 +169,52 @@ namespace
         // void cSC4CameraControl::SetCustomMagnification(float), __thiscall.
         using Fn = void(__fastcall*)(void* self, void* edx, float magnification);
         reinterpret_cast<Fn>(CC::kSetCustomMagnification)(camera, nullptr, magnification);
+    }
+
+    // A free camera mod (sc4-modern-camera) writes its own yaw and pitch into the game's
+    // global angle tables and the camera control. The capture math assumes the native angles
+    // (ViewMath), so a render at a free angle gives wrong tiles. Returns why the view is not
+    // native, or nullptr. Cheap enough to call before every block: the mod writes again on
+    // any wheel, drag or key input.
+    const char* NonNativeAngles(const CameraFrame& frame)
+    {
+        namespace VU = GameAddresses::ViewUtilities;
+        constexpr const char* kWhy = "The camera is at a free angle (a camera mod such as sc4-modern-camera). Turn "
+                                     "the free camera off before rendering.";
+        const auto same = [](const float a, const float b) { return std::fabs(a - b) < 1e-5f; };
+        const auto* yaw = reinterpret_cast<const float*>(VU::kOrthoAngleTable);
+        const auto* pitchA = reinterpret_cast<const float*>(VU::kPitchTable);
+        const auto* pitchB = reinterpret_cast<const float*>(VU::kPitchTable2);
+        const float nativeYaw = ViewMath::YawOffsetRadians();
+        for (int z = 0; z < ViewMath::kZoomCount; ++z) {
+            const float pitch = ViewMath::PitchRadians(z);
+            if (!same(yaw[z], nativeYaw) || !same(pitchA[z], pitch) || !same(pitchB[z], pitch)) {
+                return kWhy;
+            }
+        }
+        if (!same(frame.yawOffsetRadians, nativeYaw) || !same(frame.pitchRadians, ViewMath::PitchRadians(frame.zoomIndex))) {
+            return kWhy;
+        }
+        return nullptr;
+    }
+
+    // cSC43DRender::Draw itself, not through the vtable. SCD3D11 and scvk patch the vtable slot
+    // (0x00ababb4) to add live prop shadows, water reflections (scvk) and ReShade effects after
+    // the scene. Those would land in the tiles, differ per driver and user, and a color effect
+    // (bloom, vignette) breaks the key color matting. sc4-render-services hooks call sites
+    // inside Draw, so its passes still run.
+    // The walls a render hides. With Settings::captureEdgeWalls the front walls stay: where the
+    // neighbor in front is lower, its tile shows this cliff instead of the background. The
+    // neighbor covers it where it is higher.
+    uint32_t HiddenWalls(const Settings* settings, const int rotation)
+    {
+        return settings && !settings->captureEdgeWalls ? CameraBounds::kAllEdges : CameraBounds::BackEdges(rotation);
+    }
+
+    void DrawScene(cISC43DRender* renderer)
+    {
+        using Fn = bool(__thiscall*)(cISC43DRender*);
+        reinterpret_cast<Fn>(GameAddresses::Renderer::kDraw)(renderer);
     }
 
     std::array<float, 4> RgbaToFloats(const uint32_t rgba)
@@ -291,6 +337,16 @@ bool CityCapturer::Begin_(const bool testTile, const CaptureRequest& request)
         return refuse("The camera of the city view cannot be read.");
     }
     const CameraFrame& frame = ctx_.cameraReader->Frame();
+    if (const char* why = NonNativeAngles(frame)) {
+        return refuse(why);
+    }
+    if (!testTile &&
+        GameAccess::ReadField<int32_t>(game.view, CaptureAddresses::kZoomLowerLimitOffset) ==
+            GameAccess::ReadField<int32_t>(game.view, CaptureAddresses::kZoomUpperLimitOffset)) {
+        // Every other zoom level would be left out (StepLevelBegin_).
+        return refuse("The zoom is locked to one level (a camera mod such as sc4-modern-camera). Turn the free "
+                      "camera off before rendering.");
+    }
 
     const CityInfo* current = ctx_.region ? ctx_.region->Current() : nullptr;
     if (!testTile) {
@@ -629,7 +685,7 @@ bool CityCapturer::StepPrepare_()
         saved_.clampForced = true;
     }
     if (ctx_.cameraExtender) {
-        saved_.wallMaskBefore = CameraAdapter::SetEdgeWallsHidden(ctx_.cameraExtender, kAllEdges);
+        saved_.wallMaskBefore = CameraAdapter::SetEdgeWallsHidden(ctx_.cameraExtender, HiddenWalls(ctx_.settings, frame.rotation));
         saved_.wallsHidden = true;
     }
 
@@ -734,7 +790,7 @@ bool CityCapturer::StepCalibrate_(const bool second)
     }
 
     game.renderer->ForceFullRedraw();
-    game.renderer->Draw();
+    DrawScene(game.renderer);
     if (!ctx_.snapshotReader->Read(0, 0, kCalibrationSize, kCalibrationSize, readBuffer_)) {
         return Fail_("The screen could not be read back: " + ctx_.snapshotReader->LastError());
     }
@@ -823,6 +879,9 @@ bool CityCapturer::StepLevelBegin_()
         ctx_.cameraReader->Update();
     }
     const CameraFrame& frame = ctx_.cameraReader->Frame();
+    if (const char* why = NonNativeAngles(frame)) {
+        return Fail_(why);
+    }
     if (frame.zoomIndex != level.zoom || frame.rotation != level.rotation || frame.magnification != 1.0f) {
         if (++levelRetries_ <= kMaxLevelRetries) {
             return true;  // try again on the next tick
@@ -836,6 +895,9 @@ bool CityCapturer::StepLevelBegin_()
         progress_.total -= level.tiles;
         NextLevel_();
         return true;
+    }
+    if (saved_.wallsHidden) {
+        CameraAdapter::SetEdgeWallsHidden(ctx_.cameraExtender, HiddenWalls(ctx_.settings, level.rotation));
     }
     if (level.transport && !saved_.transportPushed && !PushTransport_()) {
         if (phase_ == Phase::Idle) {
@@ -1022,6 +1084,10 @@ bool CityCapturer::StepBlock_()
         }
     }
     const CameraFrame& frame = ctx_.cameraReader->Frame();
+    // Input during the render (wheel, drag, ALT) makes a camera mod write its angles again.
+    if (const char* why = NonNativeAngles(frame)) {
+        return Fail_(why);
+    }
 
     // 2. Check where the game really puts it. A screen shake moves the view by parts of a pixel.
     if ((frame.positionTweak.fX != 0.0f || frame.positionTweak.fY != 0.0f) && shakeTicks_ < kMaxShakeTicks) {
@@ -1057,7 +1123,7 @@ bool CityCapturer::StepBlock_()
     // 4. Draw and read. This is the one draw and the one read of this tick.
     const auto drawStart = Clock::now();
     game.renderer->ForceFullRedraw();
-    game.renderer->Draw();
+    DrawScene(game.renderer);
     ++framesDrawn_;
     const auto readStart = Clock::now();
     timing_.drawMs += MsSince(drawStart);
