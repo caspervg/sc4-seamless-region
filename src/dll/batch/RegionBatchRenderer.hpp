@@ -141,6 +141,9 @@ private:
     bool captureDone_ = false;
     bool captureOk_ = false;
     std::string stallReason_;
+    std::string memoryStop_;  // set when the render was stopped for address space
+    uint32_t lowestFreeMB_ = UINT32_MAX;     // during the render of current_
+    uint32_t lowestLargestMB_ = UINT32_MAX;
     int lastDone_ = -1;
     Clock::time_point lastProgress_{};
     Clock::time_point lastProgressRead_{};

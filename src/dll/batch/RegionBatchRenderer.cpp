@@ -51,9 +51,19 @@ namespace
     // Free address space below which no further city is opened (see Next_).
     // A city load needs a few hundred MB in one piece. In a 2026-11-21 run the free space
     // stayed near 1.8 GB (largest piece 1.6 GB) for most cities, then fell by about 200 MB a city.
-    // ponytail: tuned from two runs; the Opening lines log the numbers for more tuning.
-    constexpr uint32_t kMinFreeMB = 1200;
+    // The first city load takes about 1.3 GB that the game keeps (closing the city gave back 33 MB
+    // on 2026-11-22). A load fails on the largest free piece (the crash had 1.7 GB free in pieces),
+    // so the total only guards the extreme.
+    // ponytail: tuned from three runs; the Opening lines log the numbers for more tuning.
+    constexpr uint32_t kMinFreeMB = 640;
     constexpr uint32_t kMinLargestFreeMB = 384;
+    // While a city renders: below this the render is stopped before an allocation fails. A render
+    // allocates the screen read-back in one piece (about 28 MB at 3840 x 2160), and on 2026-11-22
+    // the game crashed on that in Labrieville, a large render (7552 tiles) from a small save
+    // (2.7 MB), so the city's size is not known before it renders.
+    // ponytail: guessed with room for a few of those buffers; the Rendered lines log the lowest.
+    constexpr uint32_t kStopFreeMB = 320;
+    constexpr uint32_t kStopLargestFreeMB = 160;
 
     struct AddressSpace
     {
@@ -494,26 +504,28 @@ void RegionBatchRenderer::Next_()
         }
         current_ = BatchQueue::ToEntry(*city);
         run_.pending.front() = current_;
+
+        const CityInfo* open = ctx_.region->Current();
+        const bool alreadyOpen = open && open->key == current_.key && cityReady_;
+        // Every city load leaves the 32 bit game with less address space (a run crashed in
+        // LoadCity after 43 cities with about 1.7 GB free in pieces). Stop while the run can
+        // still go on after a restart of the game: it stays in batch.json.
+        const AddressSpace room = alreadyOpen ? AddressSpace{} : FreeAddressSpace();
+        if (!alreadyOpen && (room.totalMB < kMinFreeMB || room.largestMB < kMinLargestFreeMB)) {
+            Interrupt_(std::format("The game has {} MB of address space left (largest piece {} MB), too little to "
+                                   "load another city safely. Restart the game and continue the region render.",
+                                   room.totalMB, room.largestMB));
+            return;
+        }
+
         const int attempt = BatchQueue::BeginAttempt(run_, current_.key);
         SaveRun_();
         cityStart_ = Clock::now();
         phaseStart_ = cityStart_;
-
-        const CityInfo* open = ctx_.region->Current();
-        if (open && open->key == current_.key && cityReady_) {
+        if (alreadyOpen) {
             Log_(std::format("Rendering '{}' (attempt {})", current_.name, attempt));
             phase_ = Phase::Settle;
             settleTicks_ = 0;
-            return;
-        }
-        // Every city load leaves the 32 bit game with less address space (a run crashed in
-        // LoadCity after 43 cities with about 1.7 GB free in pieces). Stop while the run can
-        // still go on after a restart of the game: it stays in batch.json.
-        const AddressSpace room = FreeAddressSpace();
-        if (room.totalMB < kMinFreeMB || room.largestMB < kMinLargestFreeMB) {
-            Interrupt_(std::format("The game has {} MB of address space left (largest piece {} MB), too little to "
-                                   "load another city safely. Restart the game and continue the region render.",
-                                   room.totalMB, room.largestMB));
             return;
         }
         // A city this run opened has no changes of the player: switching without a save loses
@@ -713,6 +725,8 @@ void RegionBatchRenderer::StepSettle_()
     captureOk_ = false;
     cancelSent_ = false;
     stallReason_.clear();
+    memoryStop_.clear();
+    lowestFreeMB_ = lowestLargestMB_ = UINT32_MAX;
     lastDone_ = -1;
     lastProgress_ = Clock::now();
     lastProgressRead_ = Clock::time_point{};
@@ -761,6 +775,18 @@ void RegionBatchRenderer::StepCapture_()
                 lastDone_ = captureProgress_.done;
                 lastProgress_ = now;
             }
+            const AddressSpace room = FreeAddressSpace();
+            lowestFreeMB_ = std::min(lowestFreeMB_, room.totalMB);
+            lowestLargestMB_ = std::min(lowestLargestMB_, room.largestMB);
+            if (!cancelSent_ && (room.totalMB < kStopFreeMB || room.largestMB < kStopLargestFreeMB)) {
+                memoryStop_ = std::format("The game ran low on address space while '{}' rendered ({} MB left, "
+                                          "largest piece {} MB). Restart the game and continue the region render: "
+                                          "'{}' renders again.",
+                                          current_.name, room.totalMB, room.largestMB, current_.name);
+                LOG_WARN("Batch: {} Stopping its render.", memoryStop_);
+                ctx_.capturer->Cancel();
+                cancelSent_ = true;
+            }
             else if (now - lastProgress_ > kCaptureStall && !cancelSent_) {
                 stallReason_ = "The render made no progress for 10 minutes.";
                 LOG_WARN("Batch: {} Cancelling the render of '{}'.", stallReason_, current_.name);
@@ -794,8 +820,20 @@ void RegionBatchRenderer::StepCapture_()
                 }
             }
         }
-        Log_(std::format("Rendered '{}' in {} min {} s", current_.name, static_cast<int>(seconds) / 60,
-                         static_cast<int>(seconds) % 60));
+        Log_(std::format("Rendered '{}' in {} min {} s (lowest during the render: {} MB address space free, "
+                         "largest piece {} MB)",
+                         current_.name, static_cast<int>(seconds) / 60, static_cast<int>(seconds) % 60, lowestFreeMB_,
+                         lowestLargestMB_));
+    }
+    else if (!memoryStop_.empty()) {
+        // Not the city's fault: give its attempt back, so a restart renders it again instead of
+        // skipping it after kMaxAttempts.
+        if (int& attempts = run_.attempts[current_.key]; attempts > 0) {
+            --attempts;
+        }
+        SaveRun_();
+        Interrupt_(memoryStop_);
+        return;
     }
     else if (cancelRequested_ && stallReason_.empty()) {
         // Stays in pending: a cancelled run keeps what is left.
