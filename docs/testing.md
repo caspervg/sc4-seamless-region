@@ -1,7 +1,7 @@
 # In-game tests
 
-Nothing in this plugin has run in the game yet. Start with "First run": it tests the parts
-that can go wrong hardest first, with the least work. Each step points to the module section
+On a new install, a new game build or a new driver, start with "First run": it tests the
+parts that can go wrong hardest first, with the least work. Each step points to the module section
 below it, which has the full checks and the log lines that prove them. The log file is
 `SC4SeamlessRegion.log` in the folder above Plugins (the SimCity 4 user folder).
 
@@ -26,7 +26,7 @@ below it, which has the full checks and the log lines that prove them. The log f
    `SC4SeamlessRegion.dll` into `SC4_PLUGINS_DIR` (default `Documents\SimCity 4\Plugins`) and
    copies `dist/SC4SeamlessRegion.ini` next to it when no INI is there yet. For another
    install pass `-DSC4_PLUGINS_DIR=<its Plugins folder>`. With
-   `-DSC4_ENABLE_PLUGIN_DEPLOYMENT=OFF` (what the agents use) nothing is copied: copy
+   `-DSC4_ENABLE_PLUGIN_DEPLOYMENT=OFF` nothing is copied: copy
    `cmake-build-release-visual-studio/src/dll/Release/SC4SeamlessRegion.dll` and
    `dist/SC4SeamlessRegion.ini` into the Plugins folder by hand. A DLL in the root of the
    game's own Plugins folder loads too, so keep only one copy.
@@ -376,7 +376,7 @@ driver, SCD3D11 and scvk. Panel: Tools, group "Neighbors".
 
 ### Start and city load
 
-1. Log at start: `Tile cache: ready, limit 256 MB` and
+1. Log at start: `Tile cache: ready, limit 512 MB` and
    `Neighbors: draw callbacks registered (back at the start of PreStatic, front at the end of PostStatic)`.
 2. Open a city with rendered neighbors. Log: `Neighbors: N of M founded neighbor cities have a render`.
 3. The neighbors appear around the city once the store has indexed the renders folder (a second or
@@ -604,10 +604,50 @@ city with roads, rail, a highway and zones.
 4. With "Render at noon" on, save the city (Ctrl+S) during a full render. The region picture
    looks as after a normal save, and the render goes on at noon.
 
+### Render at date
+
+1. A city at night with lit buildings, "Render at noon" on: the tiles show no lit windows, and
+   after the render the windows light again (gradually, as at dusk).
+2. "Render at date" on, January 15, "Seasonal trees" on. The log says `Capture: at January 15:
+   N props and M of K trees changed in X ms`. The tiles show winter props (Girafe, Neko, CP
+   seasonal sets) and bare deciduous trees, snowy Girafe conifers. After the render the city
+   looks as before.
+3. The same city at June 1 and at October 1: summer and fall looks. A city planted on Sep 1 in
+   game at its own date shows the same trees as its render at that month.
+4. Save (Ctrl+S) during a render at a date: the log says `the date overrides are off for the
+   save`. Load the save: props and trees show the city's own date, no tree is missing.
+5. Close the city during such a render, and a render that is cancelled: no tree is missing
+   afterwards, and the monthly flora update after a month of play keeps every tree.
+
+### Render all seasons
+
+1. Defaults (June 15), "Render all seasons" on, rotations 1 to 4. Render a city. The log has
+   three `Capture: next render, <season> at <month>/15` lines after the first render (spring,
+   fall, winter), and the city stays open between them. The city folder gets `@spring`,
+   `@fall` and `@winter` subfolders with levels in all four rotations.
+2. Play a neighbor while its date is in winter: the rendered city shows its winter render in
+   every rotation.
+3. Region render with "Render all seasons" on, then continue it after a quit: a city whose
+   main render is done but whose winter render is missing renders only winter.
+
+### Faster renders
+
+1. Settings: "Rotations" 1 only, render a city. The log names only rotation 0 levels, the
+   render takes about a quarter of the time, and the neighbor shows in rotation 1 only. Turn
+   rotation 2 on: the batch counts the city as out of date (rotation 2 is missing).
+2. With "Rotations" 1 to 4 again, render a city on the edge of the map. The log line
+   `Capture: time in ms: ...` has a lower draw time than before for the same city. Compare the
+   edge tiles with a render with `CapturePartialRedraw=false`: the same alpha along the city
+   edge, no holes or magenta or green specks.
+3. A small city at zoom 1 (the whole city on screen): if the log says `a partial redraw kept
+   the first key color`, the tiles of that level are still right (whole windows from there).
+4. A 4K window: the log line `Capture: rotation r zoom 5: N tiles` and the frame count in the
+   finish line show about 28 tiles per frame for 512 px tiles.
+
 ## Batch
 
 Use a small test region with 3 to 5 founded cities and one empty tile. Copy the region first:
-the batch saves every city. The log lines start with `Batch:` in the plugin log. The same lines
+the batch saves the city it starts in, and every city with "Save each city" on. The log lines start with `Batch:` in the plugin log. The same lines
 (without the prefix) go to `<Region>/RegionRenders/batch.log`.
 
 ### Start
@@ -704,6 +744,9 @@ Start the game and stay in the region view. Open the panel with Ctrl+Shift+F9.
    it opens the next city from there and at the end opens its start city.
 9. A city that cannot be saved (for example a tutorial city) in a region view run: the run goes
    on to the next city without a save of it.
+10. "Save each city" off (the default): the log says `Switching: step 2, '<city>' is not saved, as asked` for
+    the cities the run opened, the save files of those cities keep their time, and their renders
+    count as up to date afterwards. The city the run started in is still saved.
 
 
 

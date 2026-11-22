@@ -1,6 +1,6 @@
 #pragma once
 
-// Store (W2-D): reads and writes the rendered tiles of every city of the region.
+// Store: reads and writes the rendered tiles of every city of the region.
 //
 // Layout: <Region>/RegionRenders/<cityKey>/r<rot>z<zoom>/<tx>_<ty>.webp, the transport layer in
 // t<rot>z<zoom>/ with the same tile names, and <Region>/RegionRenders/<cityKey>/meta.json. Fully
@@ -30,10 +30,13 @@
 
 #include "core/GameAccess.hpp"
 #include "region/RegionLayout.hpp"
+#include "store/Seasons.hpp"
+
+class Settings;
 
 struct TileKey
 {
-    std::string cityKey;  // CityInfo::key
+    std::string cityKey;  // CityInfo::key, or a season slot of it (Seasons::StorageKey)
     int rotation = 0;     // 0..3
     int zoom = 0;         // zoom index 0..4
     int tx = 0;           // ViewMath::TileGrid tile column
@@ -66,6 +69,12 @@ struct CityRenderMeta
     // is the last write time of the save file when rendered.
     int64_t saveFileTime = 0;
     int64_t renderTime = 0;
+    // The date of Render at date ("renderDate" in meta.json), 0 and 0 for the city's own date
+    // (also every meta written before the field).
+    int renderMonth = 0;
+    int renderDay = 0;
+    // Render at noon ("noon"). Unknown in metas written before the field: never compared.
+    std::optional<bool> noon;
     // Typical ground height of the city in metres, for outlines on the region map. Optional:
     // metas written before it was added have none.
     std::optional<float> groundHeight;
@@ -110,13 +119,17 @@ namespace CityMeta
     // no level fits.
     [[nodiscard]] const CityRenderMeta::Level* ChooseLevel(const std::vector<CityRenderMeta::Level>& levels,
                                                            int rotation, int viewZoom);
-    // Every rotation has every zoom index from 0 to maxZoom, with transport = true also in the
-    // transport layer.
-    [[nodiscard]] bool HasLevelsUpTo(const CityRenderMeta& meta, int maxZoom, bool transport = false);
+    // Every rotation in rotations (bit r for rotation r) has every zoom index from 0 to maxZoom,
+    // with transport = true also in the transport layer.
+    [[nodiscard]] bool HasLevelsUpTo(const CityRenderMeta& meta, int maxZoom, bool transport = false,
+                                     uint32_t rotations = 0xF);
     // The batch rule: a city needs a render when its render is stale (IsStale) or a level up to
     // maxZoom (zoom index) is missing. With transport, a missing transport level counts too.
+    // Also when the render's date (month and day, 0 and 0 for the city's own) or its noon differs
+    // from the wanted one. A meta without the noon field never counts as different there.
     [[nodiscard]] bool NeedsRender(const std::optional<CityRenderMeta>& meta, int64_t saveFileTime, int maxZoom,
-                                   bool transport = false);
+                                   bool transport = false, uint32_t rotations = 0xF, int month = 0, int day = 0,
+                                   std::optional<bool> noon = std::nullopt);
     // An earlier render has `wanted` already: a level of the same rotation, zoom and layer on the
     // same tile grid (tile counts, origin within half a pixel, magnification). The save time is
     // not checked: the caller decides that the city did not change.
@@ -128,16 +141,20 @@ namespace CityMeta
     // levels when the new render has none. All of them must go when the city was saved after
     // that render (its saveFileTime differs from saveFileTime), else none. They stay while they
     // still show the city as it is.
+    // A rotation outside rotations (bit r for rotation r) goes the same way.
     [[nodiscard]] std::vector<CityRenderMeta::Level> LevelsToDrop(const CityRenderMeta& earlier, int maxZoom,
-                                                                  int64_t saveFileTime, bool transport = false);
+                                                                  int64_t saveFileTime, bool transport = false,
+                                                                  uint32_t rotations = 0xF);
 }
 
 class TileStore final : public Module
 {
 public:
     // Encode queue capacity in tiles. QueueWrite returns false when it is full, and then
-    // leaves the caller's rgba buffer intact so the caller can retry with it.
-    static constexpr size_t kQueueCapacity = 24;
+    // leaves the caller's rgba buffer intact so the caller can retry with it. Room for a whole
+    // capture block (up to 32 tiles, CaptureMath::kMaxBlockPixels) and two more, so
+    // the capture does not wait on every block. 1 MB per 512 px tile.
+    static constexpr size_t kQueueCapacity = 96;
     static constexpr const char* kFolderName = "RegionRenders";
 
     TileStore() = default;
@@ -159,11 +176,25 @@ public:
     // Cached after the first read. Nullopt when there is no meta.json or it is invalid (logged
     // once per city).
     [[nodiscard]] std::optional<CityRenderMeta> LoadMeta(const std::string& cityKey) const;
-    // True when the city has no render or its save file differs from the rendered one.
-    [[nodiscard]] bool IsStale(const CityInfo& city) const;
-    // CityMeta::NeedsRender for the city's save file: stale, or a level up to maxZoom (zoom
-    // index) is missing, with transport also a transport level.
-    [[nodiscard]] bool NeedsRender(const CityInfo& city, int maxZoom, bool transport = false) const;
+    // True when the render in `storageKey` (a city key or a season slot of it) is missing or its
+    // save file differs from the rendered one.
+    [[nodiscard]] bool IsStale(const CityInfo& city, const std::string& storageKey) const;
+    [[nodiscard]] bool IsStale(const CityInfo& city) const { return IsStale(city, city.key); }
+    // CityMeta::NeedsRender of the render in `storageKey` for the city's save file.
+    [[nodiscard]] bool NeedsRender(const CityInfo& city, const std::string& storageKey, int maxZoom, bool transport,
+                                   uint32_t rotations, int month, int day, std::optional<bool> noon) const;
+    // Whether one render of the city (Seasons::RenderPasses) needs making with these settings.
+    // Season slots have no transport layer.
+    [[nodiscard]] bool NeedsRender(const CityInfo& city, const Seasons::Pass& pass, const Settings& settings) const;
+    // Whether any render of the city that the settings ask for needs making.
+    [[nodiscard]] bool NeedsRender(const CityInfo& city, const Settings& settings) const;
+    // The render to show for a city whose neighbor is in season `wanted`: the first of
+    // Seasons::FallbackOrder that has a meta.json, where a main render made at a date counts as
+    // the slot of its season. The city key when there is none.
+    [[nodiscard]] std::string ChooseStorageKey(const std::string& cityKey, Season wanted) const;
+    // Every storage key of the city with a meta.json, in the order of ChooseStorageKey: the first
+    // is its choice, the rest stand in for views (rotation, zoom) that the first has no level for.
+    [[nodiscard]] std::vector<std::string> StorageKeysInOrder(const std::string& cityKey, Season wanted) const;
     // Cached directory index, no disk hit and no allocation per call once a city is indexed.
     // The first call for a city that the background scan has not reached yet scans that city.
     [[nodiscard]] bool HasTile(const TileKey& key) const;

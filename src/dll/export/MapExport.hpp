@@ -25,6 +25,7 @@
 
 #include "cS3DVector2.h"
 #include "region/RegionLayout.hpp"
+#include "store/Seasons.hpp"
 
 namespace MapExport
 {
@@ -58,6 +59,11 @@ namespace MapExport
         // Also make the transport layer (tiles-transport/) when a city has transport levels at
         // the source zoom and rotation.
         bool transport = true;
+        // The season slot to show, with Seasons::FallbackOrder per city. Main: the main renders.
+        Season season = Season::Main;
+        // By Season: which season layers the map may get (each only when a city has a render of
+        // that season). Main is not used.
+        std::array<bool, 5> seasonLayers{false, true, true, true, true};
     };
 
     enum class Phase : int
@@ -73,7 +79,7 @@ namespace MapExport
     {
         std::atomic<int> phase{static_cast<int>(Phase::Reading)};
         std::atomic<int> zoom{0};  // the Leaflet zoom being made
-        std::atomic<int> layer{0};  // 0 the normal view, 1 the transport view
+        std::atomic<int> layer{0};  // 0 the normal view, 1 the transport view, 2..5 spring..winter
         std::atomic<int64_t> done{0};
         std::atomic<int64_t> total{0};
         std::atomic<int> sourceZoom{-1};        // zoom index, known after Reading
@@ -123,8 +129,17 @@ namespace MapExport
         int rotation = 0;     // 0..3
         int sourceZoom = 3;   // zoom index of the city renders
         bool transport = false;  // tiles-transport/ exists
+        std::vector<std::string> seasons;  // "spring" .. "winter": tiles-<season>/ exists
         std::vector<PageCity> cities;
     };
 
     [[nodiscard]] std::string BuildPage(const Page& page);
+
+    // " of the transport view", " of the winter view", ... for Progress::layer; empty for the map.
+    [[nodiscard]] inline const char* LayerText(const int layer)
+    {
+        constexpr const char* kText[] = {"", " of the transport view", " of the spring view", " of the summer view",
+                                         " of the fall view", " of the winter view"};
+        return layer >= 0 && layer < 6 ? kText[layer] : "";
+    }
 }

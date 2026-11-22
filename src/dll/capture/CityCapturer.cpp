@@ -5,12 +5,14 @@
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <format>
 #include <fstream>
 #include <limits>
 
 #include <webp/encode.h>
 
 #include "cISC43DRender.h"
+#include "cISC424HourClock.h"
 #include "cISC4App.h"
 #include "cISC4City.h"
 #include "cISC4LightingManager.h"
@@ -30,9 +32,12 @@
 #include "capture/CaptureAddresses.hpp"
 #include "capture/ModelLoadMonitor.hpp"
 #include "batch/RegionBatchRenderer.hpp"
+#include "capture/SeasonRules.hpp"
 #include "capture/SnapshotReader.hpp"
 #include "core/GameAddresses.hpp"
 #include "core/Guard.hpp"
+#include "cIGZGDriver.h"
+#include "render/RenderAddresses.hpp"
 #include "core/IdleScheduler.hpp"
 #include "core/Messages.hpp"
 #include "imgui.h"
@@ -72,7 +77,11 @@ namespace
     constexpr float kOccupantTopMarginMetres = 10.0f;
     constexpr uint32_t kFloraOccupantType = 0x74758926u;
     // Work per idle tick while steps make progress. The window repaints between ticks.
-    constexpr double kTickBudgetMs = 200.0;
+    // The game draws a frame of its own between ticks, so longer ticks waste fewer frames.
+    constexpr double kTickBudgetMs = 500.0;
+    // delayFrames for AddDirtyRectangle: the next Draw processes the rectangles whatever the
+    // merge delay of the render properties is (AddDirtyRectangleInternal 0x007c8f30).
+    constexpr int kDirtyAgeFrames = 1 << 20;
 
     // Everything but flora: trees are low and a city has very many of them.
     class NoFloraFilter final : public cSC4BaseOccupantFilter
@@ -278,9 +287,34 @@ void CityCapturer::OnCityShutdown()
     }
 }
 
-bool CityCapturer::Start(const CaptureRequest& request) { return Begin_(false, request); }
+bool CityCapturer::Start(const CaptureRequest& request)
+{
+    if (phase_ != Phase::Idle) {
+        LOG_WARN("Capture: a render runs already");
+        return false;
+    }
+    request_ = request;
+    passIndex_ = 0;
+    const Settings* s = ctx_.settings;
+    const Seasons::Date date = s ? Seasons::Date{s->RenderMonth(), s->RenderDay()} : Seasons::Date{};
+    // Adding the transport layer touches the main render only.
+    passes_ = Seasons::RenderPasses(date, s && s->RenderAllSeasons() && !request.addTransport);
+    const CityInfo* city = ctx_.region ? ctx_.region->Current() : nullptr;
+    if (request.onlyNeeded && s && city && !request.addTransport) {
+        std::erase_if(passes_, [&](const Seasons::Pass& pass) { return !ctx_.tileStore->NeedsRender(*city, pass, *s); });
+        if (passes_.empty()) {
+            passes_.push_back({Season::Main, date});  // up to date: one pass, as a plain Start
+        }
+    }
+    return Begin_(false, request);
+}
 
-bool CityCapturer::StartTestTile() { return Begin_(true, CaptureRequest()); }
+bool CityCapturer::StartTestTile()
+{
+    passes_.clear();
+    passIndex_ = 0;
+    return Begin_(true, CaptureRequest());
+}
 
 void CityCapturer::Cancel()
 {
@@ -357,7 +391,12 @@ bool CityCapturer::Begin_(const bool testTile, const CaptureRequest& request)
             return refuse("The folder for the renders of this region is not known.");
         }
     }
-    cityKey_ = current ? current->key : std::string();
+    // With season slots a render at a date goes to the slot of its season, else to the main render.
+    // Adding the transport layer always goes to the main render: season slots have none (no
+    // props or flora show in the transport view).
+    cityKey_ = !current                    ? std::string()
+               : passIndex_ < passes_.size() ? Seasons::StorageKey(current->key, passes_[passIndex_].slot)
+                                             : current->key;
     savePath_ = current ? current->savePath : std::filesystem::path();
     cellX_ = current ? current->cellX : 0;
     cellZ_ = current ? current->cellZ : 0;
@@ -399,8 +438,10 @@ bool CityCapturer::Begin_(const bool testTile, const CaptureRequest& request)
     tileSize_ = CityRenderMeta().tileSize;
 
     testTile_ = testTile;
-    transport_ = !testTile && ((ctx_.settings && ctx_.settings->captureTransportLayer) || request.transport ||
-                               request.addTransport);
+    const bool seasonSlot = Seasons::Split(cityKey_).second != Season::Main;
+    transport_ = !testTile && !seasonSlot &&
+                 ((ctx_.settings && ctx_.settings->captureTransportLayer) || request.transport || request.addTransport);
+    addTransportOnly_ = request.addTransport;
     levels_.clear();
     if (testTile) {
         Level level;
@@ -497,6 +538,8 @@ bool CityCapturer::Begin_(const bool testTile, const CaptureRequest& request)
 
 void CityCapturer::BuildLevels_(const CaptureRequest& request)
 {
+    partialOff_ = false;
+    partialOffLogged_ = false;
     maxZoom_ = request.maxZoom >= 0 ? request.maxZoom : ctx_.settings ? ctx_.settings->MaxRenderZoomIndex() : 3;
     maxZoom_ = std::clamp(maxZoom_, Settings::kMinRenderZoom - 1, Settings::kMaxRenderZoom - 1);
     // Adding the transport layer: the normal levels of the earlier render stay where the grid is
@@ -508,7 +551,23 @@ void CityCapturer::BuildLevels_(const CaptureRequest& request)
             earlier.reset();
         }
     }
-    for (const auto& [r, z] : CaptureMath::LevelOrder(maxZoom_, request.rotations)) {
+    std::vector<int> rotations = request.rotations;
+    if (rotations.empty() && ctx_.settings) {
+        rotations_ = ctx_.settings->RenderRotationMask();
+        for (int r = 0; r < ViewMath::kRotationCount; ++r) {
+            if (rotations_ >> r & 1u) {
+                rotations.push_back(r);
+            }
+        }
+    }
+    else {
+        rotations_ = 0;
+        for (const int r : rotations) {
+            rotations_ |= ViewMath::IsValidRotation(r) ? 1u << r : 0u;
+        }
+        rotations_ = rotations_ ? rotations_ : 0xFu;
+    }
+    for (const auto& [r, z] : CaptureMath::LevelOrder(maxZoom_, rotations)) {
         Level level;
         level.rotation = r;
         level.zoom = z;
@@ -727,9 +786,32 @@ bool CityCapturer::StepPrepare_()
             terrainView->SetWaterGlareStatus(false);
         }
     }
+    if (ctx_.settings && !ctx_.settings->captureTerrainGrid) {
+        // The grid flag is global (sbDisplayGrid), so a render takes whatever the player last chose.
+        if (cISTETerrainView* terrainView = TerrainView(); terrainView && terrainView->GetDisplayGridFlag()) {
+            terrainView->SetDisplayGridFlag(false);
+            saved_.gridHidden = true;
+        }
+    }
+    // Messages the simulation posted before the pause (a new day or month) arrive here, before
+    // any state is overridden: a flora visit must never see an overridden stage.
+    if (!Pump_()) {
+        return false;
+    }
+    // The pause above also holds the 24 hour clock (HiddenPause), so its light update and its hour
+    // messages do not undo the noon of the render.
+    cISC424HourClock* clock = GameAccess::City() ? GameAccess::City()->Get24HourClock() : nullptr;
     if (ctx_.settings && ctx_.settings->captureAtNoon) {
-        // Like the thumbnail writer: noon light, so every render looks the same. The clock is
-        // paused, so the game does not move the time of day on during the render.
+        // The game's own day mode (the day button without its preference write): buildings and
+        // night props switch to day at once, no lit windows. The game time stays.
+        if (clock) {
+            saved_.visualMode = clock->GetVisualTimeMode();
+            if (saved_.visualMode != 1) {
+                clock->SetVisualTimeMode(1);
+                saved_.visualModeSet = true;
+            }
+        }
+        // Like the thumbnail writer: noon light, so every render looks the same.
         if (cISC4LightingManager* lighting = LightingManager(game.renderer)) {
             saved_.timeOfDay = lighting->GetTimeOfDay();
             saved_.timeOfDaySaved = true;
@@ -738,6 +820,17 @@ bool CityCapturer::StepPrepare_()
         else {
             LOG_WARN("Capture: the lighting manager is not available. The render uses the light of the game.");
         }
+    }
+    if (ctx_.settings) {
+        const Seasons::Date date = passIndex_ < passes_.size() ? passes_[passIndex_].date
+                                                               : Seasons::Date{ctx_.settings->RenderMonth(),
+                                                                               ctx_.settings->RenderDay()};
+        saved_.season.date = date.month > 0;
+        saved_.season.month = std::clamp(date.month, 1, 12);
+        saved_.season.day = std::clamp(date.day, 1, SeasonRules::kDaysInMonth[saved_.season.month - 1]);
+        saved_.season.flora = ctx_.settings->captureSeasonalFlora;
+        saved_.season.noon = ctx_.settings->captureAtNoon;
+        ApplySeason_();
     }
     game.renderer->StopScreenShake(0);
     if (frame.magnification != 1.0f) {
@@ -1031,6 +1124,7 @@ bool CityCapturer::StepBlock_()
         if (pass_ == 1) {
             SetClearColor_(kKeyColorA);
         }
+        DropParked_();
         phase_ = Phase::LevelBegin;
         return true;
     };
@@ -1046,6 +1140,7 @@ bool CityCapturer::StepBlock_()
             if (pass_ == 1) {
                 SetClearColor_(kKeyColorA);
             }
+            DropParked_();
             CaptureMath::ReturnTileBlock(pending_, level.grid.tilesX, block_);
             if (!NextBlock_()) {
                 NextLevel_();
@@ -1122,11 +1217,25 @@ bool CityCapturer::StepBlock_()
 
     // 4. Draw and read. This is the one draw and the one read of this tick.
     const auto drawStart = Clock::now();
-    game.renderer->ForceFullRedraw();
+    if (partial_ && pass_ != 0) {
+        QueueEdgeTiles_(game.renderer, screenX, screenY);
+    }
+    else {
+        game.renderer->ForceFullRedraw();
+    }
     DrawScene(game.renderer);
     ++framesDrawn_;
     const auto readStart = Clock::now();
     timing_.drawMs += MsSince(drawStart);
+    // The first pass of a one-read block: start its copy and draw the next block meanwhile.
+    if (pass_ == 0 && reads_.size() == 1 && !testTile_ && ctx_.settings && ctx_.settings->captureAsyncReadback) {
+        if (const uint32_t ticket = ctx_.snapshotReader->BeginRead(screenX, screenY, read.w, read.h)) {
+            timing_.readMs += MsSince(readStart);
+            shakeTicks_ = 0;
+            return ParkBlock_(ticket, read.w, read.h);
+        }
+    }
+    // Pass 2 goes to blockB_ first: only its edge tiles go on to blockA_.
     std::vector<uint8_t>& pass = pass_ == 0 ? blockA_ : blockB_;
     if (reads_.size() == 1) {
         // The read is the whole block: straight into the block buffer.
@@ -1153,28 +1262,75 @@ bool CityCapturer::StepBlock_()
 // Every part of the block is read for this pass.
 bool CityCapturer::BlockRead_()
 {
+    const int blockW = block_.w * tileSize_;
     if (pass_ == 0) {
-        const int blockW = block_.w * tileSize_;
         const size_t pixels = static_cast<size_t>(tileSize_) * tileSize_;
-        bool second = false;
+        int edgeTiles = 0;
         for (int i = 0; i < block_.count; ++i) {
             const CaptureMath::BlockTile& tile = block_.tiles[i];
             const size_t keys =
                 CaptureMath::CountKeyPixelsIn(blockA_.data(), blockW, tile.x, tile.y, tileSize_, tileSize_, keyA_);
             tileKinds_[i] = keys == pixels ? TileKind::Empty : keys == 0 ? TileKind::Opaque : TileKind::TwoPass;
-            second = second || tileKinds_[i] == TileKind::TwoPass;
+            edgeTiles += tileKinds_[i] == TileKind::TwoPass ? 1 : 0;
         }
-        if (second) {
-            // Part of a tile shows the area outside the city. Draw the block again over the
-            // second color to tell that area from city pixels that happen to have the key color.
-            pass_ = 1;
+        if (edgeTiles > 0) {
+            // Part of a tile shows the area outside the city. Draw it again over the second color
+            // to tell that area from city pixels that happen to have the key color. Two partial
+            // passes cost less than one whole window while the edge tiles are a third of it.
+            // A block collected after another block was drawn has that block in the backing store:
+            // its second pass draws the whole window.
+            partial_ = ctx_.settings && ctx_.settings->capturePartialRedraw && !partialOff_ && reads_.size() == 1 &&
+                       !drawnOver_ && edgeTiles * 3 <= block_.w * block_.h;
+            // A partial second pass draws the first color again as well, so both colors of an edge
+            // tile come from the same kind of draw. A block collected late keeps its first pass:
+            // where the game drew different content after the view came back (live shadows), the
+            // compose takes the first pass (CaptureMath::ComposeTwoPasses).
+            const bool againOverA = partial_;
+            pass_ = againOverA ? 2 : 1;
             readIndex_ = 0;
-            SetClearColor_(kKeyColorB);
+            SetKeyColor_(againOverA ? kKeyColorA : kKeyColorB);
             return true;
         }
     }
+    else if (pass_ == 2) {
+        for (int i = 0; i < block_.count; ++i) {
+            if (tileKinds_[i] == TileKind::TwoPass) {
+                const CaptureMath::BlockTile& tile = block_.tiles[i];
+                CaptureMath::CropRgba(blockB_.data(), blockW, tile.x, tile.y, tileSize_, tileSize_, tileB_.data());
+                CaptureMath::BlitRgba(tileB_.data(), tileSize_, tileSize_, blockA_.data(), blockW, tile.x, tile.y);
+            }
+        }
+        pass_ = 1;
+        readIndex_ = 0;
+        SetKeyColor_(kKeyColorB);
+        return true;
+    }
     else {
-        SetClearColor_(kKeyColorA);
+        if (partial_) {
+            // A dirty rectangle clears the color only where the game sees the view reach past
+            // the city (ClearViewport 0x007c3f80). Every edge tile shows some of the second color,
+            // or the block is drawn again in whole windows.
+            for (int i = 0; i < block_.count; ++i) {
+                const CaptureMath::BlockTile& tile = block_.tiles[i];
+                if (tileKinds_[i] == TileKind::TwoPass &&
+                    CaptureMath::CountKeyPixelsIn(blockB_.data(), blockW, tile.x, tile.y, tileSize_, tileSize_,
+                                                  keyB_) == 0) {
+                    if (!partialOffLogged_) {
+                        partialOffLogged_ = true;
+                        LOG_INFO("Capture: a partial redraw kept the first key color at tile ({}, {}). Whole "
+                                 "windows for the rest of rotation {} zoom {}.",
+                                 tile.tx, tile.ty, levels_[levelIndex_].rotation, levels_[levelIndex_].zoom + 1);
+                    }
+                    partialOff_ = true;
+                    partial_ = false;
+                    pass_ = 0;
+                    readIndex_ = 0;
+                    SetKeyColor_(kKeyColorA);
+                    return true;
+                }
+            }
+        }
+        SetKeyColor_(kKeyColorA);
     }
     handIndex_ = 0;
     waiting_ = false;
@@ -1252,6 +1408,13 @@ bool CityCapturer::StepWaitStore_()
     }
     if (NextBlock_()) {
         phase_ = Phase::Block;
+    }
+    else if (parked_) {
+        // The last block of the level is still parked: collect it before the level ends.
+        ParkedBlock last = std::move(*parked_);
+        parked_.reset();
+        phase_ = Phase::Block;
+        return Collect_(std::move(last), true);
     }
     else {
         NextLevel_();
@@ -1334,6 +1497,18 @@ bool CityCapturer::WriteMeta_(const bool final)
     meta.sizeZ = sizeZ_;
     meta.tileSize = tileSize_;
     meta.groundHeight = 0.5f * (minHeight_ + terrainHigh_);  // terrain middle
+    if (saved_.season.date) {
+        meta.renderMonth = saved_.season.month;
+        meta.renderDay = saved_.season.day;
+    }
+    meta.noon = saved_.season.noon;
+    const std::optional<CityRenderMeta> before = addTransportOnly_ ? ctx_.tileStore->LoadMeta(cityKey_) : std::nullopt;
+    if (before) {
+        // Only the transport layer is new: the date of the normal levels stays.
+        meta.renderMonth = before->renderMonth;
+        meta.renderDay = before->renderDay;
+        meta.noon = before->noon;
+    }
     meta.edges = edges_;
     const std::optional<CityRenderMeta> earlier = ctx_.tileStore->LoadMeta(cityKey_);
     const bool usable = earlier && earlier->tileSize == meta.tileSize && earlier->formatVersion == meta.formatVersion;
@@ -1357,7 +1532,7 @@ bool CityCapturer::WriteMeta_(const bool final)
             meta.renderTime = NowFileTime();
         }
         if (usable) {
-            higher = CityMeta::LevelsToDrop(*earlier, maxZoom_, meta.saveFileTime, transport_);
+            higher = CityMeta::LevelsToDrop(*earlier, maxZoom_, meta.saveFileTime, transport_, rotations_);
             dropped.insert(dropped.end(), higher.begin(), higher.end());
         }
     }
@@ -1397,11 +1572,62 @@ bool CityCapturer::NextBlock_()
     }
     readIndex_ = 0;
     pass_ = 0;
+    partial_ = false;
+    drawnOver_ = false;
     shakeTicks_ = 0;
     waiting_ = false;
     handIndex_ = 0;
     CaptureMath::PlanReads(block_.w * tileSize_, block_.h * tileSize_, viewportW_, viewportH_, reads_);
     return true;
+}
+
+bool CityCapturer::ParkBlock_(const uint32_t ticket, const int w, const int h)
+{
+    ParkedBlock now{block_, reads_, ticket, w, h};
+    if (parked_) {
+        ParkedBlock older = std::move(*parked_);
+        parked_ = std::move(now);
+        return Collect_(std::move(older), true);
+    }
+    parked_ = std::move(now);
+    if (NextBlock_()) {
+        return true;  // the next block is drawn while this copy runs
+    }
+    ParkedBlock only = std::move(*parked_);
+    parked_.reset();
+    return Collect_(std::move(only), false);
+}
+
+bool CityCapturer::Collect_(ParkedBlock block, const bool late)
+{
+    block_ = block.block;
+    reads_ = std::move(block.reads);
+    readIndex_ = reads_.size();
+    pass_ = 0;
+    partial_ = false;
+    drawnOver_ = late;
+    handIndex_ = 0;
+    waiting_ = false;
+    shakeTicks_ = 0;
+    const auto readStart = Clock::now();
+    const bool read = ctx_.snapshotReader->EndRead(block.ticket, block.w, block.h, blockA_);
+    timing_.readMs += MsSince(readStart);
+    if (!read) {
+        return Fail_("The screen could not be read back: " + ctx_.snapshotReader->LastError());
+    }
+    return BlockRead_();
+}
+
+void CityCapturer::DropParked_()
+{
+    if (!parked_) {
+        return;
+    }
+    ctx_.snapshotReader->CancelRead(parked_->ticket);
+    if (levelIndex_ < levels_.size()) {
+        CaptureMath::ReturnTileBlock(pending_, levels_[levelIndex_].grid.tilesX, parked_->block);
+    }
+    parked_.reset();
 }
 
 void CityCapturer::TileDone_()
@@ -1423,6 +1649,7 @@ void CityCapturer::NextLevel_()
     levelRetries_ = 0;
     levelTilesDone_ = 0;
     levelBegun_ = false;
+    partialOff_ = false;
     block_.count = 0;
     phase_ = levelIndex_ < levels_.size() ? Phase::LevelBegin : Phase::Finish;
 }
@@ -1476,6 +1703,55 @@ void CityCapturer::SetClearColor_(const uint32_t rgba)
         const std::array<float, 4> color = RgbaToFloats(rgba);
         renderer->SetViewportClearColor(color.data());
         saved_.clearColorDirect = true;
+    }
+}
+
+void CityCapturer::SetKeyColor_(const uint32_t rgba)
+{
+    clearColorNow_ = rgba;
+    const std::array<float, 4> color = RgbaToFloats(rgba);
+    if (cISC43DRender* renderer = GameAccess::Renderer()) {
+        renderer->SetViewportClearColor(color.data());
+    }
+    // A Draw over a valid backing store does not hand the color to the driver (Draw 0x007cb530),
+    // and the dirty rectangles clear with the driver's color.
+    if (cIGZGDriver* driver = GameAccess::GDriver()) {
+        driver->ClearColor(color[0], color[1], color[2], color[3]);
+    }
+}
+
+void CityCapturer::QueueEdgeTiles_(cISC43DRender* renderer, const int x, const int y) const
+{
+    // void cSC43DRender::AddDirtyRectangle(int kind, cRZRect const&, cIS3DModelInstance*, int),
+    // {left, top, right, bottom} in viewport pixels.
+    using Fn = void(__thiscall*)(cISC43DRender*, int, const int*, void*, int);
+    const auto add = reinterpret_cast<Fn>(RenderAddresses::Renderer::kAddDirtyRectangle);
+    for (int i = 0; i < block_.count; ++i) {
+        if (tileKinds_[i] == TileKind::TwoPass) {
+            const CaptureMath::BlockTile& tile = block_.tiles[i];
+            const int rect[4] = {x + tile.x, y + tile.y, x + tile.x + tileSize_, y + tile.y + tileSize_};
+            add(renderer, RenderAddresses::Renderer::kDirtyKindRegion, rect, nullptr, kDirtyAgeFrames);
+        }
+    }
+}
+
+void CityCapturer::ApplySeason_()
+{
+    const SeasonOverride::Options& season = saved_.season;
+    if (!season.date && !season.noon) {
+        return;
+    }
+    const SeasonOverride::Counts counts = season_.Apply(GameAccess::City(), season);
+    if (season.date) {
+        static constexpr const char* kMonths[] = {"January", "February", "March",     "April",   "May",      "June",
+                                                  "July",    "August",   "September", "October", "November", "December"};
+        LOG_INFO("Capture: at {} {}: {} props{} changed in {:.0f} ms", kMonths[season.month - 1], season.day,
+                 counts.props,
+                 season.flora ? std::format(" and {} of {} trees", counts.flora, counts.floraSeen) : std::string(),
+                 counts.ms);
+    }
+    else {
+        LOG_INFO("Capture: {} time of day props at noon", counts.props);
     }
 }
 
@@ -1568,6 +1844,13 @@ void CityCapturer::Restore_(const bool cityClosing)
         saved_.synchronousModels = false;
     }
 
+    // A city that closes saves nothing after this: let go of the occupants only.
+    season_.Restore(!cityClosing);
+    seasonAfterSave_ = false;
+    if (cISC424HourClock* clock = GameAccess::City() ? GameAccess::City()->Get24HourClock() : nullptr;
+        clock && !cityClosing && saved_.visualModeSet) {
+        clock->SetVisualTimeMode(saved_.visualMode);
+    }
     RestoreClearColor_();
     if (saved_.timeOfDaySaved) {
         SetTimeOfDay_(saved_.timeOfDay);
@@ -1575,6 +1858,11 @@ void CityCapturer::Restore_(const bool cityClosing)
     if (saved_.glareSaved) {
         if (cISTETerrainView* terrainView = TerrainView()) {
             terrainView->SetWaterGlareStatus(saved_.glareBefore);
+        }
+    }
+    if (saved_.gridHidden) {
+        if (cISTETerrainView* terrainView = TerrainView()) {
+            terrainView->SetDisplayGridFlag(true);
         }
     }
     if (saved_.snapshotPropertySet && game.app) {
@@ -1652,13 +1940,17 @@ bool CityCapturer::Fail_(std::string error)
     return false;
 }
 
-void CityCapturer::End_(const bool ok, std::string phase, std::string error, const bool cityClosing)
+void CityCapturer::End_(bool ok, std::string phase, std::string error, const bool cityClosing)
 {
     if (phase_ == Phase::Idle) {
         return;
     }
     // Idle first: Restore_ pumps messages, and one of them can close the city and come back here.
     phase_ = Phase::Idle;
+    if (parked_) {
+        ctx_.snapshotReader->CancelRead(parked_->ticket);
+        parked_.reset();
+    }
     cancelRequested_ = false;
     saveInsideRender_ = false;
     if (stepId_ != 0) {
@@ -1702,6 +1994,18 @@ void CityCapturer::End_(const bool ok, std::string phase, std::string error, con
     LOG_INFO("Capture: time in ms: move {:.0f}, models {:.0f}, draw {:.0f}, read {:.0f}, in {} ticks", timing_.moveMs,
              timing_.modelsMs, timing_.drawMs, timing_.readMs, timing_.ticks);
 
+    if (ok && !testTile_ && !cityClosing && passIndex_ + 1 < passes_.size()) {
+        ++passIndex_;
+        LOG_INFO("Capture: next render, {} at {}/{}", Seasons::Name(passes_[passIndex_].slot),
+                 passes_[passIndex_].date.month, passes_[passIndex_].date.day);
+        if (Begin_(false, request_)) {
+            return;
+        }
+        lastResult_ = "The render of " + std::string(Seasons::Name(passes_[passIndex_].slot)) +
+                      " did not start: " + progress_.error;
+        ok = false;
+        progress_.failed = true;
+    }
     if (onFinished_) {
         // A copy: the callback may set another callback or start the next capture.
         const std::function<void(bool)> callback = onFinished_;
@@ -1725,7 +2029,7 @@ void CityCapturer::PhaseText_(char* text, const size_t size) const
     case Phase::WaitStore:
         std::snprintf(text, size, "Rotation %d, zoom %d%s: tile %d of %d%s", level ? level->rotation : 0,
                       level ? level->zoom + 1 : 0, level && level->transport ? ", transport" : "", levelTilesDone_ + 1,
-                      level ? level->tiles : 0, phase_ == Phase::WaitStore ? " (waiting for the tile writer)" : "");
+                      level ? level->tiles : 0, phase_ == Phase::WaitStore && waiting_ ? " (waiting for the tile writer)" : "");
         break;
     case Phase::Finish: std::snprintf(text, size, "Writing the last tiles"); break;
     case Phase::Idle: std::snprintf(text, size, "%s", progress_.phase.c_str()); break;
@@ -1744,7 +2048,7 @@ double CityCapturer::EtaSeconds_() const
 // ---- render on save ----------------------------------------------------------------------------
 
 // A city switch or the region render works with the cities: no render on save then. The
-// region render saves every city it leaves and renders each city itself.
+// region render renders each city itself (and saves only the cities it must, BatchSaveCities).
 bool CityCapturer::OtherWorkRuns_() const
 {
     return (ctx_.switcher && ctx_.switcher->IsBusy()) || (ctx_.batch && ctx_.batch->IsRunning());
@@ -1762,6 +2066,12 @@ void CityCapturer::OnSaveBegin_()
     // on. The block step opens it again after the save (StepBlock_, then StepLevelBegin_).
     if (PopTransport_()) {
         LOG_INFO("Capture: the transport view is closed for the save");
+    }
+    // The prop and flora states are saved with the city: the real ones go in.
+    if (phase_ != Phase::Idle && season_.Active()) {
+        season_.Restore(true);
+        seasonAfterSave_ = true;
+        LOG_INFO("Capture: the date overrides are off for the save");
     }
     cISC43DRender* renderer = GameAccess::Renderer();
     if (phase_ == Phase::Idle || !saved_.backgroundSaved || !renderer) {
@@ -1783,6 +2093,12 @@ void CityCapturer::OnSaveBegin_()
 // Also called from the next step, in case a save ended without its post-save message.
 void CityCapturer::ResumeAfterSave_()
 {
+    if (seasonAfterSave_) {
+        seasonAfterSave_ = false;
+        if (phase_ != Phase::Idle) {
+            ApplySeason_();
+        }
+    }
     if (!saveInsideRender_) {
         return;
     }
@@ -1865,6 +2181,119 @@ void CityCapturer::DrawMaxZoomChoice(Settings& settings)
     }
 }
 
+void CityCapturer::DrawRotationChoice(Settings& settings)
+{
+    ImGui::TextUnformatted("Rotations");
+    for (int r = 0; r < 4; ++r) {
+        ImGui::SameLine();
+        ImGui::PushID(r);
+        const char label[2] = {static_cast<char>('1' + r), 0};
+        bool on = settings.renderRotation[r];
+        // The last rotation that is on stays on.
+        const bool last = on && settings.RenderRotationMask() == 1u << r;
+        ImGui::BeginDisabled(last);
+        if (ImGui::Checkbox(label, &on)) {
+            settings.renderRotation[r] = on;
+            settings.MarkChanged();
+        }
+        ImGui::EndDisabled();
+        ImGui::PopID();
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::BeginItemTooltip()) {
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+        ImGui::TextUnformatted("The rotations a render makes. Rotation 1 is the view a city opens in. Each rotation "
+                               "takes a quarter of the render time and disk space. A neighbor shows only in the "
+                               "rotations it has a render for. Save the settings to keep your choice.");
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+    }
+}
+
+void CityCapturer::DrawDateChoice(Settings& settings)
+{
+    bool changed = ImGui::Checkbox("Render at date", &settings.captureAtDate);
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::BeginItemTooltip()) {
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+        ImGui::TextUnformatted("Render every city as it looks on this date: seasonal props on lots and painted props "
+                               "show the season of the date, the same in every city of the region. The date of the "
+                               "city does not change, and the props are as before after the render.");
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+    }
+    if (settings.captureAtDate) {
+        static constexpr const char* kMonths[] = {"January", "February", "March",     "April",   "May",      "June",
+                                                  "July",    "August",   "September", "October", "November", "December"};
+        int month = std::clamp(settings.captureMonth, 1, 12) - 1;
+        ImGui::SetNextItemWidth(120.0f);
+        if (ImGui::Combo("##month", &month, kMonths, IM_ARRAYSIZE(kMonths))) {
+            settings.captureMonth = month + 1;
+            changed = true;
+        }
+        ImGui::SameLine();
+        int day = std::clamp(settings.captureDay, 1, SeasonRules::kDaysInMonth[month]);
+        ImGui::SetNextItemWidth(120.0f);
+        if (ImGui::SliderInt("##day", &day, 1, SeasonRules::kDaysInMonth[month]) || day != settings.captureDay) {
+            settings.captureDay = day;
+            changed = true;
+        }
+        // Mid-season dates: every seasonal pack of a typical plugins folder is in the same season
+        // there (seasonal props start their seasons on different days, docs/re-notes/seasons.md,
+        // Plugin audit). Spring shows summer for packs without a spring, and for the trees.
+        static constexpr struct
+        {
+            const char* name;
+            int month, day;
+        } kPresets[] = {{"Spring", 4, 15}, {"Summer", 7, 15}, {"Fall", 10, 15}, {"Winter", 1, 15}};
+        for (const auto& preset : kPresets) {
+            if (&preset != kPresets) {
+                ImGui::SameLine();
+            }
+            const bool current = settings.captureMonth == preset.month && settings.captureDay == preset.day;
+            ImGui::BeginDisabled(current);
+            if (ImGui::SmallButton(preset.name)) {
+                settings.captureMonth = preset.month;
+                settings.captureDay = preset.day;
+                changed = true;
+            }
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip("%s %d", kMonths[preset.month - 1], preset.day);
+            }
+        }
+        changed |= ImGui::Checkbox("Seasonal trees", &settings.captureSeasonalFlora);
+        ImGui::SameLine();
+        changed |= ImGui::Checkbox("Render all seasons", &settings.captureAllSeasons);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("After the render at this date, render the other three seasons too (spring Apr 15, "
+                              "summer Jul 15, fall Oct 15, winter Jan 15), in the same rotations and zooms, while the "
+                              "city stays open. Neighbors then show the season of your city's date. Season renders "
+                              "have no transport layer.");
+        }
+        if (settings.captureAllSeasons) {
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                               "Every render takes about four times as long and four times the disk space.");
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        if (ImGui::BeginItemTooltip()) {
+            ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+            ImGui::TextUnformatted("Seasonal trees of the flora tool show the season of the month too, as when they "
+                                   "were planted on September 1st (the standard for seasonal flora): fall in "
+                                   "September to November, winter in December to February, summer in March to "
+                                   "August. Takes longer in cities with very many trees.");
+            ImGui::PopTextWrapPos();
+            ImGui::EndTooltip();
+        }
+    }
+    if (changed) {
+        settings.MarkChanged();
+    }
+}
+
 void CityCapturer::DrawTransportChoice(Settings& settings)
 {
     if (ImGui::Checkbox("Transport layer", &settings.captureTransportLayer)) {
@@ -1916,6 +2345,8 @@ void CityCapturer::DrawPanelSection()
     if (ctx_.settings) {
         ImGui::BeginDisabled(batchRuns);
         DrawMaxZoomChoice(*ctx_.settings);
+        DrawRotationChoice(*ctx_.settings);
+        DrawDateChoice(*ctx_.settings);
         DrawTransportChoice(*ctx_.settings);
         ImGui::EndDisabled();
     }

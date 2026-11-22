@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <unordered_map>
 
+#include "cIGZGDriver.h"
 #include "cISC43DRender.h"
 #include "core/GameAddresses.hpp"
 #include "core/Guard.hpp"
@@ -29,6 +31,7 @@ namespace
     // Tiles lie on a camera-facing plane this far into the depth range, just behind the near
     // plane. Front tiles write that depth, so everything the game draws later is behind them.
     constexpr double kDepthFraction = 0.002;
+    constexpr uint32_t kClearDepthBit = 0x1000;  // cIGZGDriver::Clear: 0x4000 colour, 0x1000 depth, 0x2000 stencil
 
     // Moves every quad a quarter pixel up and left. Drivers do not agree on whether a pixel
     // centre is at a whole coordinate (DirectX 7) or at a half one (Direct3D 11, Vulkan).
@@ -71,19 +74,20 @@ namespace
                     static_cast<float>(oz + rz * sx + dz * sy), color, u, v};
         }
 
-        // Two triangles for the screen rectangle, UV 0..1.
-        void Quad(SC4WorldVertex* out, double x0, double y0, double x1, double y1, const uint32_t color) const
+        // Two triangles for the screen rectangle, UV u0..u1 and v0..v1 (default the whole texture).
+        void Quad(SC4WorldVertex* out, double x0, double y0, double x1, double y1, const uint32_t color,
+                  const float u0 = 0.0f, const float v0 = 0.0f, const float u1 = 1.0f, const float v1 = 1.0f) const
         {
             x0 += kPixelCentreShift;
             y0 += kPixelCentreShift;
             x1 += kPixelCentreShift;
             y1 += kPixelCentreShift;
-            out[0] = At(x0, y0, color, 0.0f, 0.0f);
-            out[1] = At(x1, y0, color, 1.0f, 0.0f);
-            out[2] = At(x1, y1, color, 1.0f, 1.0f);
+            out[0] = At(x0, y0, color, u0, v0);
+            out[1] = At(x1, y0, color, u1, v0);
+            out[2] = At(x1, y1, color, u1, v1);
             out[3] = out[0];
             out[4] = out[2];
-            out[5] = At(x0, y1, color, 0.0f, 1.0f);
+            out[5] = At(x0, y1, color, u0, v1);
         }
     };
 
@@ -175,6 +179,19 @@ void NeighborRenderer::SetEnabled(const bool enabled)
     LOG_INFO("Neighbors: drawing {}", enabled ? "on" : "off");
 }
 
+void NeighborRenderer::SetHeld(const bool held)
+{
+    if (held_ == held) {
+        return;
+    }
+    held_ = held;
+    if (held && ctx_.tileCache) {
+        ctx_.tileCache->Clear();  // gives the memory back for the cities a batch loads
+    }
+    RequestFullRedraw_();
+    LOG_INFO("Neighbors: {} for the region render", held ? "off" : "on again");
+}
+
 void NeighborRenderer::InvalidateAll()
 {
     if (!initialized_) {
@@ -200,13 +217,20 @@ bool NeighborRenderer::ShouldDraw_() const
 {
     // TileStore::HasTile scans a city folder on the calling thread until the store's
     // background index is done. Draw nothing before that, Tick_ redraws when it is ready.
-    return initialized_ && enabled_ && cityActive_ && ctx_.settings->showNeighbors && !neighbors_.empty() &&
+    return initialized_ && enabled_ && !held_ && cityActive_ && ctx_.settings->showNeighbors && !neighbors_.empty() &&
            ctx_.tileStore->IsIndexReady() && GameAccess::Renderer() != nullptr;
 }
 
 void NeighborRenderer::Rebuild_()
 {
+    // The renders shown so far, by city: a new season keeps showing the old one where its tiles
+    // are still loading.
+    std::unordered_map<std::string, Neighbor> previous;
+    for (Neighbor& n : neighbors_) {
+        previous.emplace(n.cityKey, std::move(n));
+    }
     neighbors_.clear();
+    season_ = Seasons::OfMonth(GameAccess::CityMonth());
     regionGeneration_ = ctx_.region->Generation();
     const CityInfo* current = ctx_.region->Current();
     if (!current) {
@@ -224,29 +248,75 @@ void NeighborRenderer::Rebuild_()
             continue;
         }
         ++founded;
-        const std::optional<CityRenderMeta> meta = ctx_.tileStore->LoadMeta(city.key);
-        if (!meta) {
-            continue;
+        // Every render of the city that fits it, in the order they stand in.
+        std::vector<std::string> keys;
+        std::vector<CityRenderMeta> metas;
+        for (std::string& storageKey : ctx_.tileStore->StorageKeysInOrder(city.key, season_)) {
+            std::optional<CityRenderMeta> meta = ctx_.tileStore->LoadMeta(storageKey);
+            if (!meta) {
+                continue;
+            }
+            if (meta->tileSize < 16 || meta->tileSize > 2048 || meta->sizeX != city.sizeX ||
+                meta->sizeZ != city.sizeZ || (!metas.empty() && meta->tileSize != metas.front().tileSize)) {
+                LOG_WARN("Neighbors: the render '{}' does not fit the city (tile size {}, size {}x{}). It is skipped.",
+                         storageKey, meta->tileSize, meta->sizeX, meta->sizeZ);
+                continue;
+            }
+            keys.push_back(std::move(storageKey));
+            metas.push_back(std::move(*meta));
         }
-        if (meta->tileSize < 16 || meta->tileSize > 2048 || meta->sizeX != city.sizeX || meta->sizeZ != city.sizeZ) {
-            LOG_WARN("Neighbors: the render of '{}' does not fit the city (tile size {}, size {}x{}). It is skipped.",
-                     city.name, meta->tileSize, meta->sizeX, meta->sizeZ);
+        if (metas.empty() || metas.size() > 255) {
             continue;
         }
         Neighbor n;
         n.name = city.name;
+        n.cityKey = city.key;
         n.cells = {city.cellX, city.cellZ, city.cellX + city.sizeX, city.cellZ + city.sizeZ};
         n.originOffset = ctx_.region->OriginOffset(city);
-        n.tileSize = meta->tileSize;
-        n.key.cityKey = city.key;
+        n.tileSize = metas.front().tileSize;
         bool any = false;
         for (int r = 0; r < ViewMath::kRotationCount; ++r) {
             for (int z = 0; z < ViewMath::kZoomCount; ++z) {
-                if (const CityRenderMeta::Level* level = CityMeta::ChooseLevel(meta->levels, r, z)) {
-                    const int slot = r * ViewMath::kZoomCount + z;
+                // The first render with a level for this view.
+                const CityRenderMeta* meta = nullptr;
+                const CityRenderMeta::Level* level = nullptr;
+                const int slot = r * ViewMath::kZoomCount + z;
+                for (size_t k = 0; k < metas.size() && !level; ++k) {
+                    if ((level = CityMeta::ChooseLevel(metas[k].levels, r, z))) {
+                        meta = &metas[k];
+                        n.slotKey[slot] = static_cast<uint8_t>(k);
+                    }
+                }
+                if (level) {
                     n.levels[slot] = *level;
                     n.scale[slot] = CityMeta::LevelScale(*level, z);
                     any = true;
+                    for (const CityRenderMeta::Level& other : meta->levels) {
+                        const double otherScale = CityMeta::LevelScale(other, z);
+                        if (other.rotation == r && !other.transport && other.zoom != level->zoom && otherScale > 0.0 &&
+                            other.tilesX > 0 && other.tilesY > 0) {
+                            n.standIn[slot] = other;
+                            n.standInScale[slot] = otherScale;
+                        }
+                    }
+                }
+            }
+        }
+        n.keys = std::move(keys);
+        if (const auto it = previous.find(n.cityKey); any && it != previous.end()) {
+            // Per view: the old render where it differs from the new one and lies on its grid.
+            const Neighbor& old = it->second;
+            for (size_t slot = 0; slot < n.levels.size(); ++slot) {
+                if (n.scale[slot] <= 0.0 || old.scale[slot] <= 0.0 || old.keys.empty()) {
+                    continue;
+                }
+                const std::string& oldKey = old.keys[old.slotKey[slot]];
+                const CityRenderMeta::Level& a = n.levels[slot];
+                const CityRenderMeta::Level& b = old.levels[slot];
+                if (oldKey != n.keys[n.slotKey[slot]] && a.zoom == b.zoom && a.tilesX == b.tilesX &&
+                    a.tilesY == b.tilesY && std::fabs(a.originX - b.originX) < 0.5f &&
+                    std::fabs(a.originY - b.originY) < 0.5f && n.scale[slot] == old.scale[slot]) {
+                    n.previousKeys[slot] = oldKey;
                 }
             }
         }
@@ -268,17 +338,19 @@ void NeighborRenderer::Rebuild_()
 }
 
 bool NeighborRenderer::Place_(const Neighbor& neighbor, const CameraFrame& frame,
-                              NeighborMath::LevelPlacement& placement, const CityRenderMeta::Level*& level) const
+                              NeighborMath::LevelPlacement& placement, const CityRenderMeta::Level*& level,
+                              const bool standIn) const
 {
     if (!ViewMath::IsValidZoom(frame.zoomIndex) || !ViewMath::IsValidRotation(frame.rotation)) {
         return false;
     }
     const int slot = frame.rotation * ViewMath::kZoomCount + frame.zoomIndex;
-    if (neighbor.scale[slot] <= 0.0) {
+    const double levelScale = standIn ? neighbor.standInScale[slot] : neighbor.scale[slot];
+    if (levelScale <= 0.0) {
         return false;
     }
-    level = &neighbor.levels[slot];
-    const double scale = neighbor.scale[slot] * frame.magnification;
+    level = standIn ? &neighbor.standIn[slot] : &neighbor.levels[slot];
+    const double scale = levelScale * frame.magnification;
     const cS3DVector2 neighborCanvas = frame.projection.WorldToCanvas(neighbor.originOffset);
     const cS3DVector2 baseCanvas = frame.projection.WorldToCanvas(frame.baseCorner);
     placement = NeighborMath::PlaceLevel(neighborCanvas.fX, neighborCanvas.fY, level->originX, level->originY,
@@ -323,7 +395,9 @@ void NeighborRenderer::Tick_()
         shownNeighbors_ = ctx_.settings->showNeighbors;
         shownFront_ = ctx_.settings->showFrontNeighbors;
     }
-    if (ctx_.region->Generation() != regionGeneration_) {
+    // A new season in the open city: neighbors with season renders show the new one.
+    if (ctx_.region->Generation() != regionGeneration_ ||
+        (GameAccess::CityMonth() != 0 && Seasons::OfMonth(GameAccess::CityMonth()) != season_)) {
         Rebuild_();
         redraw = true;
     }
@@ -358,8 +432,9 @@ void NeighborRenderer::MarkReadyTile_(const TileKey& key, const CameraFrame& fra
     if (key.rotation != frame.rotation) {
         return;
     }
+    const int slot = frame.rotation * ViewMath::kZoomCount + frame.zoomIndex;
     for (const Neighbor& neighbor : neighbors_) {
-        if (neighbor.key.cityKey != key.cityKey) {
+        if (neighbor.keys.empty() || neighbor.keys[neighbor.slotKey[slot]] != key.cityKey) {
             continue;
         }
         NeighborMath::LevelPlacement placement;
@@ -383,6 +458,10 @@ void NeighborRenderer::FlushDirty_()
                 MarkReadyTile_(key, ctx_.cameraReader->Frame());
             }
         }
+        else if (ShouldDraw_()) {
+            // ponytail: counted, not handled yet. If this shows up with holes, keep ready_ for the next frame.
+            readyLost_ += ready_.size();
+        }
         ready_.clear();
     }
     if (dirty_.Empty()) {
@@ -392,15 +471,19 @@ void NeighborRenderer::FlushDirty_()
     if (renderer && ShouldDraw_()) {
         if (dirty_.WholeView()) {
             renderer->ForceFullRedraw();
+            ++fullSent_;
         }
         else {
             // The game merges these with its own queue and redraws the static view inside
-            // them on its next Draw.
+            // them on its next Draw that does not pan. With delay 0 it first waited its merge time
+            // (kDirtyRectMergeFrames) from the first rectangle: a visible pause after a scroll.
             const auto addDirtyRectangle =
                 reinterpret_cast<AddDirtyRectangleFn>(RenderAddresses::Renderer::kAddDirtyRectangle);
             for (int i = 0; i < dirty_.Count(); ++i) {
-                addDirtyRectangle(renderer, RenderAddresses::Renderer::kDirtyKindRegion, &dirty_[i], nullptr, 0);
+                addDirtyRectangle(renderer, RenderAddresses::Renderer::kDirtyKindRegion, &dirty_[i], nullptr,
+                                  RenderAddresses::Renderer::kDirtyNow);
             }
+            dirtySent_ += static_cast<uint64_t>(dirty_.Count());
         }
     }
     dirty_.Clear();
@@ -490,12 +573,33 @@ void NeighborRenderer::DrawGroup_(const bool front)
     const CameraFrame& frame = ctx_.cameraReader->Frame();
     // The region thumbnail writer (0x005ddec0) draws with the same renderer at magnification
     // 0.25. Neighbors do not belong in that picture.
-    if (frame.magnification != 1.0f) {
+    // Game zoom 6 is zoom 5 at magnification 2: drawn, scaled like any other view.
+    if (frame.magnification < 1.0f) {
         return;
+    }
+    if (!front && (frame.zoomIndex != viewZoom_ || frame.rotation != viewRotation_)) {
+        // A zoom or rotation change redraws the whole view, which asks for the tiles it needs.
+        // Tiles still queued for the old view would only delay them (zooming twice quickly).
+        if (viewZoom_ >= 0) {
+            ctx_.tileCache->DropQueued();
+        }
+        viewZoom_ = frame.zoomIndex;
+        viewRotation_ = frame.rotation;
     }
     const std::vector<int>& order = front ? front_[frame.rotation] : back_[frame.rotation];
     if (order.empty()) {
         return;
+    }
+    if (!front) {
+        // A dirty rectangle or pan strip does not clear depth: ClearViewport (0x007c3f80) draws a
+        // rectangle at z -32500 instead (DrawViewportRectangle 0x007c3400). The back tiles write no
+        // depth, so that plane stays under them and SCD3D11's LiveShadows darkens them as ground,
+        // inside the rectangle, until the next full redraw. A real depth clear (the driver clears
+        // only the viewport) leaves them as background. The depth mask is still on from that
+        // rectangle. Harmless in a full redraw, which cleared depth already.
+        if (cIGZGDriver* driver = GameAccess::GDriver()) {
+            driver->Clear(kClearDepthBit);
+        }
     }
     const void* camera =
         GameAccess::ReadField<const void*>(GameAccess::CameraControl(), GameAddresses::CameraControl::kS3DCamera);
@@ -531,6 +635,93 @@ void NeighborRenderer::DrawGroup_(const bool front)
         outline_.clear();
     };
 
+    // Where a tile is still loading: the tiles of the stand-in level already in the cache,
+    // scaled and filtered. The tile's ready callback redraws the spot with the tile itself.
+    auto drawStandIn = [&](Neighbor& neighbor, const double x0, const double y0, const double x1, const double y1) {
+        NeighborMath::LevelPlacement alt;
+        const CityRenderMeta::Level* altLevel = nullptr;
+        if (!Place_(neighbor, frame, alt, altLevel, true) || alt.tilePixels <= 0.0) {
+            return;
+        }
+        auto range = [&](const double a, const double b, const double origin, const int count, int& first, int& last) {
+            first = std::clamp(static_cast<int>(std::floor((a - origin) / alt.tilePixels)), 0, count);
+            last = std::clamp(static_cast<int>(std::ceil((b - origin) / alt.tilePixels)), 0, count);
+        };
+        int ax0, ax1, ay0, ay1;
+        range(x0, x1, alt.originX, altLevel->tilesX, ax0, ax1);
+        range(y0, y1, alt.originY, altLevel->tilesY, ay0, ay1);
+        TileKey& key = neighbor.standInKey;
+        key.rotation = frame.rotation;
+        key.zoom = altLevel->zoom;
+        bool filtered = false;
+        for (int ay = ay0; ay < ay1; ++ay) {
+            for (int ax = ax0; ax < ax1; ++ax) {
+                key.tx = ax;
+                key.ty = ay;
+                if (!store->HasTile(key)) {
+                    continue;
+                }
+                const TileTexture* texture = cache->Peek(key);
+                const uint32_t driverTexture = texture ? cache->DriverTexture(*texture) : 0;
+                if (driverTexture == 0) {
+                    continue;
+                }
+                const double tx0 = NeighborMath::TileEdge(alt.originX, alt.tilePixels, ax);
+                const double tx1 = NeighborMath::TileEdge(alt.originX, alt.tilePixels, ax + 1);
+                const double ty0 = NeighborMath::TileEdge(alt.originY, alt.tilePixels, ay);
+                const double ty1 = NeighborMath::TileEdge(alt.originY, alt.tilePixels, ay + 1);
+                const double ix0 = std::max(x0, tx0), ix1 = std::min(x1, tx1);
+                const double iy0 = std::max(y0, ty0), iy1 = std::min(y1, ty1);
+                if (ix0 >= ix1 || iy0 >= iy1) {
+                    continue;
+                }
+                if (!begun) {
+                    BeginState_(context, front, linear, saved);
+                    begun = true;
+                }
+                if (!filtered) {
+                    ctx_.draw->SetTexFiltering(context, Drv::kFilterLinear, Drv::kFilterLinear, 0);
+                    filtered = true;
+                }
+                plane.Quad(quad, ix0, iy0, ix1, iy1, kWhite, static_cast<float>((ix0 - tx0) / (tx1 - tx0)),
+                           static_cast<float>((iy0 - ty0) / (ty1 - ty0)), static_cast<float>((ix1 - tx0) / (tx1 - tx0)),
+                           static_cast<float>((iy1 - ty0) / (ty1 - ty0)));
+                ctx_.draw->SetTexture(context, driverTexture, 0);
+                ctx_.draw->DrawPrims(context, Drv::kPrimTriangles, Drv::kVertexFormatPositionColorUV, 6, quad);
+                ++standInDraws_;
+            }
+        }
+        if (filtered && !linear) {
+            ctx_.draw->SetTexFiltering(context, Drv::kFilterNearest, Drv::kFilterNearest, 0);
+        }
+    };
+
+    // The same tile of the render shown before a season change, when it is still in the cache.
+    auto drawPrevious = [&](Neighbor& neighbor, const double x0, const double y0, const double x1, const double y1) {
+        TileKey& key = neighbor.previousKey;
+        if (key.cityKey.empty()) {
+            return false;
+        }
+        key.rotation = neighbor.key.rotation;
+        key.zoom = neighbor.key.zoom;
+        key.tx = neighbor.key.tx;
+        key.ty = neighbor.key.ty;
+        const TileTexture* texture = store->HasTile(key) ? cache->Peek(key) : nullptr;
+        const uint32_t driverTexture = texture ? cache->DriverTexture(*texture) : 0;
+        if (driverTexture == 0) {
+            return false;
+        }
+        if (!begun) {
+            BeginState_(context, front, linear, saved);
+            begun = true;
+        }
+        plane.Quad(quad, x0, y0, x1, y1, kWhite);
+        ctx_.draw->SetTexture(context, driverTexture, 0);
+        ctx_.draw->DrawPrims(context, Drv::kPrimTriangles, Drv::kVertexFormatPositionColorUV, 6, quad);
+        ++standInDraws_;
+        return true;
+    };
+
     for (const int index : order) {
         Neighbor& neighbor = neighbors_[index];
         neighbor.visibleTiles = 0;
@@ -542,6 +733,17 @@ void NeighborRenderer::DrawGroup_(const bool front)
             !NeighborMath::VisibleTiles(placement, level->tilesX, level->tilesY, frame.viewportWidth,
                                         frame.viewportHeight, tx0, ty0, tx1, ty1)) {
             continue;
+        }
+        {
+            const int slot = frame.rotation * ViewMath::kZoomCount + frame.zoomIndex;
+            const std::string& viewKey = neighbor.keys[neighbor.slotKey[slot]];
+            if (neighbor.key.cityKey != viewKey) {
+                neighbor.key.cityKey = viewKey;  // reuses the string's storage
+                neighbor.standInKey.cityKey = viewKey;
+            }
+            if (neighbor.previousKey.cityKey != neighbor.previousKeys[slot]) {
+                neighbor.previousKey.cityKey = neighbor.previousKeys[slot];
+            }
         }
         neighbor.key.rotation = frame.rotation;
         neighbor.key.zoom = level->zoom;
@@ -574,6 +776,9 @@ void NeighborRenderer::DrawGroup_(const bool front)
                     plane.Quad(quad, x0, y0, x1, y1, kWhite);
                     ctx_.draw->SetTexture(context, driverTexture, 0);
                     ctx_.draw->DrawPrims(context, Drv::kPrimTriangles, Drv::kVertexFormatPositionColorUV, 6, quad);
+                }
+                else if (!drawPrevious(neighbor, x0, y0, x1, y1)) {
+                    drawStandIn(neighbor, x0, y0, x1, y1);
                 }
                 if (outlineTiles_) {
                     if (outline_.size() + 24 > kOutlineBatch) {
@@ -614,7 +819,9 @@ void NeighborRenderer::DrawPanelSection()
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Draw a frame around every tile. Green tiles are loaded. Red tiles are on their way.");
     }
-    ImGui::SameLine();
+    ImGui::TextDisabled("Redraws for loaded tiles: %llu rectangles, %llu full. Lost: %llu. Stand-ins: %llu",
+                        static_cast<unsigned long long>(dirtySent_), static_cast<unsigned long long>(fullSent_),
+                        static_cast<unsigned long long>(readyLost_), static_cast<unsigned long long>(standInDraws_));
     if (ImGui::Button("Read renders again")) {
         InvalidateAll();
     }
@@ -634,6 +841,13 @@ void NeighborRenderer::DrawPanelSection()
         return;
     }
     const int slot = rotation * ViewMath::kZoomCount + std::clamp(zoom, 0, ViewMath::kZoomCount - 1);
+    const auto missing = std::ranges::count_if(neighbors_, [&](const Neighbor& n) { return n.scale[slot] <= 0.0; });
+    if (missing > 0) {
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
+                           "%lld neighbors are not shown: none of their renders has rotation %d at zoom %d or "
+                           "below. Render them in this rotation.",
+                           static_cast<long long>(missing), rotation + 1, std::clamp(zoom, 0, 4) + 1);
+    }
     if (ImGui::BeginTable("neighbors", 4,
                           ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY |
                               ImGuiTableFlags_SizingStretchProp,

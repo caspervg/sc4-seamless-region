@@ -55,20 +55,24 @@ TEST_CASE(BatchBuildForceRendersUpToDate)
     CHECK(run.force);
 }
 
-TEST_CASE(BatchOrderStartsWithStartCityThenNearest)
+TEST_CASE(BatchOrderLargestSaveFirstAfterStartCity)
 {
-    const auto run = BatchQueue::Build(kRegion, &kRegion[0], true, [](const CityInfo&) { return true; }, "id", "now");
-    // Distances in doubled cell centres. From a: b and d tie (4), b has the smaller cellZ.
-    // From b: d 8, e 34, c 36. From d: e 34, c 68. Then c.
-    CHECK((Keys(run.pending) == std::vector<std::string>{"a", "b", "d", "e", "c"}));
+    const auto size = [](const CityInfo& c) -> uint64_t { return c.key == "c" ? 900 : c.key == "e" ? 500 : 100; };
+    const auto run =
+        BatchQueue::Build(kRegion, &kRegion[3], true, [](const CityInfo&) { return true; }, "id", "now", size);
+    // The open city d first, then c and e by size, then the rest in region order.
+    CHECK((Keys(run.pending) == std::vector<std::string>{"d", "c", "e", "a", "b"}));
+    // Without sizes: region order, start city first.
+    const auto plain = BatchQueue::Build(kRegion, &kRegion[2], true, [](const CityInfo&) { return true; }, "id", "now");
+    CHECK((Keys(plain.pending) == std::vector<std::string>{"c", "a", "b", "d", "e"}));
 }
 
 TEST_CASE(BatchOrderWithoutStartCityInQueue)
 {
-    // The start city is up to date: it is not in the queue, the walk starts next to it.
+    // The start city is up to date: it is not in the queue.
     const auto run = BatchQueue::Build(kRegion, &kRegion[2], false, [](const CityInfo& c) { return c.key != "c"; },
                                        "id", "now");
-    CHECK(run.pending.front().key == "e");
+    CHECK(run.pending.front().key == "a");
     CHECK(run.pending.size() == 4);
 }
 
@@ -150,13 +154,12 @@ TEST_CASE(BatchJsonRejectsBadInput)
 
 TEST_CASE(BatchRegionViewRendersEveryCityFromTheFirst)
 {
-    // No start city: every founded city that needs a render, the walk starts at the first one.
+    // No start city: every founded city that needs a render, in region order without sizes.
     const auto run =
         BatchQueue::Build(kRegion, nullptr, false, [](const CityInfo& c) { return c.key != "b"; }, "id", "now");
     CHECK(run.regionView);
     CHECK(run.start.key.empty());
-    // From a: d 4, then e 34 from d, then c.
-    CHECK((Keys(run.pending) == std::vector<std::string>{"a", "d", "e", "c"}));
+    CHECK((Keys(run.pending) == std::vector<std::string>{"a", "c", "d", "e"}));
     CHECK(run.skipped.size() == 2);
 }
 
@@ -222,6 +225,16 @@ TEST_CASE(BatchUpToDateNeedsEveryLevelUpToTheMaxZoom)
     }
     CHECK(!CityMeta::NeedsRender(meta, 1000, 4));
     CHECK(CityMeta::HasLevelsUpTo(meta, 4));
+
+    // Only the chosen rotations count: rotation 1 alone is up to date without rotations 2 to 4.
+    CityRenderMeta oneRotation;
+    oneRotation.saveFileTime = 1000;
+    for (int z = 0; z < 4; ++z) {
+        oneRotation.levels.push_back({0, z, 0.0f, 0.0f, 1, 1});
+    }
+    CHECK(!CityMeta::NeedsRender(oneRotation, 1000, 3, false, 0x1));
+    CHECK(CityMeta::NeedsRender(oneRotation, 1000, 3, false, 0x3));
+    CHECK(CityMeta::NeedsRender(oneRotation, 1000, 3));  // all four
 }
 
 // With the transport layer on, a city also needs every transport level up to the max zoom. With

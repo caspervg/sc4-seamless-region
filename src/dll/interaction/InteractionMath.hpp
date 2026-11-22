@@ -1,6 +1,6 @@
 #pragma once
 
-// Interaction (W3-F): the pure parts of the neighbor picker. No game calls, unit tested in
+// Interaction: the pure parts of the neighbor picker. No game calls, unit tested in
 // tests/InteractionTests.cpp.
 //
 // Coordinates are world metres of the current city: x and z along the ground, y up, the

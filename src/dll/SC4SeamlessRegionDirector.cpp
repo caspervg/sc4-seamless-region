@@ -30,6 +30,7 @@
 #include "export/HtmlMapExporter.hpp"
 #include "interaction/NeighborPicker.hpp"
 #include "overlay/MapOverlay.hpp"
+#include "remote/RemoteCommands.hpp"
 #include "render/NeighborRenderer.hpp"
 #include "render/TileCache.hpp"
 #include "store/TileStore.hpp"
@@ -111,7 +112,7 @@ bool SC4SeamlessRegionDirector::PostAppInit()
     InitializeLogger_();
     const uint16_t gameVersion = GameAccess::GameVersion();
     const bool supported = GameAccess::IsSupportedGame();
-    LOG_INFO("Seamless Region {} starting, game version {}", SC4_TEMPLATE_DLL_VERSION_LABEL, gameVersion);
+    LOG_INFO("Seamless Region {} starting, game version {}", SC4SR_DLL_VERSION_LABEL, gameVersion);
 
     ctx_.settings = &settings_;
     ctx_.pluginDirectory = GetUserPluginsPath_();
@@ -368,6 +369,8 @@ void SC4SeamlessRegionDirector::CreateModules_()
     add(std::make_unique<RegionBatchRenderer>(), "Batch", ctx_.batch);
     add(std::make_unique<HtmlMapExporter>(), "Export", ctx_.exporter);
     add(std::make_unique<MapOverlay>(), "Overlay", ctx_.overlay);
+    RemoteCommands* remote = nullptr;  // nothing else uses it
+    add(std::make_unique<RemoteCommands>(), "Remote", remote);
 
     int active = 0;
     for (PanelModule& m : panelModules_) {
@@ -405,7 +408,7 @@ void SC4SeamlessRegionDirector::RegisterPanel_()
         return;
     }
     SeamlessPanel::Info info;
-    info.versionLabel = SC4_TEMPLATE_DLL_VERSION_LABEL;
+    info.versionLabel = SC4SR_DLL_VERSION_LABEL;
     info.gameVersion = GameAccess::GameVersion();
     info.supported = GameAccess::IsSupportedGame();
     info.enabled = !panelModules_.empty();

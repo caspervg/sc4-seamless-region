@@ -116,11 +116,12 @@ bool CitySwitcher::IsBusy() const { return busy_; }
 std::string CitySwitcher::LastError() const { return lastError_; }
 
 bool CitySwitcher::RequestSwitch(const int cellX, const int cellZ, const bool allowWithoutSave,
-                                 const cS3DVector2* arrival)
+                                 const cS3DVector2* arrival, const bool save)
 {
     if (!Queue_(Kind::Switch, cellX, cellZ, allowWithoutSave)) {
         return false;
     }
+    save_ = save;
     hasArrival_ = arrival != nullptr;
     arrival_ = arrival ? *arrival : cS3DVector2();
     return true;
@@ -128,9 +129,13 @@ bool CitySwitcher::RequestSwitch(const int cellX, const int cellZ, const bool al
 
 bool CitySwitcher::RequestOpen(const int cellX, const int cellZ) { return Queue_(Kind::Open, cellX, cellZ, false); }
 
-bool CitySwitcher::RequestRegionView(const bool allowWithoutSave)
+bool CitySwitcher::RequestRegionView(const bool allowWithoutSave, const bool save)
 {
-    return Queue_(Kind::RegionView, 0, 0, allowWithoutSave);
+    if (!Queue_(Kind::RegionView, 0, 0, allowWithoutSave)) {
+        return false;
+    }
+    save_ = save;
+    return true;
 }
 
 bool CitySwitcher::Queue_(const Kind kind, const int cellX, const int cellZ, const bool allowWithoutSave)
@@ -179,6 +184,7 @@ bool CitySwitcher::Queue_(const Kind kind, const int cellX, const int cellZ, con
     targetZ_ = cellZ;
     targetName_ = target ? target->name : std::string("the region view");
     allowWithoutSave_ = allowWithoutSave;
+    save_ = true;
     lastError_.clear();
     const uint32_t serial = ++serial_;
     ctx_.idle->Post([this, serial] { Run_(serial); });
@@ -251,7 +257,10 @@ void CitySwitcher::Sequence_()
         LOG_INFO("Switching: step 1, pumped the message queues in {:.0f} ms", MsSince(step));
 
         // 2. Save. RequestSaveCity shows the game's own message when the save fails.
-        if (GameAccess::CanSaveCity()) {
+        if (!save_) {
+            LOG_INFO("Switching: step 2, '{}' is not saved, as asked", fromName);
+        }
+        else if (GameAccess::CanSaveCity()) {
             if (!app->RequestSaveCity(false, false)) {
                 Fail_(std::format("Saving '{}' failed. You stay in this city.", fromName));
                 return;

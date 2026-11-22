@@ -2,13 +2,15 @@
 // plugin stored. The same export as the "Region map" section of the in-game panel.
 //
 //   SC4RegionMap.exe <region folder> [--rotation 1..4] [--zoom 3..5] [--quality 0..100] [--upscale 0..3]
-//                    [--transport | --no-transport] [--mosaic [pixels]] [--open]
+//                    [--transport | --no-transport] [--seasons all|none|<list>] [--mosaic [pixels]]
+//                    [--renders <folder>] [--open]
 //
 // Without --zoom the map uses the highest zoom that every rendered city has. The transport view is
 // on the map when the cities have it, unless --no-transport.
 //
 // The region folder is the one with the .sc4 save files, for example
-// "Documents\SimCity 4\Regions\Fairview". The map goes to <region>\RegionRenders\map\index.html.
+// "Documents\SimCity 4\Regions\Fairview". The map goes to <region>\RegionRenders\map\index.html, or
+// with --renders (the plugin's RendersFolder setting) to <folder>\<region folder name>\map\index.html.
 
 #include <windows.h>
 #include <shellapi.h>
@@ -117,11 +119,18 @@ namespace
         std::fprintf(stderr,
                      "Makes the browsable map of a region from the renders of SC4 Seamless Region.\n\n"
                      "  SC4RegionMap.exe <region folder> [--rotation 1..4] [--zoom 3..5] [--quality 0..100] "
-                     "[--upscale 0..3] [--transport | --no-transport] [--mosaic [pixels]] [--open]\n\n"
+                     "[--upscale 0..3] [--transport | --no-transport] [--seasons all|none|<list>] "
+                     "[--mosaic [pixels]] [--renders <folder>] [--open]\n\n"
                      "--zoom: the zoom of the city renders that the map uses. Zoom 5 gives the most detail. The\n"
                      "map is then about 4 times the size of zoom 4. Without --zoom: the highest zoom of all cities.\n\n"
                      "--transport (the default): also put the transport view on the map, when the cities have it.\n"
                      "--no-transport: only the normal view.\n\n"
+                     "--season main|spring|summer|fall|winter: the season renders to use (each city falls back\n"
+                     "to the nearest season it has, then its main render). Default main.\n\n"
+                     "--seasons all|none|spring,summer,fall,winter: the season layers the map may get, each\n"
+                     "only when cities have renders of it. Default all.\n\n"
+                     "--renders <folder>: the RendersFolder of the plugin's INI, when it is set. The renders are\n"
+                     "then in <folder>\\<region folder name> instead of <region>\\RegionRenders.\n\n"
                      "--mosaic [pixels]: one picture, RegionRenders\\mosaic.png, instead of the map. The map at\n"
                      "the largest size whose longest side fits the pixels (default 16384, up to 65536).\n\n"
                      "Example: SC4RegionMap.exe \"%%USERPROFILE%%\\Documents\\SimCity 4\\Regions\\Fairview\"\n");
@@ -137,6 +146,7 @@ int wmain(const int argc, wchar_t** argv)
     MapExport::Request request;
     request.rotation = 0;
     bool open = false;
+    fs::path rendersFolder;
     for (int i = 2; i < argc; ++i) {
         const std::wstring arg = argv[i];
         const bool hasValue = i + 1 < argc;
@@ -158,6 +168,27 @@ int wmain(const int argc, wchar_t** argv)
                 request.mosaicMaxPixels = std::clamp(_wtoi(argv[++i]), 256, 65536);
             }
         }
+        else if (arg == L"--season" && hasValue) {
+            const std::wstring name = argv[++i];
+            for (int s = 0; s < static_cast<int>(Seasons::kNames.size()); ++s) {
+                if (name == std::wstring(Seasons::kNames[s].begin(), Seasons::kNames[s].end()) ||
+                    (s == 0 && name == L"main")) {
+                    request.season = static_cast<Season>(s);
+                }
+            }
+        }
+        else if (arg == L"--seasons" && hasValue) {
+            // all, none, or a comma-separated list of season names
+            const std::wstring list = argv[++i];
+            for (int s = 1; s < static_cast<int>(Seasons::kNames.size()); ++s) {
+                const std::wstring name(Seasons::kNames[s].begin(), Seasons::kNames[s].end());
+                request.seasonLayers[s] = list == L"all" || (L"," + list + L",").find(L"," + name + L",") !=
+                                                                std::wstring::npos;
+            }
+        }
+        else if (arg == L"--renders" && hasValue) {
+            rendersFolder = argv[++i];
+        }
         else if (arg == L"--open") {
             open = true;
         }
@@ -173,10 +204,10 @@ int wmain(const int argc, wchar_t** argv)
     Logger::Get()->sinks().push_back(std::make_shared<spdlog::sinks::stderr_color_sink_mt>());
 
     const fs::path region = fs::absolute(argv[1]);
-    request.rendersDir = region / L"RegionRenders";
+    request.rendersDir = rendersFolder.empty() ? region / L"RegionRenders" : rendersFolder / region.filename();
     if (!fs::is_directory(request.rendersDir)) {
-        std::fprintf(stderr, "There is no RegionRenders folder in '%s'. Render the region in the game first.\n",
-                     Utf8(region.wstring()).c_str());
+        std::fprintf(stderr, "There are no renders in '%s'. Render the region in the game first.\n",
+                     Utf8(request.rendersDir.wstring()).c_str());
         return 1;
     }
     request.regionName = RegionName(region);
@@ -212,7 +243,7 @@ int wmain(const int argc, wchar_t** argv)
         }
         const int64_t total = progress.total.load();
         if (total > 0) {
-            std::printf("\r  %s zoom %d: %lld of %lld tiles   ", progress.layer.load() == 1 ? "transport" : "normal",
+            std::printf("\r  %s zoom %d: %lld of %lld tiles   ", progress.layer.load() == 0 ? " normal" : MapExport::LayerText(progress.layer.load()),
                         progress.zoom.load(), static_cast<long long>(progress.done.load()),
                         static_cast<long long>(total));
             std::fflush(stdout);

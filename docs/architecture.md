@@ -1,41 +1,25 @@
-# Implementation plan
+# Architecture
 
-Read `docs/plan.md` first. It holds the design and every reverse engineering fact with
-its Windows address. This file splits the work into modules, sets the contracts between
-them, and says who owns what.
+How the plugin is put together: the rules the code follows, the modules and their interfaces.
+The design and the reverse engineering facts are in `docs/plan.md` and `docs/re-notes/`.
 
-## Ground rules for every agent
+## Code rules
 
-- **Own your files.** Only edit the files your module owns (table below). If a contract
-  in another module must change, do not edit it. Write the change you need in your
-  final report.
-- **Do not edit** `SC4SeamlessRegionDirector.*`, `ui/SeamlessPanel.*`, `utils/Settings.*`
-  or the CMake files unless your task says so. The foundation wires everything once.
 - **Game thread only.** All calls into the game (`cISC4*`, `cIGZ*`, renderer, camera)
   happen on the game thread. Worker threads only do pure CPU work (WebP encode and
   decode, file IO, image scaling) on data they own.
-- **Only Windows 1.1.641.** All addresses live in `core/GameAddresses.hpp`. If the game
-  version is not 641, install no hooks and turn the feature off with a log line.
-- **Ghidra is read-only.** Use `ghx` (see `docs/plan.md` and the `sc4-ghidra-re` skill
-  notes in your brief). Never rename, comment or create anything in Ghidra. Put every new
-  fact (address, offset, evidence, confidence) in `docs/re-notes/<module>.md`.
-- **Hooks.** Use `core/Hooking.hpp` (MinHook detours with a trampoline to the original)
+- **Only Windows 1.1.641.** All addresses live in `core/GameAddresses.hpp` and the
+  `*Addresses.hpp` file of each module. If the game version is not 641, the plugin installs
+  no hooks and turns itself off with a log line.
+- **RE facts go in `docs/re-notes/<module>.md`**, with address, evidence and confidence.
+- **Hooks.** `core/Hooking.hpp` (MinHook detours with a trampoline to the original)
   for function hooks, and `Patcher` from sc4-dll-utilities only for byte patches that
   `core/Hooking.hpp` can undo. Every hook can be removed at shutdown.
-- **No shortcuts.** No TODO stubs left in your module, no "simplified for now" paths,
-  no silent failure. A failure is logged once (not every frame) and the feature degrades
-  cleanly.
-- **Build before you finish.** Configure and build Release in your worktree:
-  `cmake --preset vs2022-win32-release -DSC4_ENABLE_PLUGIN_DEPLOYMENT=OFF` then
-  `cmake --build --preset vs2022-win32-release-build`. Zero errors, and zero new
-  warnings in `src/`. Run the tests target if your module has tests.
-- **Never deploy.** Keep `-DSC4_ENABLE_PLUGIN_DEPLOYMENT=OFF`. Never write to
-  `Documents\SimCity 4`.
-- **Commit on your branch** with Conventional Commit messages. Never add
-  `Co-Authored-By` lines or any tool attribution to commits.
-- **Style.** C++23, `.clang-format` (it describes the style of the code base: namespace bodies
-  indented, braces on their own line for namespaces, classes and functions), no emoji. User-facing text (panel labels, help,
-  tooltips) uses friendly ASD-STE100 style English with no semicolons.
+- **No silent failure.** A failure is logged once (not every frame) and the feature
+  turns itself off cleanly.
+- **Style.** C++23, `.clang-format` (namespace bodies indented, braces on their own line for
+  namespaces, classes and functions). User-facing text (panel labels, help, tooltips) uses
+  plain ASD-STE100 style English with no semicolons.
 - **Logging.** `LOG_INFO`/`LOG_WARN`/`LOG_ERROR`/`LOG_DEBUG` from `utils/Logger.h`. Never
   log every frame.
 
@@ -50,44 +34,44 @@ The game is a 32-bit process with a 2 to 4 GB address space and a single game th
 - **Static passes only for tiles.** Neighbor tiles are drawn in the static passes, so the
   game's backing store keeps them. Redraw comes from dirty rectangles, not from drawing
   every frame. The hover tint is the only per-frame neighbor draw.
-- **Bounded memory.** The GPU tile cache has a hard cap from settings (default 256 MB). The
+- **Bounded memory.** The GPU tile cache has a hard cap from settings (default 512 MB). The
   decode queue and the encode queue are bounded. Back-pressure, never unbounded growth.
-- **Bounded main-thread work.** Texture uploads per frame have a budget (default 4 tiles
-  or 3 ms, whichever comes first). Capture readback is one block per frame at most: one
+- **Bounded main-thread work.** Texture uploads per frame have a budget (default 16 tiles
+  or 12 ms, whichever comes first). Capture readback is one block per frame at most: one
   draw and one read of the block of tiles that fits in the game window. Cutting the tiles
   out and handing them to the store can spread over the next ticks when the store queue is
   full. The capture runs with the game paused behind its progress, and the window still
   repaints between ticks.
-- **Worker threads.** One decode worker and one encode worker. Lower priority than the
-  game thread. They stop cleanly at shutdown and at city shutdown.
+- **Worker threads.** Up to three decode workers and up to 12 encode workers (two cores
+  left free). Lower priority than the game thread. They stop cleanly at shutdown and at
+  city shutdown.
 - **No blocking the game thread** on IO, decode or encode. The exception is the batch
   render and the capture, which run while the game is paused behind a progress window,
   and still yield every frame so the window repaints.
 
-## Source layout and ownership
+## Source layout
 
 All paths are under `src/dll/`.
 
-| Module | Files | Owner (wave) |
-|---|---|---|
-| Core | `core/GameAddresses.hpp`, `core/Hooking.*`, `core/GameAccess.*`, `core/IdleScheduler.*`, `core/Messages.hpp`, `core/Guard.hpp` | Foundation (W1) |
-| Region | `region/RegionIndex.*` | Foundation (W1) |
-| View math | `view/ViewMath.*`, `view/CameraReader.*` | Foundation (W1) |
-| UI shell | `ui/SeamlessPanel.*`, `utils/Settings.*`, director | Foundation (W1) |
-| Tests | `tests/` (new CMake test target) | Foundation (W1), each module adds its own test file |
-| Switching | `switching/CitySwitcher.*` | W2-A |
-| Camera | `camera/CameraExtender.*` | W2-B |
-| Capture | `capture/SnapshotReader.*`, `capture/ModelLoadMonitor.*`, `capture/CityCapturer.*` | W2-C |
-| Store | `store/TileStore.*`, `store/WebpCodec.*` | W2-D |
-| Render | `render/TileCache.*`, `render/NeighborRenderer.*` | W2-E |
-| Interaction | `interaction/NeighborPicker.*` | W3-F |
-| Batch | `batch/RegionBatchRenderer.*` | W3-G |
-| Export | `export/HtmlMapExporter.*` | W3-H |
-| Overlay | `overlay/MapOverlay.*` | W3-I |
+| Module | Files |
+|---|---|
+| Core | `core/GameAddresses.hpp`, `core/Hooking.*`, `core/GameAccess.*`, `core/IdleScheduler.*`, `core/Messages.hpp`, `core/Guard.hpp` |
+| Region | `region/RegionIndex.*`, `region/RegionLayout.*` |
+| View math | `view/ViewMath.*`, `view/CameraReader.*` |
+| UI shell | `ui/SeamlessPanel.*`, `utils/Settings.*`, director |
+| Tests | `tests/` |
+| Switching | `switching/CitySwitcher.*` |
+| Camera | `camera/CameraExtender.*` |
+| Capture | `capture/SnapshotReader.*`, `capture/ModelLoadMonitor.*`, `capture/CityCapturer.*`, `capture/SeasonOverride.*` |
+| Store | `store/TileStore.*`, `store/TileStoreModule.cpp`, `store/WebpCodec.*`, `store/Seasons.hpp` |
+| Render | `render/TileCache.*`, `render/NeighborRenderer.*` |
+| Interaction | `interaction/NeighborPicker.*` |
+| Batch | `batch/RegionBatchRenderer.*` |
+| Export | `export/HtmlMapExporter.*`, `export/MapExport.*` (also built into `src/tools/SC4RegionMap.exe`) |
+| Overlay | `overlay/MapOverlay.*` |
+| Remote commands | `remote/RemoteCommands.*` (see `docs/remote.md`) |
 
-The foundation creates every header above with the contract below, and a `.cpp` that
-compiles. Module owners replace the stub bodies. Every module class has the same
-lifecycle so the director can drive it:
+Every module class has the same lifecycle so the director can drive it:
 
 ```cpp
 // Called once after PostAppInit when the game version is supported.
@@ -105,9 +89,8 @@ void DrawPanelSection();
 and its view still exist) and posts PostCityInit and PostCityInitComplete. LoadCity pumps both
 message queues at its end (`0x00455964`, 100 to 500 messages, at most 5 s), so the two posted
 messages normally arrive **inside** LoadCity, inside a city switch task. On a busy queue the pump
-stops early and they arrive on a later pump, after the switch task returned. The first in-game
-test saw the first order. Code must work with both orders and rely on neither: "the switch is
-done" does not mean "OnCityInit has run", and OnCityInit can run while `CitySwitcher::IsBusy()`
+stops early and they arrive on a later pump, after the switch task returned. Code must work
+with both orders and rely on neither: "the switch is done" does not mean "OnCityInit has run", and OnCityInit can run while `CitySwitcher::IsBusy()`
 is true. Until PostCityInit arrives, `GameAccess::City()` is the new city, but
 `GameAccess::View3D()` and `RegionIndex::Current()` are null and every module is in its "no
 city" state. Work that belongs to one city is dropped in OnCityShutdown. Evidence:
@@ -129,10 +112,7 @@ the draw service, the world draw service, the camera service, the settings, the 
 scheduler, the tile store, the region index, the camera reader and the other modules a
 module needs (non-owning pointers). The director owns all modules and fills the context.
 
-## Contracts
-
-These are the public interfaces. Owners may add private members and helpers. Changing a
-public signature needs a note in the final report.
+## Module interfaces
 
 ### core/GameAddresses.hpp
 
@@ -521,46 +501,9 @@ degrees), so only zoom 4 can stand in for zoom 5 (same pitch, exactly 2x).
   rotations. Zooms 1 to 4 together have about 3,100. So a render up to zoom 5 takes and stores
   about 4 times what a render up to zoom 4 does: about 800 MB instead of 200 MB. The key packing
   (16 bits per tile column and row) and the store index cope with that.
-- **Tile cache**: unchanged at `TileCacheMB` (256 MB, 128 tiles of 512 px with the CPU copy). Zoom 5
+- **Tile cache**: unchanged at `TileCacheMB` (512 MB, 256 tiles of 512 px with the CPU copy). Zoom 5
   tiles are drawn 1:1, so a screen needs as many of them as of zoom 4 tiles at zoom 4 (at
   1920 x 1080 at most 5 x 4 per level). The cache works per screen, not per city.
-
-## Waves
-
-| Wave | Agents | Model |
-|---|---|---|
-| W1 | Foundation | Opus |
-| W2 | A Switching (Opus), B Camera (Fable), C Capture (Fable), D Store (Sonnet), E Render (Fable) | mixed |
-| W3 | F Interaction (Opus), G Batch (Opus), I Overlay (Opus) | Opus |
-| Later | H Export (Sonnet). Deferred, its stub stays in place | Sonnet |
-| W4 | Review: correctness, performance and integration across all modules | Fable |
-
-Each agent works in its own git worktree `C:\Users\caspe\CLionProjects\ssr-wt-<name>` on
-branch `feat/<name>`. The orchestrator merges each wave into `main`, builds, and starts the
-next wave from the merged `main`.
-
-## Status after the review (W4)
-
-Every module builds with no warning and its unit tests pass. **Nothing has run in the game
-yet.** `docs/testing.md` starts with the order for the first run.
-
-| Module | State | Known limits |
-|---|---|---|
-| Core (addresses, hooking, game access, idle scheduler, messages, `core/Guard.hpp`) | Complete | Windows 1.1.641 only. City view objects and `RegionIndex::Current()` are null from CloseCity until the posted PostCityInit arrives |
-| Region | Complete, unit tested | Read once per city load and once per region view. A city that is founded or renamed shows after the next city load or region view |
-| View math, CameraReader | Complete, unit tested | The Diagnostics tab must be green in game before anything else is trusted |
-| UI shell | Complete | Ctrl+Shift+F9 shows and hides the panel (fixed key). No panel on an unsupported game version, only the log line |
-| Store | Complete, unit tested | A city shutdown waits for the encode queue and the folder scan on the game thread. Folders of cities that left the region stay on disk and count in the size |
-| Switching | Complete | An unfounded target opens the region view. The modules of the new city start at the posted PostCityInit, normally inside LoadCity |
-| Camera | Complete, math unit tested | The four detours stay installed while ShowNeighbors is off and pass through. The scroll polygon is taken to hold 6 points (bounding box if not). Depth precision at zoom 1 to 3 in very large regions is open |
-| Capture | Complete, math unit tested | Needs the snapshot extension of the driver. Cars and sims of the paused game are in the tiles. A level that is rendered again is not drawn by neighbors until it is complete. A save during a render is handled but untested. SCD3D11 readback format is assumed |
-| Tile cache, Neighbors | Complete, math unit tested | Tiles must be a power of two. Each tile costs twice its size (see gaps). No neighbors at a custom magnification. Seam of at most half a pixel. Zoom 5 shows zoom 5 tiles when rendered, else zoom 4 tiles at 2x |
-| Interaction | Complete, math unit tested | The pick is on the ground at the edge height: the top of a tall neighbor building can pick the city behind it. Tint limits in `re-notes/interaction.md` |
-| Export | Complete, math, page and end to end export unit tested. Not run in the game yet | Needs the internet for Leaflet. Outlines of cities rendered before `groundHeight` existed use 250 m. One worker thread: about 10 ms per output tile, mostly WebP encode |
-| Batch | Complete, queue unit tested | Saves every city it leaves. Starts in a city or in the region view and ends there. The region view start is not tested in game yet |
-| Overlay | Complete, math unit tested | No mipmaps (grainy at zoom 1). 64 MB texture limit. The two-point pick also sends the click to the game |
-
-What the review changed is in the git log of `feat/review` (one commit per defect).
 
 ## Gaps in sc4-render-services (upstream candidates)
 
@@ -576,10 +519,5 @@ code or memory here.
 | **No state getters.** The draw service sets render state but cannot read it | The neighbor renderer reads the packed state, the stage 0 texture, wrap, filter, depth offset and fog from raw `SC4DrawContext` offsets to put them back (`render/RenderAddresses.hpp`) | Raw offsets, version checked | Getters, or a push and pop of the state |
 | **No public invalidate-rect.** No call marks a rectangle of the static view dirty | The neighbor renderer calls `cSC43DRender::AddDirtyRectangle` (`0x007c9540`) by address | Raw address, version checked | `InvalidateStaticRect(left, top, right, bottom)` on the draw service |
 | **SCD3D11 device removal.** After a device removal the textures come back blank and `GetDeviceGeneration()` does not change | Neighbor tiles and the overlay stay blank until the next city load or "Reload all tiles" | None | A generation change on device removal |
-| **No textured draw before the terrain** (from `docs/plan.md`). `WorldDraw` ignores `begin = true` | Back neighbors cannot use the world draw service | The neighbor renderer draws through the draw context itself in the begin callback of PreStatic | A world draw layer at the start of a pass |
-| **No camera bounds and clip plane service** (from `docs/plan.md`) | The camera module hooks two camera functions and writes camera fields | Detours, version checked | A service for scroll bounds, clip planes and free roam |
-
-## In-game testing
-
-Agents cannot run the game. Every module adds its checks to `docs/testing.md` under its
-own heading: what to do in game, what should happen, and which log lines prove it.
+| **No textured draw before the terrain**. `WorldDraw` ignores `begin = true` | Back neighbors cannot use the world draw service | The neighbor renderer draws through the draw context itself in the begin callback of PreStatic | A world draw layer at the start of a pass |
+| **No camera bounds and clip plane service** | The camera module hooks two camera functions and writes camera fields | Detours, version checked | A service for scroll bounds, clip planes and free roam |

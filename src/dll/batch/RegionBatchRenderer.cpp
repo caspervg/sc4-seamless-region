@@ -23,6 +23,7 @@
 #include "public/ImGuiPanelAdapter.h"
 #include "public/cIGZImGuiService.h"
 #include "region/RegionIndex.hpp"
+#include "render/NeighborRenderer.hpp"
 #include "store/TileStore.hpp"
 #include "switching/CitySwitcher.hpp"
 #include "utils/Logger.h"
@@ -40,10 +41,69 @@ namespace
 
     // A switch blocks while the city loads. A large city takes a minute or two.
     constexpr auto kSwitchTimeout = std::chrono::minutes(5);
-    // Ticks and time in a city before its render starts, so the game finishes the work it
-    // posts at a city load. Render on save never runs during a batch (CityCapturer).
-    constexpr int kSettleTicks = 30;
-    constexpr auto kSettleTime = std::chrono::seconds(3);
+    // Ticks and time in a city before its render starts, a margin for work other plugins post
+    // at a city load. The render itself starts after kPostCityInitComplete, pumps the message
+    // queues first, loads models at once and waits for them per level, so this stays short (it
+    // was 30 ticks and 3 s: about 2.5 s per city with nothing to wait for). Render on save never
+    // runs during a batch (CityCapturer).
+    constexpr int kSettleTicks = 10;
+    constexpr auto kSettleTime = std::chrono::milliseconds(500);
+    // Free address space below which no further city is opened (see Next_).
+    // A city load needs a few hundred MB in one piece. In a 2026-11-21 run the free space
+    // stayed near 1.8 GB (largest piece 1.6 GB) for most cities, then fell by about 200 MB a city.
+    // ponytail: tuned from two runs; the Opening lines log the numbers for more tuning.
+    constexpr uint32_t kMinFreeMB = 1200;
+    constexpr uint32_t kMinLargestFreeMB = 384;
+
+    struct AddressSpace
+    {
+        uint32_t totalMB = 0;
+        uint32_t largestMB = 0;
+        // Where the rest goes: DLLs and the exe, mapped files and sections (also graphics driver
+        // memory), the heaps and pools (committed, and reserved but not committed yet).
+        uint32_t imageMB = 0;
+        uint32_t mappedMB = 0;
+        uint32_t privateMB = 0;
+        uint32_t reservedMB = 0;
+    };
+
+    // Free and largest free piece of the process's address space, and what uses the rest.
+    AddressSpace FreeAddressSpace()
+    {
+        AddressSpace room;
+        SYSTEM_INFO info{};
+        GetSystemInfo(&info);
+        uint64_t total = 0, largest = 0, image = 0, mapped = 0, committed = 0, reserved = 0;
+        auto* address = static_cast<uint8_t*>(info.lpMinimumApplicationAddress);
+        MEMORY_BASIC_INFORMATION region{};
+        while (address < info.lpMaximumApplicationAddress && VirtualQuery(address, &region, sizeof(region))) {
+            if (region.State == MEM_FREE) {
+                total += region.RegionSize;
+                largest = std::max<uint64_t>(largest, region.RegionSize);
+            }
+            else if (region.Type == MEM_IMAGE) {
+                image += region.RegionSize;
+            }
+            else if (region.Type == MEM_MAPPED) {
+                mapped += region.RegionSize;
+            }
+            else if (region.State == MEM_COMMIT) {
+                committed += region.RegionSize;
+            }
+            else {
+                reserved += region.RegionSize;
+            }
+            address = static_cast<uint8_t*>(region.BaseAddress) + region.RegionSize;
+        }
+        room.totalMB = static_cast<uint32_t>(total >> 20);
+        room.largestMB = static_cast<uint32_t>(largest >> 20);
+        room.imageMB = static_cast<uint32_t>(image >> 20);
+        room.mappedMB = static_cast<uint32_t>(mapped >> 20);
+        room.privateMB = static_cast<uint32_t>(committed >> 20);
+        room.reservedMB = static_cast<uint32_t>(reserved >> 20);
+        return room;
+    }
+
     // The render of a city shows no progress for this long: it is cancelled.
     constexpr auto kCaptureStall = std::chrono::minutes(10);
     constexpr auto kProgressReadInterval = std::chrono::milliseconds(250);
@@ -276,10 +336,15 @@ bool RegionBatchRenderer::Start(const bool force, const bool addTransport)
     run_ = BatchQueue::Build(
         ctx_.region->Cities(), start, force,
         [this, addTransport](const CityInfo& c) { return addTransport ? NeedsTransport_(c) : NeedsRender_(c); },
-        NowText("%Y%m%d-%H%M%S"), NowText("%Y-%m-%d %H:%M:%S"));
+        NowText("%Y%m%d-%H%M%S"), NowText("%Y-%m-%d %H:%M:%S"), [](const CityInfo& c) -> uint64_t {
+            std::error_code ec;
+            const uintmax_t bytes = c.savePath.empty() ? 0 : fs::file_size(c.savePath, ec);
+            return ec ? 0 : static_cast<uint64_t>(bytes);
+        });
     run_.addTransport = addTransport;
     run_.transport = ctx_.settings->captureTransportLayer;
     run_.maxZoom = ctx_.settings->MaxRenderZoomIndex();
+    run_.rotations = ctx_.settings->RenderRotationMask();
     if (run_.pending.empty()) {
         message_ = "Every city has a render that is up to date. Nothing to do.";
         LOG_INFO("Batch: not started. {}", message_);
@@ -303,6 +368,21 @@ bool RegionBatchRenderer::Start(const bool force, const bool addTransport)
                      run_.pending.size(), run_.skipped.size()));
     Begin_();
     return true;
+}
+
+bool RegionBatchRenderer::ResumeLast()
+{
+    if (running_) {
+        message_ = "A region render runs already.";
+        return false;
+    }
+    LoadOffer_();
+    if (!offerResume_) {
+        message_ = "There is no unfinished region render.";
+        return false;
+    }
+    Resume_();
+    return running_;
 }
 
 void RegionBatchRenderer::Resume_()
@@ -343,12 +423,16 @@ void RegionBatchRenderer::Begin_()
     phase_ = Phase::Next;
     secondsSum_ = 0.0;
     secondsCount_ = 0;
-    restampKey_.clear();
+    restampCity_.clear();
+    restampKeys_.clear();
     restampOthers_.clear();
     message_.clear();
     lastRun_ = run_;
     if (GameAccess::City()) {
         pause_.emplace(false, true, true, true);
+    }
+    if (ctx_.neighborRenderer) {
+        ctx_.neighborRenderer->SetHeld(true);
     }
     stepId_ = ctx_.idle->AddRecurring([this] { return Step_(); });
 }
@@ -422,6 +506,16 @@ void RegionBatchRenderer::Next_()
             settleTicks_ = 0;
             return;
         }
+        // Every city load leaves the 32 bit game with less address space (a run crashed in
+        // LoadCity after 43 cities with about 1.7 GB free in pieces). Stop while the run can
+        // still go on after a restart of the game: it stays in batch.json.
+        const AddressSpace room = FreeAddressSpace();
+        if (room.totalMB < kMinFreeMB || room.largestMB < kMinLargestFreeMB) {
+            Interrupt_(std::format("The game has {} MB of address space left (largest piece {} MB), too little to "
+                                   "load another city safely. Restart the game and continue the region render.",
+                                   room.totalMB, room.largestMB));
+            return;
+        }
         // A city this run opened has no changes of the player: switching without a save loses
         // nothing. The player's own city must be saved, the switcher refuses otherwise.
         if (!Open_(*city)) {
@@ -430,7 +524,10 @@ void RegionBatchRenderer::Next_()
             SaveRun_();
             continue;
         }
-        Log_(std::format("Opening '{}' (attempt {})", current_.name, attempt));
+        Log_(std::format("Opening '{}' (attempt {}, {} MB address space free, largest piece {} MB; used: {} MB "
+                         "heaps and pools + {} MB reserved for them, {} MB mapped, {} MB DLLs)",
+                         current_.name, attempt, room.totalMB, room.largestMB, room.privateMB, room.reservedMB,
+                         room.mappedMB, room.imageMB));
         phase_ = Phase::Switching;
         return;
     }
@@ -440,7 +537,8 @@ void RegionBatchRenderer::Next_()
 bool RegionBatchRenderer::Open_(const CityInfo& city)
 {
     // Without a city (the region view) the city opens without a save and a close.
-    return GameAccess::City() ? ctx_.switcher->RequestSwitch(city.cellX, city.cellZ, openedByBatch_)
+    return GameAccess::City() ? ctx_.switcher->RequestSwitch(city.cellX, city.cellZ, openedByBatch_, nullptr,
+                                                             SaveOnLeave_())
                               : ctx_.switcher->RequestOpen(city.cellX, city.cellZ);
 }
 
@@ -457,7 +555,7 @@ void RegionBatchRenderer::GoBack_()
         if (!GameAccess::City()) {
             Finish_(end, std::string());
         }
-        else if (!ctx_.switcher->RequestRegionView(openedByBatch_)) {
+        else if (!ctx_.switcher->RequestRegionView(openedByBatch_, SaveOnLeave_())) {
             Finish_(end, "The game could not go to the region view: " + ctx_.switcher->LastError());
         }
         else {
@@ -628,6 +726,12 @@ void RegionBatchRenderer::StepSettle_()
     request.addTransport = run_.addTransport;
     request.transport = run_.transport;
     request.maxZoom = run_.maxZoom;
+    for (int r = 0; r < 4; ++r) {
+        if (run_.rotations >> r & 1u) {
+            request.rotations.push_back(r);
+        }
+    }
+    request.onlyNeeded = !run_.force;
     if (!ctx_.capturer->Start(request)) {
         const std::string error = ctx_.capturer->Progress().error;
         BatchQueue::Fail(run_, current_, "The render did not start: " + (error.empty() ? "no reason given." : error));
@@ -673,16 +777,20 @@ void RegionBatchRenderer::StepCapture_()
         secondsSum_ += seconds;
         ++secondsCount_;
         if (const CityInfo* city = FindByKey_(current_.key)) {
-            restampKey_ = city->key;
+            restampCity_ = city->key;
+            restampKeys_ = StorageKeys_(city->key);
             restampPath_ = city->savePath;
             restampOthers_.clear();
             for (const CityInfo& other : ctx_.region->Cities()) {
                 const int64_t fileTime = other.savePath.empty() ? 0 : TileStore::FileTime(other.savePath);
-                const std::optional<CityRenderMeta> meta = other.key == city->key || fileTime == 0
-                                                               ? std::nullopt
-                                                               : ctx_.tileStore->LoadMeta(other.key);
-                if (meta && meta->saveFileTime == fileTime) {
-                    restampOthers_.push_back({other.key, other.savePath, fileTime});
+                if (other.key == city->key || fileTime == 0) {
+                    continue;
+                }
+                for (std::string& otherKey : StorageKeys_(other.key)) {
+                    const std::optional<CityRenderMeta> meta = ctx_.tileStore->LoadMeta(otherKey);
+                    if (meta && meta->saveFileTime == fileTime) {
+                        restampOthers_.push_back({std::move(otherKey), other.savePath, fileTime});
+                    }
                 }
             }
         }
@@ -710,15 +818,18 @@ void RegionBatchRenderer::StepCapture_()
 
 void RegionBatchRenderer::Restamp_()
 {
-    if (restampKey_.empty()) {
+    if (restampCity_.empty()) {
         return;
     }
-    std::optional<CityRenderMeta> meta = ctx_.tileStore->LoadMeta(restampKey_);
+    std::optional<CityRenderMeta> meta;
     const int64_t saved = TileStore::FileTime(restampPath_);
-    if (meta && saved != 0 && saved != meta->saveFileTime) {
-        meta->saveFileTime = saved;
-        if (ctx_.tileStore->WriteMeta(restampKey_, *meta)) {
-            LOG_INFO("Batch: '{}' was saved after its render, its render stays up to date", restampKey_);
+    for (const std::string& key : restampKeys_) {
+        meta = ctx_.tileStore->LoadMeta(key);
+        if (meta && saved != 0 && saved != meta->saveFileTime) {
+            meta->saveFileTime = saved;
+            if (ctx_.tileStore->WriteMeta(key, *meta)) {
+                LOG_INFO("Batch: '{}' was saved after its render, its render stays up to date", key);
+            }
         }
     }
     int neighbors = 0;
@@ -731,17 +842,21 @@ void RegionBatchRenderer::Restamp_()
         }
     }
     if (neighbors > 0) {
-        LOG_INFO("Batch: the save of '{}' also wrote {} neighbor cities, their renders stay up to date", restampKey_,
+        LOG_INFO("Batch: the save of '{}' also wrote {} neighbor renders, they stay up to date", restampCity_,
                  neighbors);
     }
     restampOthers_.clear();
-    restampKey_.clear();
+    restampKeys_.clear();
+    restampCity_.clear();
 }
 
 void RegionBatchRenderer::Finish_(const State state, const std::string& message)
 {
     Restamp_();  // the last rendered city, saved when the run left it for the region view
     running_ = false;
+    if (ctx_.neighborRenderer) {
+        ctx_.neighborRenderer->SetHeld(false);
+    }
     if (stepId_ != 0) {
         ctx_.idle->Cancel(stepId_);
         stepId_ = 0;
@@ -779,6 +894,9 @@ void RegionBatchRenderer::Finish_(const State state, const std::string& message)
 void RegionBatchRenderer::Interrupt_(const std::string& why)
 {
     running_ = false;
+    if (ctx_.neighborRenderer) {
+        ctx_.neighborRenderer->SetHeld(false);
+    }
     if (stepId_ != 0) {
         ctx_.idle->Cancel(stepId_);
         stepId_ = 0;
@@ -827,16 +945,40 @@ std::optional<BatchQueue::Run> RegionBatchRenderer::LoadRun_() const
     return run;
 }
 
+std::string RegionBatchRenderer::StatusText() const
+{
+    if (!running_) {
+        return "idle";
+    }
+    static constexpr const char* kPhases[] = {"next", "switching", "settling", "rendering", "returning"};
+    return std::format("running, {} done, {} failed, {} left, '{}' {} {}/{} tiles{}", run_.done.size(),
+                       run_.failed.size(), run_.pending.size(), current_.name, kPhases[static_cast<int>(phase_)],
+                       captureProgress_.done, captureProgress_.total, cancelRequested_ ? ", stopping" : "");
+}
+
+bool RegionBatchRenderer::SaveOnLeave_() const { return !openedByBatch_ || ctx_.settings->batchSaveCities; }
+
+std::vector<std::string> RegionBatchRenderer::StorageKeys_(const std::string& cityKey) const
+{
+    const Settings& s = *ctx_.settings;
+    std::vector<std::string> keys;
+    for (const Seasons::Pass& pass : Seasons::RenderPasses({s.RenderMonth(), s.RenderDay()}, s.RenderAllSeasons())) {
+        keys.push_back(Seasons::StorageKey(cityKey, pass.slot));
+    }
+    return keys;
+}
+
 bool RegionBatchRenderer::NeedsRender_(const CityInfo& city) const
 {
-    return ctx_.tileStore->NeedsRender(city, ctx_.settings->MaxRenderZoomIndex(),
-                                       ctx_.settings->captureTransportLayer);
+    return ctx_.tileStore->NeedsRender(city, *ctx_.settings);
 }
 
 bool RegionBatchRenderer::NeedsTransport_(const CityInfo& city) const
 {
+    // The transport layer lives in the main render only.
     const std::optional<CityRenderMeta> meta = ctx_.tileStore->LoadMeta(city.key);
-    return !meta || !CityMeta::HasLevelsUpTo(*meta, ctx_.settings->MaxRenderZoomIndex(), true);
+    return !meta || !CityMeta::HasLevelsUpTo(*meta, ctx_.settings->MaxRenderZoomIndex(), true,
+                                             ctx_.settings->RenderRotationMask());
 }
 
 void RegionBatchRenderer::Log_(const std::string& line) const
@@ -863,7 +1005,22 @@ void RegionBatchRenderer::DrawPanelSection()
     else {
         const char* why = WhyNotBegin_();
         CityCapturer::DrawMaxZoomChoice(*ctx_.settings);
+        CityCapturer::DrawRotationChoice(*ctx_.settings);
+        CityCapturer::DrawDateChoice(*ctx_.settings);
         CityCapturer::DrawTransportChoice(*ctx_.settings);
+        if (ImGui::Checkbox("Save each city", &ctx_.settings->batchSaveCities)) {
+            ctx_.settings->MarkChanged();
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        if (ImGui::BeginItemTooltip()) {
+            ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+            ImGui::TextUnformatted("Save each city the region render opened before it moves on. Off by default: the "
+                                   "game is paused during the render, so a save adds nothing to the city and costs "
+                                   "about 3 seconds per city. The city you started in is always saved.");
+            ImGui::PopTextWrapPos();
+            ImGui::EndTooltip();
+        }
         ImGui::BeginDisabled(why != nullptr);
         bool open = false;
         if (ImGui::Button("Render the region")) {

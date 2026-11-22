@@ -1,9 +1,9 @@
 # Interaction: hover, tint and click on neighbors
 
-Module W3-F: `src/dll/interaction/*`. Windows addresses are SimCity 4 1.1.641, read with `ghx`
+Module `src/dll/interaction/*`. Windows addresses are SimCity 4 1.1.641, read with `ghx`
 (read only). Mac addresses are from the symbolized Mac build, logic only. New constants live
 in `src/dll/interaction/InteractionAddresses.hpp`. Tests: `tests/InteractionTests.cpp`.
-Nothing here was run in game yet: see `docs/testing.md`, "Interaction".
+In-game checks: `docs/testing.md`, "Interaction".
 
 ## City view input dispatch
 

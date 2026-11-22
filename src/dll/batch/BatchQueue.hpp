@@ -58,6 +58,7 @@ namespace BatchQueue
         // (-1: the setting of now, for files of older versions).
         bool transport = false;
         int maxZoom = -1;
+        uint32_t rotations = 0xF;    // bit r: render rotation r (all four for files of older versions)
         Entry start;                 // the city the run started in, and ends in. Empty when regionView
         bool regionView = false;     // started in the region view: it ends there and renders every city
         std::vector<Entry> pending;  // in render order, the first is the next
@@ -74,51 +75,24 @@ namespace BatchQueue
         return Entry{city.key, city.name, city.cellX, city.cellZ, city.sizeX, city.sizeZ};
     }
 
-    // Twice the city centre, in cells, so the distances stay whole numbers.
-    inline int64_t Distance2(const Entry& a, int ax2, int az2)
+    // Moves the city with `key` to the front, the rest keeps its order.
+    inline void MoveToFront(std::vector<Entry>& cities, const std::string& key)
     {
-        const int64_t dx = 2LL * a.cellX + a.sizeX - ax2;
-        const int64_t dz = 2LL * a.cellZ + a.sizeZ - az2;
-        return dx * dx + dz * dz;
-    }
-
-    // Orders the cities as a nearest-first walk from the city `from`: each next city is the one
-    // closest to the last. A city with the key of `from` comes first. Ties go to the smaller
-    // (cellZ, cellX), so the order is the same every time.
-    // ponytail: greedy walk, O(n^2). A region has at most a few hundred cities.
-    inline void Order(std::vector<Entry>& cities, const Entry& from)
-    {
-        std::vector<Entry> left = std::move(cities);
-        cities.clear();
-        cities.reserve(left.size());
-        int x2 = 2 * from.cellX + from.sizeX;
-        int z2 = 2 * from.cellZ + from.sizeZ;
-        if (const auto self = std::ranges::find(left, from.key, &Entry::key); self != left.end()) {
-            cities.push_back(std::move(*self));
-            left.erase(self);
-        }
-        while (!left.empty()) {
-            const auto next = std::ranges::min_element(left, [&](const Entry& a, const Entry& b) {
-                const int64_t da = Distance2(a, x2, z2);
-                const int64_t db = Distance2(b, x2, z2);
-                if (da != db) {
-                    return da < db;
-                }
-                return a.cellZ != b.cellZ ? a.cellZ < b.cellZ : a.cellX < b.cellX;
-            });
-            x2 = 2 * next->cellX + next->sizeX;
-            z2 = 2 * next->cellZ + next->sizeZ;
-            cities.push_back(std::move(*next));
-            left.erase(next);
+        if (const auto it = std::ranges::find(cities, key, &Entry::key); it != cities.end()) {
+            std::rotate(cities.begin(), it, it + 1);
         }
     }
 
     // A new run from the region's cities. Unfounded cities and cities whose render is up to
-    // date (isStale false, unless force) go to skipped. The rest is ordered from the start city.
-    // Without a start city (nullptr: the region view) the walk starts at the first city to render
-    // in the order of `cities`, and the run ends in the region view.
+    // date (isStale false, unless force) go to skipped. The rest goes largest first by `size`
+    // (the save file size, about the memory a city load needs; ties in the order of `cities`):
+    // the largest cities load while the 32 bit game has the most free address space, and the
+    // smaller ones after them mostly fit in what it already holds. The start city stays first, it
+    // is open already. Without a start city (nullptr: the region view) the run ends in the region
+    // view.
     inline Run Build(const std::vector<CityInfo>& cities, const CityInfo* start, const bool force,
-                     const std::function<bool(const CityInfo&)>& isStale, std::string runId, std::string startedAt)
+                     const std::function<bool(const CityInfo&)>& isStale, std::string runId, std::string startedAt,
+                     const std::function<uint64_t(const CityInfo&)>& size = {})
     {
         Run run;
         run.runId = std::move(runId);
@@ -128,6 +102,7 @@ namespace BatchQueue
         if (start) {
             run.start = ToEntry(*start);
         }
+        std::vector<uint64_t> sizes;
         for (const CityInfo& city : cities) {
             if (!city.founded) {
                 run.skipped.push_back({city.key, city.name, "Not founded", 0.0});
@@ -137,14 +112,22 @@ namespace BatchQueue
             }
             else {
                 run.pending.push_back(ToEntry(city));
+                sizes.push_back(size ? size(city) : 0);
             }
         }
-        if (start) {
-            Order(run.pending, run.start);
+        std::vector<size_t> order(run.pending.size());
+        for (size_t i = 0; i < order.size(); ++i) {
+            order[i] = i;
         }
-        else if (!run.pending.empty()) {
-            const Entry first = run.pending.front();  // RegionIndex::Cities is sorted by (cellZ, cellX)
-            Order(run.pending, first);
+        std::ranges::stable_sort(order, [&](const size_t a, const size_t b) { return sizes[a] > sizes[b]; });
+        std::vector<Entry> sorted;
+        sorted.reserve(order.size());
+        for (const size_t i : order) {
+            sorted.push_back(std::move(run.pending[i]));
+        }
+        run.pending = std::move(sorted);
+        if (start) {
+            MoveToFront(run.pending, run.start.key);
         }
         return run;
     }
@@ -171,7 +154,7 @@ namespace BatchQueue
 
     // Before a run continues after a restart: cities that were started kMaxAttempts times
     // without an end fail, and the rest is ordered again from the city now open. Without an open
-    // city (nullptr: the region view) the saved order stays.
+    // city (nullptr: the region view) the saved order stays; with one, that city comes first.
     inline void PrepareResume(Run& run, const Entry* current)
     {
         std::vector<Entry> crashed;
@@ -185,7 +168,7 @@ namespace BatchQueue
             Fail(run, e, "The game stopped twice while it rendered this city.");
         }
         if (current) {
-            Order(run.pending, *current);
+            MoveToFront(run.pending, current->key);
         }
     }
 
@@ -234,6 +217,7 @@ namespace BatchQueue
             {"addTransport", run.addTransport},
             {"transport", run.transport},
             {"maxZoom", run.maxZoom},
+            {"rotations", run.rotations},
             {"start", EntryJson(run.start)},
             {"regionView", run.regionView},
             {"pending", std::move(pending)},
@@ -295,6 +279,8 @@ namespace BatchQueue
             run.addTransport = j.value("addTransport", false);  // not in files of older versions
             run.transport = j.value("transport", false);
             run.maxZoom = j.value("maxZoom", -1);
+            run.rotations = j.value("rotations", 0xFu) & 0xFu;
+            run.rotations = run.rotations ? run.rotations : 0xFu;
             run.start = entry(j.at("start"));
             run.regionView = j.value("regionView", false);  // not in files of older versions
             for (const nlohmann::json& e : j.at("pending")) {

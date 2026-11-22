@@ -1,6 +1,6 @@
 #pragma once
 
-// Render (W2-E): the memory accounting of the tile cache. Header only, no game calls, unit
+// Render: the memory accounting of the tile cache. Header only, no game calls, unit
 // tested in tests/RenderTests.cpp.
 //
 // Entries are keyed by TileKey and carry a byte size and the stamp of the last draw pass

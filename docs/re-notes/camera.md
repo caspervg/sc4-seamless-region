@@ -1,6 +1,6 @@
 # Camera: scroll bounds, clip planes, edge walls, clear color
 
-Facts found for the camera module (W2-B). Windows 1.1.641, read with `ghx` from the Windows
+Facts found for the camera module. Windows 1.1.641, read with `ghx` from the Windows
 program unless a row says Mac. Code: `src/dll/camera/*`. New addresses:
 `src/dll/camera/CameraAddresses.hpp`. Tests: `tests/CameraBoundsTests.cpp`.
 
@@ -167,8 +167,9 @@ Per edge for both, with one mask (bit i = game edge i, from the public bits):
 Public bits (world terms of the current city): 1 = x 0 (west), 2 = x max (east), 4 = z 0
 (north), 8 = z max (south). Region z grows to the south.
 
-Both detours hide nothing while the camera magnification is not 1.0. The region thumbnail
-writer (`0x005ddec0`) is the only code that draws the city at another magnification (0.25). The
+Game zoom 6 is model zoom 4 (game zoom 5) at magnification 2.0; the model zooms Z0-Z4 are game
+zooms 1-5. Both detours hide nothing while the camera magnification is below 1.0. The region thumbnail
+writer (`0x005ddec0`) is the only code that draws the city below 1.0 (at 0.25). The
 picture and the border masks it saves into the city file keep their walls, as in the game
 without the plugin. A render (capture) draws at magnification 1.0 and hides the two back edges of each rotation
 (`CameraBounds::BackEdges`, the edges through `ViewMath::BaseCorner`). The front cliffs and water
@@ -199,7 +200,6 @@ or 0xFF per channel for a key color that survives the driver's conversion exactl
 
 ## Open points
 
-- All of this is untested in the game. See docs/testing.md, "Camera".
 - The exact capacity of the scroll bounds vector (expected 6).
 - Whether a larger eye distance changes anything outside the camera code besides fog (sound,
   picking). The view direction SC4ViewUtilities keeps is normalized, and the eye distance to

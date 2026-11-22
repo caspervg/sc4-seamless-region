@@ -68,7 +68,8 @@ namespace
             return 0;
         }
         const void* camera = GameAccess::CameraControl();
-        if (!camera || ReadField<float>(camera, CC::kMagnification) != 1.0f) {
+        // Game zoom 6 (zoom 5 at magnification 2) hides them like any view.
+        if (!camera || ReadField<float>(camera, CC::kMagnification) < 1.0f) {
             return 0;
         }
         const int zoom = ReadField<int32_t>(camera, CC::kZoom, -1);
@@ -590,7 +591,8 @@ void CameraExtender::RefreshNeighborWalls()
             const int rotation = v / ViewMath::kZoomCount;
             const int zoom = v % ViewMath::kZoomCount;
             autoWalls_[v] = CameraBounds::NeighborEdgeMask(ctx_.region->Cities(), *current, [&](const CityInfo& city) {
-                const std::optional<CityRenderMeta> meta = ctx_.tileStore->LoadMeta(city.key);
+                const std::optional<CityRenderMeta> meta = ctx_.tileStore->LoadMeta(
+                    ctx_.tileStore->ChooseStorageKey(city.key, Seasons::OfMonth(GameAccess::CityMonth())));
                 return meta && CityMeta::ChooseLevel(meta->levels, rotation, zoom) != nullptr;
             });
         }

@@ -105,7 +105,15 @@ namespace CaptureMath
     //
     // Differences below kOpaqueSlack of the contrast count as opaque, so render noise between
     // the two passes does not make holes. Differences above 1 - kOpaqueSlack count as empty.
+    //
+    // A pixel that really shows some background changes like the clear color on every channel
+    // with contrast, by the same fraction: from magenta to green red and blue fall as much as
+    // green rises. When the two passes drew different content there (a shadow that SCD3D11's
+    // live shadows put in one pass and not the other, an effect), the channels disagree: such a
+    // pixel is opaque, with the color of the first pass. A disagreement above kFollowTolerance
+    // percent of the contrast counts.
     constexpr int kOpaqueSlackPercent = 6;
+    constexpr int kFollowTolerancePercent = 20;
     inline size_t ComposeTwoPasses(uint8_t* a, const uint8_t* b, const size_t pixelCount, const Rgb keyA, const Rgb keyB)
     {
         int channel = 0;
@@ -118,13 +126,29 @@ namespace CaptureMath
         const int sign = contrast > 0 ? 1 : -1;
         const int span = std::abs(contrast);
         const std::array<int, 3> key{keyA.r, keyA.g, keyA.b};
+        const std::array<int, 3> keyDifference{keyB.r - keyA.r, keyB.g - keyA.g, keyB.b - keyA.b};
+        // The fraction of the background on channel c agrees with follow / span.
+        const auto agrees = [&](const uint8_t* pa, const uint8_t* pb, const int follow) {
+            for (int c = 0; c < 3; ++c) {
+                const int dc = keyDifference[c];
+                if (c == channel || std::abs(dc) < kMinKeyContrast / 2) {
+                    continue;
+                }
+                const int64_t followC = static_cast<int64_t>(pb[c] - pa[c]) * (dc > 0 ? 1 : -1);
+                const int64_t off = std::abs(followC * span - static_cast<int64_t>(follow) * std::abs(dc));
+                if (off * 100 > static_cast<int64_t>(kFollowTolerancePercent) * span * std::abs(dc)) {
+                    return false;
+                }
+            }
+            return true;
+        };
 
         size_t visible = 0;
         const uint8_t* const end = a + pixelCount * 4;
         for (; a != end; a += 4, b += 4) {
             // How far the pixel follows the clear color, 0..span.
             const int follow = (b[channel] - a[channel]) * sign;
-            if (follow <= slack) {
+            if (follow <= slack || !agrees(a, b, follow)) {
                 ++visible;  // a[3] is already 255
                 continue;
             }
@@ -285,9 +309,11 @@ namespace CaptureMath
     // them. The read area is always blockW x blockH tiles, also when fewer tiles of the block
     // touch the city: the driver then reuses its buffer of the same size.
     // -----------------------------------------------------------------------------------------
-    // At most this many tiles per side. Every tile of a block costs two block buffers of 1 MB
-    // (both passes) plus 1 MB in the driver's own buffer, in a 32 bit process.
-    constexpr int kMaxBlockSide = 4;
+    // At most this many tiles per side, and at most kMaxBlockPixels in all. Every tile of a block
+    // costs two block buffers of 1 MB (both passes) plus 1 MB in the driver's own buffer, in a
+    // 32 bit process: 32 tiles of 512 px are about 96 MB.
+    constexpr int kMaxBlockSide = 8;
+    constexpr int64_t kMaxBlockPixels = 32ll * 512 * 512;
 
     struct BlockTile
     {
@@ -303,11 +329,16 @@ namespace CaptureMath
         int count = 0;       // tiles to render, row by row
     };
 
-    // Whole tiles the viewport holds per side, at least 1 and at most kMaxBlockSide.
+    // Whole tiles the viewport holds per side, at least 1 and at most kMaxBlockSide, together at
+    // most kMaxBlockPixels (the longer side gives way).
     inline void BlockSize(const int tileSize, const int viewportW, const int viewportH, int& w, int& h)
     {
         w = tileSize > 0 ? std::clamp(viewportW / tileSize, 1, kMaxBlockSide) : 1;
         h = tileSize > 0 ? std::clamp(viewportH / tileSize, 1, kMaxBlockSide) : 1;
+        const int64_t tilePixels = static_cast<int64_t>(tileSize) * tileSize;
+        while (w * h > 1 && w * h * tilePixels > kMaxBlockPixels) {
+            (w >= h ? w : h) -= 1;
+        }
     }
 
     // Plans the next block of a level and takes its tiles out of `pending` (tilesX * tilesY

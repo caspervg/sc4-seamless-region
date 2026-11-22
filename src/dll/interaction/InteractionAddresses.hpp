@@ -1,6 +1,6 @@
 #pragma once
 
-// Game constants the interaction module (W3-F) uses, for the Windows build 1.1.641. Evidence
+// Game constants the interaction module uses, for the Windows build 1.1.641. Evidence
 // in docs/re-notes/interaction.md.
 
 #include <cstdint>

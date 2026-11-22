@@ -1,4 +1,4 @@
-# SC4 Seamless Region: plan
+# SC4 Seamless Region: design
 
 Show the neighbor cities around the city you play, rendered at the current zoom and
 rotation, and switch to a neighbor by clicking it. The renders are made in game and
@@ -150,62 +150,6 @@ Lossy WebP with alpha. Rough sizes for all zooms and rotations: about 200 MB for
 city, 12 MB for a small one, up to zoom 4. Zoom 5 is stored only when the player renders up to
 zoom 5 (about 4 times as much).
 
-## Phases
-
-### Phase 0: spikes
-
-- **S1 Switch.** A hotkey switches to the neighbor in a fixed direction. Check whether the
-  old city screen repaints with no city while the new one loads.
-- **S2 Camera.** Zero the camera +0x148 flag and skip `DrawSideCliffs`. See what the game
-  draws past the edge.
-- **S3 Capture.** Grab one 512x512 tile through `0xE69BFE2A` on DX7 and SCD3D11 and save
-  it. Check whether it reads the back or the front buffer.
-
-### Phase 1: capture
-
-- Tile by stepping the view target by exactly 512 pixels of world distance.
-- Transparency from a key clear color with the background picture and the edge walls
-  off. `SC4RenderRegionBorderMasks` (`0x005dccf0`) is the fallback.
-- Rotation outer loop, zoom inner loop. Wait for models. Restore the view state.
-- Write the tiles and `meta.json`.
-
-### Phase 2: draw
-
-- Read the region and the `meta.json` files at city load.
-- Decode tiles on a worker thread, upload on the main thread into a small LRU cache of
-  512 px textures.
-- Back and front passes as above. Mark a dirty rectangle when a tile arrives.
-- Widen the scroll bounds to the region at zooms 1 to 3, and to the city plus about 1 km
-  at zooms 4 and 5. Widen the clip planes.
-- Hide the edge walls only along edges that have a drawn neighbor. Fog off for tiles.
-
-### Phase 3: interaction
-
-- Mouse to world: render-services `GetEyeRay`, then the plane at the edge height, then
-  the region cell, then `GetCity`.
-- Tint the hovered city in a dynamic pass. ImGui tooltip with the name and the render
-  age. Click runs the switch.
-
-### Phase 4: batch and refresh
-
-- "Render region" loads each city, captures it, skips cities whose render is newer than
-  their save, and can resume.
-- "Re-render this city" button. Optional render on save.
-
-### Phase 5: extras
-
-- HTML map export from the zoom 4 tiles.
-- A real or drawn map image as a guide on the ground.
-
 ## Needed in sc4-render-services
 
-- A textured draw before the terrain (`WorldDraw` ignores begin=true today).
-- Texture updates without a CPU copy.
-- A public "invalidate static view rectangle" call.
-- A camera bounds and clip plane service.
-
-## Open questions
-
-- Whether the old city screen repaints with a null city during `LoadCity`.
-- Whether `DrawWaterBox` draws edge water walls that also need hiding.
-- Lighting differences between renders and the live city.
+See `docs/architecture.md`, "Gaps in sc4-render-services".

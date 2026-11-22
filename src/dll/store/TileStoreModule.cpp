@@ -7,6 +7,7 @@
 #include <cstdio>
 
 #include "camera/CameraExtender.hpp"
+#include "utils/Settings.h"
 #include "imgui.h"
 #include "region/RegionIndex.hpp"
 #include "render/NeighborRenderer.hpp"
@@ -68,11 +69,8 @@ void TileStore::DrawPanelSection()
                 if (!city.founded) {
                     row.state = 0;
                 }
-                else if (!LoadMeta(city.key)) {
-                    row.state = 1;
-                }
                 else {
-                    row.state = IsStale(city) ? 2 : 3;
+                    row.state = !LoadMeta(city.key) ? 1 : IsStale(city, city.key) ? 2 : 3;
                 }
                 rows_.push_back(std::move(row));
             }

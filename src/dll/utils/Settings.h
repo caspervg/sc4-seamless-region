@@ -6,10 +6,19 @@
 // MarkChanged() so modules that cache a value can notice through Revision(). Save() writes
 // every key back and keeps the other content of the file.
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <filesystem>
+#include <string>
 
 #include <spdlog/common.h>
+
+namespace mINI
+{
+    template <typename T>
+    class INIMap;
+}
 
 class Settings
 {
@@ -17,6 +26,11 @@ public:
     void Load(const std::filesystem::path& settingsFilePath);
     // Writes all keys to the file. Returns false (and logs) on failure.
     bool Save(const std::filesystem::path& settingsFilePath) const;
+    // One INI key (case does not matter) from text, with the same rules as Load: an invalid value
+    // is logged and leaves the field. False for an unknown key. Marks the settings changed.
+    bool Set(const std::string& key, const std::string& value);
+    // The value of one INI key as Save writes it, empty for an unknown key.
+    [[nodiscard]] std::string Get(const std::string& key) const;
 
     void MarkChanged() { ++revision_; }
     [[nodiscard]] uint32_t Revision() const { return revision_; }
@@ -44,6 +58,8 @@ public:
     // Keep the sun glare on water in renders. The glare is laid out per city, so it leaves hard
     // seams between neighbors.
     bool captureWaterGlare = false;
+    // Keep the terrain grid in renders when it is on in the game. Off: the render hides it.
+    bool captureTerrainGrid = false;
     // Turn the game's kRenderSnapshot render property on during a render, like its region
     // thumbnail does. It makes water a flat plane. INI only.
     bool captureSnapshotFlag = false;
@@ -53,17 +69,45 @@ public:
     // Keep the cliffs and water walls of the two front edges in renders. Where the neighbor in
     // front is lower, the seam then shows a cliff. Off: every edge is transparent.
     bool captureEdgeWalls = true;
+    // Draw the tiles on the city edge again as dirty rectangles (both key colors), instead of the
+    // whole window over the second key color. Off: the whole window, as before.
+    bool capturePartialRedraw = true;
+    // With a driver that reads the screen back without waiting (SCD3D11's async snapshot
+    // extension): draw the next block while the copy of the one before is on the way.
+    bool captureAsyncReadback = true;
+    // Render at a date: timed props (seasonal lot and painted props) show the state of
+    // captureMonth/captureDay, the same in every city of the region. The city's own date stays.
+    bool captureAtDate = true;
+    int captureMonth = 6;
+    int captureDay = 15;
+    // With captureAtDate: seasonal trees (flora with a year long cycle, planted on Sep 1 as is
+    // the standard) show the stage of captureMonth. Slower in cities with many trees.
+    bool captureSeasonalFlora = true;
+    // With captureAtDate: after the main render, render the three other seasons too, each at
+    // its mid-season date into its season slot, in the same rotations and zooms. Neighbors then
+    // show the season of the open city's date. Four times the render time and disk space.
+    bool captureAllSeasons = false;
+    // Where the renders go (UTF-8). Empty: the RegionRenders folder of each region. Else
+    // <rendersFolder>/<region folder name>, for example on another disk or outside a synced folder.
+    std::string rendersFolder;
     // The highest zoom a render makes, as the game counts zooms: 3, 4 or 5. Zoom 5 has 4 times
     // the pixels of zoom 4. Without zoom 5 tiles, zoom 5 shows zoom 4 at twice the size. Without
     // zoom 4 tiles neighbors do not show at zoom 4 and 5.
     int maxRenderZoom = 4;
+    // The rotations a render makes, [0] is the game's rotation 1. A neighbor shows only in the
+    // rotations it has a render for. Each rotation is a quarter of the render time.
+    std::array<bool, 4> renderRotation{true, true, true, true};
+    // Region render: save each city the batch opened when it moves on. Off (default): those
+    // cities close without a save. The game is paused during their render, so nothing is lost,
+    // and it is about 3 seconds faster per city. The city the run started in is always saved.
+    bool batchSaveCities = false;
     // GPU tile cache limit in megabytes. A 512 px tile takes 2 MB (with the CPU copy). 96 MB was
     // too little at 4K: one neighbor can show more tiles than that holds.
-    int tileCacheMB = 256;
+    int tileCacheMB = 512;
     // Texture uploads per frame: at most this many tiles...
-    int uploadTilesPerFrame = 4;
+    int uploadTilesPerFrame = 16;
     // ...or this many milliseconds, whichever comes first.
-    int uploadMsPerFrame = 3;
+    int uploadMsPerFrame = 12;
     // At zoom 4 and 5, scroll at most this far past the city edge, in metres.
     int zoom45BandMetres = 1024;
     // WebP quality for stored tiles, 0 to 100.
@@ -87,7 +131,34 @@ public:
 
     // maxRenderZoom as a zoom index (2..4).
     [[nodiscard]] int MaxRenderZoomIndex() const { return maxRenderZoom - 1; }
+    // The renders folder of the region in `regionDir` (rendersFolder).
+    [[nodiscard]] std::filesystem::path RendersDirectoryFor(const std::filesystem::path& regionDir) const
+    {
+        if (rendersFolder.empty()) {
+            return regionDir / "RegionRenders";
+        }
+        return std::filesystem::path(std::u8string(rendersFolder.begin(), rendersFolder.end())) / regionDir.filename();
+    }
+    // The date a render is made at (0 and 0: the city's own) and the slot it is stored in.
+    [[nodiscard]] int RenderMonth() const { return captureAtDate ? std::clamp(captureMonth, 1, 12) : 0; }
+    [[nodiscard]] int RenderDay() const
+    {
+        constexpr int kDays[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+        return captureAtDate ? std::clamp(captureDay, 1, kDays[RenderMonth() - 1]) : 0;
+    }
+    [[nodiscard]] bool RenderAllSeasons() const { return captureAtDate && captureAllSeasons; }
+    // renderRotation as a mask, bit r for rotation index r. All four when none is on.
+    [[nodiscard]] uint32_t RenderRotationMask() const
+    {
+        uint32_t mask = 0;
+        for (int r = 0; r < 4; ++r) {
+            mask |= renderRotation[r] ? 1u << r : 0u;
+        }
+        return mask ? mask : 0xFu;
+    }
 
 private:
+    void Read_(mINI::INIMap<std::string>& section, const std::filesystem::path& source);
+    void Write_(mINI::INIMap<std::string>& section) const;
     uint32_t revision_ = 0;
 };

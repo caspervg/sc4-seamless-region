@@ -1,6 +1,6 @@
 #pragma once
 
-// Store (W2-D): lossy WebP with alpha through libwebp. Pure functions, safe on any thread.
+// Store: lossy WebP with alpha through libwebp. Pure functions, safe on any thread.
 //
 // Encoder settings: lossy, method 3 (one step faster than the libwebp default 4, about 3 percent
 // bigger files), alpha kept at quality 100 with alpha compression on, so the edge of a city stays

@@ -1,7 +1,7 @@
 # To do
 
-Open work after the first in-game sessions (2026-11-19). Most important first within each
-group. Notes on the reverse engineering are in `docs/re-notes/`.
+Open work, most important first within each group. Notes on the reverse engineering are in
+`docs/re-notes/`.
 
 ## Camera angle mods (do first)
 
@@ -27,7 +27,7 @@ camera restore. Input during the render would still need blocking. Not checked i
 
 ## Vector layers and a top-down plan view (idea)
 
-Not started. Considered on 2026-11-19:
+Not started.
 
 - **Vectors from the game:** during the batch, export per city: network cells (type and the
   sides they connect to, as line pieces), zones (cells merged into polygons), lots (rectangle,
@@ -71,8 +71,8 @@ Not started. Considered on 2026-11-19:
   a lane. Paths end at fixed points on the tile edges, so neighbour cells chain cleanly. Fall
   back to the cell connection method below for pieces without paths. The dbpf tools
   (`read_sc4paths`) can check path files offline.
-- **Smooth vector curves (fallback):** network cells give a chain of cell centres and the sides each cell
-  connects to. Join the cells of one network type into polylines (walk the connections), then
+- **Smooth vector curves (fallback):** network cells give a chain of cell centres and the sides
+  each cell connects to. Join the cells of one network type into polylines (walk the connections), then
   smooth them: Chaikin corner cutting or a Catmull-Rom spline through the cell centres, kept
   straight on straight runs, with tight turns kept at intersections (cells with three or more
   connections end a polyline). Diagonal pieces (edge flags on the corners) give 45 degree
@@ -90,12 +90,11 @@ Not started. Considered on 2026-11-19:
 2. **Cracks where terrain does not meet.** When two cities have different heights at their
    shared edge, the render showed a dark gap (the edge walls were hidden). Now the capture keeps
    the two front walls (`CameraBounds::BackEdges`, setting `CaptureEdgeWalls`, on by
-   default), so the gap shows the back city's cliff. Not
-   checked in game: render two neighbors with a height step, look at the seam on the map and in
-   game. Still open: in game, the live city hides its own front walls toward a rendered
-   neighbor (automatic choice), so a gap can show there. Optional later: a gradient fill over the
-   cliff on the map export ("Blend city seams"). The game's
-   "Reconcile Edges" tool fixes the data. Options: leave it, fill small holes on the map
+   default), so the gap shows the back city's cliff. Not checked in game: render two neighbors
+   with a height step, look at the seam on the map and in game. Still open: in game, the live
+   city hides its own front walls toward a rendered neighbor (automatic choice), so a gap can
+   show there. Optional: a gradient fill over the cliff on the map export ("Blend city seams").
+   The game's "Reconcile Edges" tool fixes the data. Options: leave it, fill small holes on the map
    export only, or draw the edge cliff where the neighbor is lower.
 3. **Blue band and lake bed below the city edge.** With the edge walls hidden, the area below
    the edge line shows the lake bed, and a flat blue band shows along some edges (Berlin, New
@@ -109,8 +108,8 @@ Not started. Considered on 2026-11-19:
 
 ## In-game overlays and interaction
 
-Built but not seen in the game yet: the hover tint on a neighbor, the tooltip (name and render
-age) and click to switch (`interaction/NeighborPicker`). Check those first. Not built yet:
+The hover tint, the tooltip (name and render age) and click to switch are in
+`interaction/NeighborPicker`. Not built yet:
 
 1. **Outline of the city you play.** A line on the ground along the edges of the current city,
    so it is clear where the live city ends and the renders begin. Drawn with the world draw
@@ -127,14 +126,9 @@ age) and click to switch (`interaction/NeighborPicker`). Check those first. Not 
 
 ## Capture at date (seasons)
 
-The RE is done: `docs/re-notes/seasons.md`. Build it:
-
-1. Timed props: walk the prop developer's list (+0xa5c), set the visible state with `SetState`
-   for the chosen month and day, restore after the render, around a save and at city
-   shutdown.
-2. Seasonal flora (optional, slow in large cities): set the stage from an anchor date.
-3. Night-lit and time-of-day props at noon through the same `SetState` path.
-4. A month and day picker in the capture and batch panels.
+Built (`CaptureAtDate`, `CaptureSeasonalFlora`, `CaptureAllSeasons`, the noon day mode). Left:
+the open points of `docs/re-notes/seasons.md` (stage models in game, whether `SetVisualTimeMode` switches the buildings at once while the
+clock is hidden-paused) and a per-pack exception list if a flora pack looks wrong.
 
 ## Render after a save
 
@@ -150,8 +144,7 @@ city a few ticks later. Saves that leave the city (switch, region view, quit) do
 
 ## Transport layer
 
-Built (`CaptureTransportLayer`, `docs/re-notes/transport-view.md` sections 7 and 8), not run in
-the game yet (`docs/testing.md`, Capture, Transport layer). Left:
+Built (`CaptureTransportLayer`, `docs/re-notes/transport-view.md` sections 7 and 8). Left:
 
 1. **RHW on the transport map.** Moved to the NAM DLL (branch `feat/rhw-transport-map-color` of
    the nam-dll fork, `EnableDirtRoadRegionalTransportMapPatch`). The research stays in
@@ -172,16 +165,15 @@ Right pitch (45 degrees), so the neighbors line up, at about a quarter or a sixt
 pixels. The meta stores a magnification per level for this. To do:
 
 1. A capture level option per zoom: full, half or quarter.
-2. The edge wall detours hide nothing at a magnification other than 1.0 (that is how they
-   leave the thumbnail writer alone). Give the capture its own flag instead.
+2. The edge wall detours hide nothing at a magnification below 1.0 (that is how they leave
+   the thumbnail writer alone). Give the capture its own flag instead.
 3. Check the model LOD the game picks at 0.25, and the pixel alignment at magnification < 1.
 
 ## Speed
 
-1. Batch overhead: about 5 s of each city's 9 s is the switch and settle time. Look at what
-   the batch waits for after a load.
-2. Second pass: edge blocks are drawn twice (key colors). Only the edge tiles need it.
-3. Check the timing log on a large built city (model loading was 0 ms in empty cities).
+1. Batch overhead: most of it is the city load itself (about 11 s warm, 30 s for the first
+   load after the game starts). The sc4-load-cache plugin brings that to 2-4 s and 23 s.
+2. Check the timing log on a large built city (model loading was 0 ms in empty cities).
 
 ## Region map
 
@@ -197,22 +189,19 @@ pixels. The meta stores a magnification per level for this. To do:
 
 ## Not checked in the game yet
 
-- Neighbors drawn around the city: alignment at the edges, front and back order, hover and
-  click to switch.
 - The map overlay.
 - The in-game "Region map" button and "Open map".
 - Batch started from the region view, cancel and resume there.
-- SCD3D11 and scvk readback. Format and row order are now read from their source
-  (`re-notes/capture.md`, Replacement drivers), and so is the direct `Draw` call that keeps
-  their shadows and ReShade out of the tiles. Neither is checked in game yet.
+- scvk readback. Format and row order are read from its source (`re-notes/capture.md`,
+  Replacement drivers). SCD3D11 is checked.
 
 ## Upstream and housekeeping
 
 1. gzcom-dll: `cISC43DRender::GetLightingManager` returns by value in the header. The game
    returns a pointer (slot 9). The capture calls the slot directly.
-2. sc4-render-services: the gaps listed in `docs/implementation.md`.
+2. sc4-render-services: the gaps listed in `docs/architecture.md`.
 3. Ghidra: apply the proposed Windows names from `docs/re-notes/seasons.md` and the region
    view batch work (`cSC4WinRegionScreen::Shutdown` `0x007b0f60`,
    `PostRegionScreenMessage` `0x007abb00`, `cSC4App::GetRegionalCity` `0x0044b620`,
    `cSC4App::GetCity` `0x0081f910`).
-4. A remote for the repo, and a release with the DLL, the INI and `SC4RegionMap.exe`.
+4. A release with the DLL, the INI and `SC4RegionMap.exe`.

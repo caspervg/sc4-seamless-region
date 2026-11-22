@@ -12,6 +12,7 @@ set(SC4SR_TEST_SOURCES
     "${SC4SR_DLL_DIR}/store/TileStore.cpp"
     "${SC4SR_DLL_DIR}/store/WebpCodec.cpp"
     "${SC4SR_DLL_DIR}/utils/Logger.cpp"
+    "${SC4SR_DLL_DIR}/utils/Settings.cpp"
     "${SC4SR_DLL_DIR}/switching/NeighborDirection.cpp"
     "${SC4SR_DLL_DIR}/camera/CameraBounds.cpp"
     "${SC4SR_DLL_DIR}/export/MapExport.cpp"
@@ -28,6 +29,7 @@ target_include_directories(SC4SeamlessRegionTests PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${SC4SR_DLL_DIR}"
     "${CMAKE_SOURCE_DIR}/vendor/gzcom-dll/gzcom-dll/include"
+    "${MINI_INCLUDE_DIR}"
 )
 
 target_compile_definitions(SC4SeamlessRegionTests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)

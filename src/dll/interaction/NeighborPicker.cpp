@@ -334,14 +334,25 @@ void NeighborPicker::Rebuild_()
         n.sizeLabel = SizeLabel(std::max(city.sizeX, city.sizeZ));
         n.founded = city.founded;
         if (city.founded) {
-            const std::optional<CityRenderMeta> meta = ctx_.tileStore->LoadMeta(city.key);
-            n.hasRender = meta && meta->sizeX == city.sizeX && meta->sizeZ == city.sizeZ && !meta->levels.empty();
-            n.renderTime = meta ? meta->renderTime : 0;
-            n.stale = n.hasRender && ctx_.tileStore->IsStale(city);
-            for (int r = 0; n.hasRender && r < ViewMath::kRotationCount; ++r) {
-                for (int z = 0; z < ViewMath::kZoomCount; ++z) {
-                    if (CityMeta::ChooseLevel(meta->levels, r, z)) {
-                        n.drawnViews |= 1u << (r * ViewMath::kZoomCount + z);
+            // Like the neighbor renderer: per view the first render (season, then the others) with
+            // a level for it. The age and staleness are those of the first.
+            const std::vector<std::string> keys =
+                ctx_.tileStore->StorageKeysInOrder(city.key, Seasons::OfMonth(GameAccess::CityMonth()));
+            for (size_t k = 0; k < keys.size(); ++k) {
+                const std::optional<CityRenderMeta> meta = ctx_.tileStore->LoadMeta(keys[k]);
+                if (!meta || meta->sizeX != city.sizeX || meta->sizeZ != city.sizeZ || meta->levels.empty()) {
+                    continue;
+                }
+                if (!n.hasRender) {
+                    n.hasRender = true;
+                    n.renderTime = meta->renderTime;
+                    n.stale = ctx_.tileStore->IsStale(city, keys[k]);
+                }
+                for (int r = 0; r < ViewMath::kRotationCount; ++r) {
+                    for (int z = 0; z < ViewMath::kZoomCount; ++z) {
+                        if (CityMeta::ChooseLevel(meta->levels, r, z)) {
+                            n.drawnViews |= 1u << (r * ViewMath::kZoomCount + z);
+                        }
                     }
                 }
             }
@@ -425,7 +436,8 @@ void NeighborPicker::Tick_()
     if (cursorInView_ && ctx_.cameraReader->Update()) {
         const CameraFrame& f = ctx_.cameraReader->Frame();
         // The region thumbnail writer draws at magnification 0.25: no tint in that picture.
-        if (f.magnification == 1.0f) {
+        // Game zoom 6 is zoom 5 at magnification 2.
+        if (f.magnification >= 1.0f) {
             picked = true;
             const float key[7] = {
                 static_cast<float>(cursorX_),    static_cast<float>(cursorZ_),  f.target.fX, f.target.fY, f.target.fZ,
@@ -556,7 +568,7 @@ bool NeighborPicker::OnMouseDownL(const int x, const int z)
     viewX_ = x;
     viewZ_ = z;
     if (ClickBlocker_() != nullptr || !ctx_.cameraReader->Update() ||
-        ctx_.cameraReader->Frame().magnification != 1.0f) {
+        ctx_.cameraReader->Frame().magnification < 1.0f) {
         return false;
     }
     const int neighbor = Pick_(x, z);
@@ -754,6 +766,14 @@ void NeighborPicker::DrawTooltip_(const Neighbor& n)
             ImGui::TextUnformatted(age);
             if (n.stale) {
                 ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "Out of date. The city changed after the render.");
+            }
+            const int rotation = GameAccess::Rotation();
+            const int zoom = GameAccess::Zoom();
+            if (ViewMath::IsValidRotation(rotation) && ViewMath::IsValidZoom(zoom) &&
+                ((n.drawnViews >> (rotation * ViewMath::kZoomCount + zoom)) & 1) == 0) {
+                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
+                                   "Not shown: no render in rotation %d at this zoom. Render it in this rotation.",
+                                   rotation + 1);
             }
         }
         else {

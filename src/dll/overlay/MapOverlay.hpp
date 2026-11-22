@@ -1,6 +1,6 @@
 #pragma once
 
-// Overlay (W3-I): a user image (a real-world map or a drawn plan) on the ground of the current
+// Overlay: a user image (a real-world map or a drawn plan) on the ground of the current
 // city as a planning guide.
 //
 // Position, size, rotation and opacity set in the panel, saved per city in

@@ -1,6 +1,6 @@
 #pragma once
 
-// Game addresses, offsets and driver constants the render module (W2-E) uses, for the
+// Game addresses, offsets and driver constants the render module uses, for the
 // Windows build 1.1.641 only. Evidence for each value is in docs/re-notes/render.md.
 
 #include <cstdint>
@@ -21,6 +21,10 @@ namespace RenderAddresses
         // kind 0 redraws one model (needs the model). Any other kind redraws the static view
         // inside the rectangle. The game itself passes 2 and 3 for that.
         constexpr int kDirtyKindRegion = 3;
+        // AddDirtyRectangle's delayFrames. Draw processes the queue once kDirtyRectMergeFrames
+        // have passed since the first queued rectangle (+0x1f8, set to the frame counter +0x158
+        // minus the delay). This much delay makes the next Draw that does not pan process it.
+        constexpr int kDirtyNow = 1 << 20;
     }
 
     // -------------------------------------------------------------------------------------

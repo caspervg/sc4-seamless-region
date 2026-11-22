@@ -28,6 +28,12 @@ Windows code has the same shape, or two kinds of evidence agree), **probable**, 
 - Night-lit and time-of-day props follow the **24 hour clock** (sim clock), not the lighting
   manager. "Capture at noon" through `cISC4LightingManager::SetTimeOfDay(12)` changes the light
   only. The same state override can force the time-of-day props to their noon state if wanted.
+- **Re-validated 2026-11-21** (section "Re-validation" below): lit building windows follow the
+  clock's *visual* day/night mode, not `SetTimeOfDay`, so "Render at noon" kept night windows
+  until it used the game's own "day" mode, `SetVisualTimeMode(1)` (built). The clock runs while
+  the sim is paused, but the capture's `SC4AutoGamePause(false, true, true, true)` hidden-pauses
+  it too, so inside a render the 12.0 is not overwritten. A flora stage override must never meet a
+  monthly flora visit: a visit that computes stage 0 for a tree shown at 1 or 2 deletes it.
 
 ## 1. Who ticks the timed props, and how to list them
 
@@ -119,6 +125,22 @@ the cIGZDate sub-object: +0x18 `Set(month, day, year)`, +0x34 `Year`, +0x3c `Day
 So a yearly prop is on for the days [start, start + duration). Interval 364 (CSX) drifts one
 day a year (two after a leap day) against the calendar. Confidence: confirmed.
 
+Re-validated details (confirmed unless noted):
+
+- Duration is stored as `max(duration, 1)` (DateInfo +4).
+- `duration >= interval`: the prop is off for exactly one day per cycle (the day `T >= E` turns
+  bit 2 off before the next start turns it on), so "always on" is an approximation.
+- `Jday` `0x00912b5f` returns 0 for an invalid date (start (0, 0), or Feb 29 in a non-leap
+  year). Such a prop turns on and off every other day (strong).
+- A Feb 29 inside the window of an interval 365 prop shortens it by one calendar day.
+- The prop enters the list whenever the interval property exists, also with value 0. Interval 0
+  leaves bit 2 at 0 for good: the prop never shows.
+- `HandleInsertOccupant` calls `SetState(1)` on every prop with any timer property first
+  (`0x006f3cc8`). `SetSimulatorDateRange` always ends with `SetPropTimerState(2, flag)`
+  (`0x005ef143`), which rolls the RNG when the other bits are on.
+- For interval != 365 the phase depends on the plop date: use DateInfo +0x0c mod interval
+  (valid in both bit states).
+
 ### Pure rule for the override
 
 Use the exemplar values, not the stored DateInfo dates, so every city of the region uses the
@@ -133,7 +155,7 @@ bool IsTimedPropOn(int startMonth, int startDay, uint32_t duration, int month, i
 {
     if (duration >= 365) return true;
     const int delta = (DayOfYear(month, day) - DayOfYear(startMonth, startDay) + 365) % 365;
-    return delta < static_cast<int>(duration);  // duration 0 is stored as 1 by the game
+    return delta < std::max(static_cast<int>(duration), 1);  // the game stores max(duration, 1)
 }
 ```
 
@@ -169,11 +191,13 @@ Confidence: confirmed (bytes decoded by hand).
 
 `SetState(state)` `0x005ed290`: if +0x63 differs, store it, then if the occupant is in the world
 (occupant +8 slot +0x14) **post** (`MessagePost`, slot +0x10) message `0xE9C86DDB` with the
-prop, and if the exemplar has "States as Frames" set the frame on each model instance (slot
-+0x74 of `0xa818edd8`). The model maker handles `0xE9C86DDB` in `DoPropStateChanged`
-`0x00494900` (Mac `0x0024cd94`): without "States as Frames" it removes and adds the occupant
-models (the new state picks the RKT4 entry), with it it calls `ChangeModels`. Confidence:
-confirmed for the post and the handler address, strong for the handler body (Mac).
+prop, and if the exemplar has "States as Frames" set the frame on each model instance at once
+(slot **+0x28** of `0xa818edd8`, on the placeable's models; re-validated, the earlier +0x74 was
+wrong). The model maker handles `0xE9C86DDB` in `DoPropStateChanged` `0x00494900` (Mac
+`0x0024cd94`): without "States as Frames" it removes and adds the occupant models (the new state
+picks the RKT4 entry), with it it calls `ChangeModels`. It **ignores the state in the message**
+and rebuilds from the current +0x63, so a stale message after a restore is harmless. `SetState`
+touches no timer bit, RNG or DateInfo: safe on any prop. Confidence: confirmed.
 
 What this means for the renderer: the swap happens on the next message pump, not at once. The
 capture already pumps (`RunMessageServer2Pump`) after Prepare and after each view change, and
@@ -195,22 +219,33 @@ animation messages, which the capture pause stops (probable for lot and power me
 | Seasonal flora for the flora tool (`Grfe_maple_seasonal_A..D`, `VIP_Or_FL_*_Seasonal_00..`) | flora occupant (`0x74758926`) aging. `FloraParameters` `0x083DC35B` = {180, 100, 200, 3, 128, **363**, 15051, ...}. RKT4 has models for states 0, 1, 2. Cluster type chains A->B->C->D are variants, not seasons | `180-flora.dat` exemplars `E83E0437-FFFF00D9`, `-FFFF00DA`, `-78DA2003` | confirmed |
 
 How the flora sim does it (Windows `0x006b0a80` = Mac `cSC4FloraSimulator::SimulateExistingFloraOccupant`
-`0x0008bf9c`, called from `DoMonthlySimulation` `0x006b2cb0`, which visits a random part of the
-map each month):
+`0x0008bf9c`, its only caller is `DoMonthlySimulation` `0x006b2cb0`, run by the flora sim
+`DoMessage` on the new month message `0x66956816`). Re-validated 2026-11-21:
 
-- age = flora sim day counter (+0x40) - birth date (flora slot +0x18).
+- age = (uint)(flora sim +0x40 - birth date). The birth date is the flora occupant field
+  **+0x4c** (`0x0068d1c0`, `0x004302d0`; interface slots +0x18/+0x1c get and set it), last
+  seeding +0x50, static data pointer +0x54 (`SetStaticFloraData` `0x00472cd0`). Flora sim +0x40
+  is set from the `0x66956816` message data (`0x006b33e1`), so it only moves monthly. A birth
+  date in the future wraps to a huge age: immediate reset. Confirmed.
 - stage `0x006afbe0`: 0 if age < p[0]/2, 1 if age < p[0], 2 if age < p[5], 3 if age < p[6],
-  else 4 (`p` = FloraParameters, static data +0x10 .. +0x44).
-- stage > 2: `SetBirthDate(now)`, `SetState(0)`, `PostOccupantMessage(0x99ef1145, 0)`. So p[5]
-  = 363 restarts the cycle every 363 days.
-- otherwise when the stage changed: `SetState(stage)` and the same occupant message (stage 0
-  and 4 go through occupant manager slot +0x54 instead, Mac).
+  else 4 (`p[i]` = static data +0x10 + 4i, 0.5 at `0x00a84d2c`). Confirmed.
+- state >= 3 already, or age >= p[5] or p[6]: `SetBirthDate(now)`, `SetState(0)`,
+  `PostOccupantMessage(0x99ef1145, 0)` (`0x006b0aee`). Confirmed.
+- otherwise, when the stage changed: stages 1 and 2 `SetState` + `0x99ef1145`; **stages 0 and 4
+  call occupant manager slot +0x54 = `RemoveOccupant(occ, true, 0)`: the tree is deleted**
+  (`0x006b0c07`). Stage 4 also comes from a burn/score test (`p[8]`, 0 in these packs). Naturally
+  stage 0 never follows 1 or 2, so only an override can trigger the delete. Confirmed.
+- Visits: W*H / MonthsBetweenCellCoverage / 4 blocks of 2x2 tiles per month from a reshuffling
+  iterator (Mac `0x0008c352`). The installed `Flora Tuning Parameters` (`7A4A8458-1A2FDB6A`, in
+  `050-load-first.dat` and `170-terrain.dat`) set MonthsBetweenCellCoverage = 1: every tree is
+  visited every month, and 363 < 365 lands the reset exactly 12 month starts after the birth. No
+  drift with these packs. Strong.
+- Planting: birth = sim date (Mac, probable for Windows), state 0 (constructor `0x00472b30`).
 
-With the pack convention "plant on Sep 1" and p = {180, .., 363}: stage 0 Sep 1 .. Nov 29
-(fall), stage 1 Nov 30 .. Feb 27 (winter), stage 2 Feb 28 .. Aug 29 (spring and summer). The
-in-game result drifts (363 days, monthly random visits), which is a further reason for a
-display override. Confidence: strong (stage mapping and the season of each model are from the
-model names and the pack readme convention, not seen in game).
+So stages change on the 1st of a month only. With the pack convention "plant on Sep 1" and p =
+{180, .., 363}: stage 0 Sep .. Nov (fall), stage 1 Dec .. Feb (winter), stage 2 Mar .. Aug
+(spring and summer). That 0/1/2 is fall/winter/summer is probable (pack convention, RKT4 has
+three models, VIP lists them 2, 1, 0), not seen in game.
 
 `cSC4FloraOccupant` (Windows): state is the byte at **+0x58** (`GetState` `0x005d6140`
 `movsx eax,[ecx+0x58]`, `SetState` `0x005d6150` stores it and does nothing else). Interface
@@ -222,7 +257,8 @@ Seasonal flora rule for the override (only flora with 360 <= p[5] <= 366, stages
 ```cpp
 int SeasonalFloraStage(float p0, float p5, int anchorMonth, int anchorDay, int month, int day)
 {
-    const int age = (DayOfYear(month, day) - DayOfYear(anchorMonth, anchorDay) + 365) % 365;
+    // The game moves flora on the 1st of each month only: quantise like it does.
+    const int age = (DayOfYear(month, 1) - DayOfYear(anchorMonth, anchorDay) + 365) % 365;
     if (age >= p5) return 0;     // the game restarts the cycle
     if (age >= p0) return 2;
     if (age >= p0 * 0.5f) return 1;
@@ -230,8 +266,17 @@ int SeasonalFloraStage(float p0, float p5, int anchorMonth, int anchorDay, int m
 }
 ```
 
-Anchor default Sep 1 (pack convention). Leave flora in stage 3 or 4 (dying, burnt) and all
+Anchor fixed at Sep 1: the community standard is to plant seasonal flora on September 1st, in its fall stage (confirmed by the player, 2026-11-21), so no setting. Leave flora in stage 3 or 4 (dying, burnt) and all
 non-seasonal flora (long p[5]) alone, their stage is real growth.
+
+Seasonal test: `*(float*)(*(char**)(flora + 0x54) + 0x24)` (p[5]) in 360..366. The occupant
+property holder (`0x006c2040`) is backed by the type exemplar (static data +0x168), so
+`FloraParameters` can be read there too (strong).
+
+Model swap: `PostOccupantMessage` `0x005e9010` **posts** `0x99ef1145` (only `0x99ef1146` is
+sent at once), so it needs a pump. The model maker (`DoMessage` `0x00496252`) calls
+`DoOccupantChanged` `0x00494a30`: a visible tree (flag 4, probable) gets RemoveModels +
+AddModels with the RKT4 entry of the state byte, a hidden one only hides its placeable.
 
 ## 5. Other things that change by date or time
 
@@ -239,18 +284,23 @@ non-seasonal flora (long p[5]) alone, their stage is real growth.
 |---|---|---|
 | Timed props incl. holiday props (fireworks, Christmas) | sim date, daily tick | **yes**, same rule (option to skip windows shorter than 15 days, as plop-and-paint does for seasonal sets) |
 | Seasonal flora | flora age | **yes**, optional second pass |
-| Time-of-day props (bit 1, list `+0xa60`) | 24 hour clock message `0x44778231` | only for "Capture at noon", else leave live |
-| Nighttime State Change props (vector `+0xa20`) | 24 hour clock day/night message `0x44778234`, lighting manager `IsNight` (slot +0x24) at PostCityInit | only for "Capture at noon" (state = day value), else leave live |
+| Time-of-day props (bit 1, list `+0xa60`) | 24 hour clock message `0x44778231` with the **game** time (hour + minute / 60, also in visual mode 1) | `SetState` override for 12.0 with "Capture at noon", else leave live |
+| Nighttime State Change props (vector `+0xa20`) | gradual: `0xc9da96e8`/`e9` from the lighting manager set mode +0xa30, `DoAnimationTick` `0x006f0ec0` switches an eighth every 200 ms of animation. At once: `SwitchNightChangeProps` on `0x44778234` when the clock's visual mode matches, and at PostCityInit. Day state 0, night state 1 only if `[dev+0xa18]` slot +0x94(x, z) (power, speculative) | follow `SetVisualTimeMode(1)` |
 | Global effect trigger props (bit 4) | scripted global effects (View3DWin `0xfa47b3f9`). Automata scripts can read calendar fields (`cSC4AutomataScriptSystem::ImportCalendarField`), so some may be date driven | out of scope (speculative) |
 | Lot condition props, power props | lot state, power | out of scope, not date |
 | Terrain snow or season textures | none found. Weather simulator has `GetCurrentSeason` but no caller found (virtual) | out of scope (speculative: no visual) |
+| **Lit building windows** (night texture IID + 0x8000) | clock visual day/night `0x44778234` -> lot developer `0x006cd940` -> `SwitchNightChangeBuildings` `0x006cbe50` -> `LightBuildingAndProps` `0x006c8e10` -> building `SetLit` (slot +0x44, `0x00458c90`, +0x55 bit 0, posts `0x09d8e0b6`) -> model maker `ApplyLotStateEffect` `0x004933a0`. Lot props with `0x4a9f188b` follow their building | **no** with `SetTimeOfDay(12)` alone; yes with `SetVisualTimeMode(1)` (section Re-validation). Confirmed |
+| Lit networks | network manager on `0xc9da96e8`/`e9` (from `SetTimeOfDay`), occupant slot +0xf4 `SetLit` `0x0061b910` | follows `SetTimeOfDay(12)`. Confirmed |
+| Vehicle manager `0x00562620` | handles `0xc9da96e9` and `0x44778234` (headlights or traffic levels, probable) | dynamic, not in the static tiles |
+| Month dependent light | lighting manager +0x20 = month from the weather sim (slot +0x3c), used only when the lighting exemplar has a colour image (+0xcc/+0xd0) | speculative |
 
 ## 6. Save safety
 
 | Fact | Evidence | Confidence |
 |---|---|---|
-| `cSC4PropOccupant::Write` saves the type, state (+0x63), time range (+0x5e/+0x5f), DateInfo (interval, duration, both dates), random chance (+0x62), +0x64, +0x58 and the timer bits (+0x60). `Read` puts them back as saved (old versions get bits 0xF) | Mac `0x00104e40`, `0x00105254`. Windows Write not located | strong |
-| The flora state byte and birth date are saved with the flora occupant | Mac `cSC4FloraOccupant::Write` exists, not read | probable |
+| `cSC4PropOccupant::Write` saves the type, state (+0x63), time range (+0x5e/+0x5f), DateInfo (interval, duration, both dates), random chance (+0x62), +0x64, +0x58 and the timer bits (+0x60). `Read` puts them back as saved (old versions get bits 0xF) | Windows Write `0x005ece90` (version 6, cIGZSerializable at +0xc, vtable `0x00aa484c`): base occupant, type id, blocks +0x3c and +0x48, bytes +0x61, **+0x63**, +0x5e, +0x5f, DateInfo flag + fields, +0x62, +0x64, +0x58, +0x60. Read `0x005ef360` stores +0x63 directly, no recompute | confirmed |
+| The flora state byte and birth date are saved with the flora occupant | Windows `cSC4FloraOccupant::Write` `0x00472990` (version 3): occupant, type +0x38, position +0x40, birth +0x4c, last seeding +0x50, **state +0x58**, orientation +0x59, +0x3c. Read restores them, nothing recomputes the stage at load or PostCityInit (the daily flora sim only removes burnt flora and drops seeds) | confirmed |
+| Load does not recompute timed prop states: `cSC4PropDeveloper::Read` `0x006f3620` rebuilds the +0xa60, +0xa5c and +0xa64 lists from saved refs, PostCityInit (`0x26D31EC1`, `0x006f502f`) only switches the +0xa20 night props | Windows code | confirmed |
 | Pre-save `0x26C63343` is **sent** before any data is written (see `switching.md`), so a restore in that handler lands in the file | existing notes | high |
 | `SetState` only posts a model message. A pending message after a restore just rebuilds the models with the restored state | handler reads the occupant | strong |
 
@@ -276,9 +326,168 @@ game changed it in between: leave that prop as the game set it.
 For a full noon look the capture can also run the state override on the `+0xa60` list (state
 from the time range at 12.0, with wrap) and on the `+0xa20` vector (day state). Whether building
 night windows follow the lighting manager time is not checked here (the thumbnail writer relies
-on it, so probable).
+on it, so probable). **Superseded, see Re-validation: they do not.**
 
-## Proposed implementation
+## Re-validation (2026-11-21)
+
+Three read-only passes over the Windows code re-checked sections 1 to 7. Corrections are made in
+place above. The new findings that change the plan:
+
+**Developer and lists (confirmed).** `cISC4City::GetPropDeveloper` is slot **+0xa4** =
+`0x00423750` (`mov eax,[ecx+0x14c]`). City +0x14c comes from `CreateInstance(0x89c48f47, IID
+0xe9a1f4b6)` in CreateCityComponents (`0x0045ac3d`), and that pointer is the main object (QI
+`0x006f0d80`: +4 is the message target `0x452294aa`, +8 the serializable `0xe4fda3d4`), so the
+timed list is `[developer + 0xa5c]`. Constructor `0x006f2b60`, vtables `0xab29f8` (+0),
+`0xab29e8` (+4), `0xab29d0` (+8). List: 4 byte SGI style list, the head is a sentinel, no size,
+nodes of 12 bytes `{next, prev, cISC4PropOccupant*}`, push_back `0x00427640` before the
+sentinel, one AddRef per entry (`0x006f3f43`). The pointer is the QI `0xe9793a65` result, offset
+0 of `cSC4PropOccupant` (QI `0x005ec960`).
+
+**Day messages (confirmed).** `cSC4Simulator::SimulateTimePassage` `0x00702a80` advances the date
+and **posts** `0x66956814` (new day), `...15` (week), `...16` (month), `...17` (year)
+(`0x00702d25`). A day message queued before the pause can still arrive at the capture's first
+pump, so the override runs after that pump, and the restore keeps the guard of section 6.
+
+**The clock runs while the sim is paused (strong).** Not during a render: the capture's
+`SC4AutoGamePause` hidden-pauses the sim, the animation system and the clock (counted, so the
+player's speed buttons do not undo it). `OnIdle` of the 24 hour clock
+`[0x00b43dbc]` only checks its own Pause/HiddenPause counters (+0x2c/+0x30). The sim pause only
+posts `0xaa7fb7e0`. So during a paused capture `0x44778233` makes View3DWin
+`UpdateAmbientLightLevel` `0x007e6e40` call `SetTimeOfDay` with the visual time (overwriting the
+capture's 12.0), and `0x44778231` can flip time-of-day props. Clock slots: +0x14
+SetVisualTimeMode, +0x18 GetVisualTimeMode, +0x30/+0x3c visual hour/minute, +0x60 Pause, +0x68
+HiddenPause, +0x74 EnableDayNightTransitionNotifications. Mode 0 follows game time, 1 is a fixed
+noon (43200 s), 2 a fixed midnight. The game's day/night menu: `0x007f2b4b`/`0x007f2bcf`.
+
+**Thumbnail writer (confirmed).** It sets the bool render property 0x1c `kRenderSnapshot` before
+`SetTimeOfDay(12)` (`0x005de0a4`, `0x005de0ad`) and clears it after (`0x005de884`). With it set,
+`SetTimeOfDay` posts no day/night messages and the lighting manager changes its colour (+0x168).
+So the thumbnail is no evidence for night windows. `SetTimeOfDay` without it posts `0xc9da96e8`
+(day) / `0xc9da96e9` (night) when the sun crosses the threshold (`0x007d9f0f`/`0x007d9f1b`) and
+sends `0xc9da96ea` (light levels) to the model maker and terrain view.
+
+**Noon recipe (recommended, mechanism confirmed, risk strong):**
+
+1. `clock->HiddenPause(true)` (+0x68).
+2. `old = clock->GetVisualTimeMode()` (+0x18). If `old != 1`: `clock->SetVisualTimeMode(1)`
+   (+0x14). That is the game's own "day" button without its preferences write. It changes neither
+   game time nor the city file and switches buildings and night props at once, and View3DWin then
+   sets `SetTimeOfDay(12)` itself.
+3. Pump twice (the clock messages, then `0xc9da96e8`, one `0x09d8e0b6` per building, then the
+   model changes).
+4. `+0xa60` props: `SetState` override for t = 12.0 (they follow game time even in mode 1). Never
+   `SetPropTimerState` (RNG).
+5. Capture.
+6. Restore: prop states, `SetVisualTimeMode(old)`, `HiddenPause(false)`, pump. In mode 0 the game
+   relights buildings gradually, as at dusk. Also in the pre-save handler.
+
+Rejected: sending `0x44778234` "day" yourself (props ignore it unless the mode is 1, buildings go
+dark gradually, the vehicle manager and other listeners get it too); setting the game clock
+(simulation state: commutes, audio); setting RenderSnapshot (changes colours).
+`SwitchNightChangeProps` never needs a direct call.
+
+**Flora delete hazard (confirmed).** See section 4: a monthly visit that computes stage 0 for a
+tree whose state byte is 1 or 2 removes the tree. The flora override must be undone before any
+save and before the sim runs (the capture pause plus the pre-save restore cover both; a game
+crash during a render saves nothing, so the file keeps the real stages).
+
+**Listing every flora occupant (strong).**
+
+```cpp
+SC4List<cISC4Occupant*> list;
+occupantManager->GetOccupantsByStandardCityCells(list, nullptr, nullptr, 0x74758926, 0xFFFFFFFF);
+for (cISC4Occupant* occupant : list) {
+    cISC4FloraOccupant* flora = nullptr;
+    if (occupant->IsFlagSet(1) && occupant->QueryInterface(0xc83dd057, (void**)&flora)) {
+        // ...
+        flora->Release();
+    }
+}
+occupantManager->ReleaseOccupantList(list);
+```
+
+Windows slot **+0xa4** (`0x0049ddc0`, `RET 0x14`): stores the type in a shared filter at mgr +0x34
+and tail-calls the filter variant at +0xa0. The last argument is the maximum count (0 returns
+false, -1 no limit). Null corners mean the whole city (Mac `0x001ae122`). Every result is
+AddRef'd. Cost: one pass over all occupants, about 5 to 20 ms for a large city (speculative); the
+model rebuilds dominate (0.2 to 1 s per 20k changed trees per direction, speculative). When the
+chosen date is the city's own date, nothing changes.
+
+## Plugin audit (2026-11-21, the playtest Plugins folder)
+
+Read with the DBPF tools and a read-only exemplar/S3D reader (Plugins only, Plugins_UC has no
+index). The property IDs of section 2 are right.
+
+**Seasonal flora.** 956 of 2056 flora exemplars have p[5] = 363 (no other value in 360..366).
+672 of them have one RKT1 model (no seasonal look; about 250 are cars, people or garbage shipped
+as flora). 269 RKT4 and 10 RKT5 have three state models, all in `180-flora.dat`:
+
+| Pack | p0 / p5 / p6 | States 0 / 1 / 2 |
+|---|---|---|
+| Girafe deciduous (maple, ash, birch, beech, larch, oak, elm, plane, walnut, poplar, rowan, chestnut, honey locust, linden, norway maple, bush, berry; about 140) | 180/363/15051 | autumn / bare / summer (names and texture colours agree) |
+| Girafe conifers (conifer, subalpine, grand fir, Serbian and common spruce) | 180/363/15051 | green / snow / green |
+| VIP_Or Aesculus, Or_VIP Populus | 180/363/15051 | autumn / winter / summer |
+| PNW pack (86, Girafe bush and chestnut models) | 181/363/15050 | autumn / bare / summer |
+| VV_TSC ferns, VV_VIP genets | 180/363/15051 | winter / winter / summer |
+
+So the Sep 1 anchor with 0/1/2 = fall/winter/summer holds for the trees. The game moves flora on
+the 1st of a month only, so p0 180 and 181 both give Sep-Nov 0, Dec-Feb 1, Mar-Aug 2 (the day
+boundaries Nov 30 / Feb 28 of p0 180 never show). Exceptions, which the override renders the same
+way the game shows them when planted on Sep 1:
+
+- Girafe flowers and wheat (lupin, sparaxis, poppies, narcissus, daisy, wheat; E83E0437-AF448050,
+  -AF448480/1, -AF448500, -AF448520/1, ...): stage 1 (Dec-Feb) is the bloom or ripe model.
+- No state 2 model (invisible Mar-Aug): sparaxis, poppies, narcissus, daisy, Grfe_liden A/B/D.
+  No state 1 model: Grfe_Serbian_spruce_seasonal_*2, grand_firs_seasonal_*2 (AF481020...). No
+  model at all at 00030000: Grfe_linden_seasonal_A-E (AF448320-24).
+- VIP_VV_Cherry_Tree (E83E0437-19620286): spring / summer / winter. Grfe_alder_seasonal_A-E
+  (AF447730-34): state 0 uses a spruce model. Grfe_vine_seasonal_A: 0, 0, 0. VIP_Man_Cow: the
+  states are cow variants.
+- RKT5 packs (Grfe_maple_seasonal, Grfe_abies_grandis_seasonal, 33AA0010-19): state models at the
+  base instance + state * 0x10000 (maple fall / bare / summer). The override sets the state like
+  the game does, so the model maker's RKT5 mapping applies unchanged.
+
+About 75 flora named `_summer`/`_winter` have p[5] = 6570: one fixed season. Most seasonal
+trees in this folder are **timed props**, not flora (about 1218 timed props with tree names: CP
+Seas*, Grfe, Neko, JENXPROP, csx, VIP_VV, SFBT Birke, CAL, AGC).
+
+**Timed props.** 2991 unique TGIs. Interval 365: 2399; 364: 23; 366: 6; 362: 128 (Fz); 0x10000000:
+130 (start Jan 1, one day: hidden after their first year); 1000000: 5; 14600: 8; short periods
+(10 to 182 days): about 290; interval 0: none. Durations from 1 day to over a year (61-92 days:
+1243). Flags: month 13 to 18 on 29 props (KSpd docks 16-18, SFBT_Pz_Diagonale*, one ALN, one FvU;
+`Jday` gives 0, so the game toggles them, see section 2); 21 `zzoff_Or_TSC_*` with an interval
+but no start or duration; duration >= interval on Gnome_CensusRepository (C977C536-8956A699) and
+SG_Prop_PumpkinGreat_THE (AD4BA465-8F81374E); random chance on 40 props (75 x31 KSpd, 50 x4, 2
+x1, **117 x4** SG_Farmprop_Vehicle_Melons01-04: always passes); Time of Day on 15 props (SFBT
+party props, some across midnight). Families: Grfe summer Mar 1 + 184, fall Sep 1 + 91, winter
+Dec 1 + 92 or + 89 (small overlaps or gaps by design); CP staggered starts (Feb/May/Sep/Nov 19 to
+28); Neko Mar 1 / May 1 / Sep 1 / Nov 1; JENXPROP and PK Mar 20 / Oct 1 / Dec 1; csx quarters
+(some interval 364); JFM Christmas Nov 20 + 42.
+
+Rules for the override from this: the calendar rule for intervals 360 to 370 (it removes the
+drift of 362/364/366 for every city alike); every other interval, an invalid start (month 0 or
+over 12, day past the month) and a missing start or duration: leave the live state; chance
+clamped to 100. About 420 props with season names have no date properties: their lot fixes
+the season, nothing to override.
+
+**Other DLLs.** `SC4SeasonJumper.dll` (caspervg/sc4-season-jumper, `FixSeasonalPropVisibility`)
+detours `SetSimulatorDateRange` `0x005eeff0` and, after the original, makes a prop created inside
+its active window visible (pulls the end back one interval, `SetPropTimerState(2, true)`). That
+runs at insert only, so it does not meet a render-time `SetState` override, and the restore guard
+of section 6 still holds. `SC4DateJumper.dll` is loaded too (not read).
+
+## Built (2026-11-21)
+
+`capture/SeasonRules.hpp` (pure, `tests/SeasonTests.cpp`), `capture/SeasonOverride.{hpp,cpp}`,
+wired in `CityCapturer` (`StepPrepare_`, `Restore_`, `OnSaveBegin_`, `ResumeAfterSave_`).
+Settings `CaptureAtDate`, `CaptureMonth`, `CaptureDay`, `CaptureSeasonalFlora`; "Render at noon"
+also sets the visual day mode and the time of day props at 12:00. Differences from the proposal
+below: the start date comes from the exemplar (cached per prop type), interval and duration from
+DateInfo (+0, +4, the game's own values); the flora list comes from `GetOccupantsByBBox` with the
+flora type over the city box (the call family the capture already uses); the stable roll hashes
+the position. A pump runs before the overrides, so a new day or month message posted before the
+pause meets the real states.
+
 
 New `src/dll/capture/SeasonOverride.{hpp,cpp}` with pure rules in a header the tests can use
 (`IsTimedPropOn`, `SeasonalFloraStage`, `DayOfYear`). Owned by `CityCapturer::SavedState`.
@@ -304,6 +513,8 @@ New `src/dll/capture/SeasonOverride.{hpp,cpp}` with pure rules in a header the t
    0..2, target from `SeasonalFloraStage`. If different: record, AddRef, `SetState(target)`,
    `AsOccupant()->PostOccupantMessage(0x99ef1145, 0)`.
 8. Pump, `ForceFullRedraw` (the capture already does both after Prepare).
+9. With "Capture at noon": the noon recipe of the Re-validation section (visual time mode 1
+   under a HiddenPause, then the `+0xa60` override at 12.0) instead of `SetTimeOfDay(12)` alone.
 
 **Restore** (in `Restore_`, on cancel, in `OnSaveBegin_`, and in `OnCityShutdown` before
 PreCityShutdown returns): for each record in reverse, if bits and state are still what the
@@ -331,14 +542,30 @@ seconds, so make it a separate option and log the count and time.
    see `lot-texture-occupant-access` notes in sc4-plop-and-paint for query quirks.
 5. Save during a capture: the saved city has the original states (load it and compare a few
    timed props).
-6. Building night windows follow `SetTimeOfDay(12)` (they do for the thumbnail writer).
-7. Message `0x66956814` is the sim new-day message (name not confirmed, only its use).
+6. ~~Building night windows follow `SetTimeOfDay(12)`~~: they do not (Re-validation). Check in
+   game that they go dark after `SetVisualTimeMode(1)` plus two pumps, and how long the relight
+   takes after the restore.
+7. ~~Message `0x66956814`~~: new sim day, confirmed (Re-validation).
+8. Flora: that stages 0/1/2 are fall/winter/summer, and that the swap shows after one pump.
+9. Whether animation ticks (`0x86ad10ee`) run while the sim is paused (gradual night switches).
+10. Whether the occupant manager sends insert `0x99ef1142` during load (it would run
+    `HandleInsertOccupant` again; `Read` restoring the lists suggests not).
+11. Flag meanings 1 and 4 of the flora occupant, the Windows body of the filter variant +0xa0,
+    and what `[dev+0xa18]` slot +0x94 is.
 
 ## Proposed Ghidra names (Windows, not applied)
 
 | Address | Proposed name | Mac source | Confidence | Evidence |
 |---|---|---|---|---|
-| `0x00aa4730` | `cSC4PropOccupant::vftable` (cISC4PropOccupant) | `__ZTV16cSC4PropOccupant` +8 | confirmed | slot +0x2c is the known `SetState`, slots match the gzcom-dll interface |
+| `0x00aa4900` | `cSC4PropOccupant::vftable` (cISC4PropOccupant) | `__ZTV16cSC4PropOccupant` +8 | confirmed | constructor `0x005ee050`. Re-validated: `0x00aa4730` (listed here before) is the vtable of a **derived** class (constructor `0x005ee360`, prop sub-object at +4). Slots +0xc..+0x5c are the same functions in both |
+| `0x005ece90` | `cSC4PropOccupant::Write` | `0x00104e40` | confirmed | version 6, field order of section 6 |
+| `0x005ef360` | `cSC4PropOccupant::Read` | `0x00105254` | confirmed | stores +0x63 directly |
+| `0x00423750` | `cSC4City::GetPropDeveloper` (no function there yet) | | confirmed | `mov eax,[ecx+0x14c]`, cISC4City slot +0xa4 |
+| `0x006f3620` | `cSC4PropDeveloper::Read` | | confirmed | rebuilds the +0xa60/+0xa5c/+0xa64 lists |
+| `0x00702a80` | `cSC4Simulator::SimulateTimePassage` | | confirmed | posts `0x66956814..17` |
+| `0x00472990` | `cSC4FloraOccupant::Write` | | confirmed | version 3, saves the state +0x58 |
+| `0x006cbe50` | `cSC4LotDeveloper::SwitchNightChangeBuildings` | | confirmed | from `0x44778234` |
+| `0x006c8e10` | `cSC4LotDeveloper::LightBuildingAndProps` | | confirmed | building slot +0x44 `SetLit` |
 | `0x005ee230` | `cSC4PropOccupant::TickSimulatorDate` | `0x0010297c` | confirmed | slot +0x40, same code |
 | `0x005eeff0` | `cSC4PropOccupant::SetSimulatorDateRange` | `0x00103c4c` | confirmed | slot +0x3c, size 0x28 DateInfo, same code |
 | `0x005eca50` | `cSC4PropOccupant::SetPropTimerState` (create function) | `0x001028ee` | confirmed | slot +0x54, bit logic and RNG |

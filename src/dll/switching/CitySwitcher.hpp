@@ -1,6 +1,6 @@
 #pragma once
 
-// Switching (W2-A): saves, closes and loads another city of the region.
+// Switching: saves, closes and loads another city of the region.
 //
 // The sequence and its traps are in docs/plan.md "Switching", the evidence is in
 // docs/re-notes/switching.md. RequestSwitch only validates and posts the work to the idle
@@ -44,14 +44,17 @@ public:
     // is false. Ask CanSaveCurrentCity first and confirm with the player before passing true.
     // arrival: a ground point (x, z) in metres of the target city. The camera of the new city
     // then looks at it, on the first idle tick after its OnCityInit.
-    bool RequestSwitch(int cellX, int cellZ, bool allowWithoutSave = false, const cS3DVector2* arrival = nullptr);
+    // save = false: the current city closes without a save (the region render, for cities it
+    // opened itself).
+    bool RequestSwitch(int cellX, int cellZ, bool allowWithoutSave = false, const cS3DVector2* arrival = nullptr,
+                       bool save = true);
     // Queues opening the city that covers the region cell from the region view: the steps of a
     // switch after CloseCity (no save, no close, there is no city). Returns false (and sets
     // LastError) when a switch runs, a city is open, or no founded city covers the cell.
     bool RequestOpen(int cellX, int cellZ);
     // Queues leaving the open city for the region view: the save of a switch, then
     // RequestGoToRegionView(false). The same refusals as RequestSwitch for the save.
-    bool RequestRegionView(bool allowWithoutSave = false);
+    bool RequestRegionView(bool allowWithoutSave = false, bool save = true);
     // From a request until its task has ended (LoadCity returned or the switch failed). The new
     // city's OnCityInit can come before or after that, see the note above.
     [[nodiscard]] bool IsBusy() const;
@@ -87,6 +90,7 @@ private:
     int targetZ_ = 0;
     std::string targetName_;
     bool allowWithoutSave_ = false;
+    bool save_ = true;
     bool hasArrival_ = false;
     cS3DVector2 arrival_;  // target city metres, (x, z)
     std::string lastError_;

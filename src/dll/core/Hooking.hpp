@@ -7,7 +7,7 @@
 // - Hooking::Initialize() runs once in the director, only on game version 641. Install and
 //   Apply fail (and log) before that.
 // - Hooking::Shutdown() removes every hook and patch that is still installed, newest first.
-//   A Detour or BytePatch object that outlives Shutdown is then simply not installed.
+//   A Detour or BytePatch object that outlives Shutdown is then not installed.
 // - Destroying a Detour or BytePatch removes it.
 //
 // __thiscall targets

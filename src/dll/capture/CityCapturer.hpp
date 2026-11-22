@@ -1,6 +1,6 @@
 #pragma once
 
-// Capture (W2-C): renders the current city into tiles for every rotation and the zooms from 1 up
+// Capture: renders the current city into tiles for every rotation and the zooms from 1 up
 // to Settings::maxRenderZoom (3, 4 or 5).
 //
 // Copies the pattern of SC4WriteCityRegionViewThumbnail (0x005ddec0): pause, move the view
@@ -43,6 +43,7 @@
 
 #include "SC4AutoGamePause.h"
 #include "capture/CaptureMath.hpp"
+#include "capture/SeasonOverride.hpp"
 #include "core/GameAccess.hpp"
 #include "store/TileStore.hpp"
 #include "view/CameraReader.hpp"
@@ -60,6 +61,8 @@ struct CaptureRequest
     bool addTransport = false;
     // Render the transport layer also when Settings::captureTransportLayer is off.
     bool transport = false;
+    // Leave out the renders (main, season slots) that are up to date.
+    bool onlyNeeded = false;
 };
 
 struct CaptureProgress
@@ -105,6 +108,11 @@ public:
     // The "Transport layer" check box (Settings::captureTransportLayer). The batch panel shows it
     // too.
     static void DrawTransportChoice(Settings& settings);
+    // The "Rotations" check boxes (Settings::renderRotation). The batch panel shows them too.
+    static void DrawRotationChoice(Settings& settings);
+    // "Render at date" with its month, day and seasonal trees (Settings::captureAtDate). The
+    // batch panel shows it too.
+    static void DrawDateChoice(Settings& settings);
 
 private:
     enum class Phase
@@ -163,8 +171,12 @@ private:
         bool synchronousModels = false;
         bool glareSaved = false;        // the render turned the water glare off
         bool glareBefore = true;
+        bool gridHidden = false;        // the render turned the terrain grid off
         bool timeOfDaySaved = false;    // the render runs at noon
         float timeOfDay = 0.0f;
+        bool visualModeSet = false;     // the render set the clock's visual time mode to day
+        int32_t visualMode = 0;
+        SeasonOverride::Options season; // the date and noon overrides of this render
     };
 
     bool Begin_(bool testTile, const CaptureRequest& request);
@@ -188,6 +200,15 @@ private:
 
     // Plans the next block of the level for the window size of now. False when no tile waits.
     bool NextBlock_();
+    struct ParkedBlock;
+    // Pass 0 of block_ is drawn and its copy is on the way: park it and go on with the block
+    // parked before (its copy had a whole draw to finish) or with the next block.
+    bool ParkBlock_(uint32_t ticket, int w, int h);
+    // Makes `block` the current block with its first pass read. late: another block was drawn
+    // after it.
+    bool Collect_(ParkedBlock block, bool late);
+    // Cancels the parked copy and gives its tiles back to the level.
+    void DropParked_();
     void NextLevel_();
     bool BlockRead_();
     void TileDone_();
@@ -197,7 +218,9 @@ private:
     // Samples the terrain along the city edges for meta.json (CityRenderMeta::edges).
     void SampleEdges_(CityRenderMeta::Edges& edges) const;
     int maxZoom_ = 3;  // zoom index, the highest this render makes
+    uint32_t rotations_ = 0xF;  // bit r: this render makes rotation r
     bool transport_ = false;  // this render makes the transport layer
+    bool addTransportOnly_ = false;  // CaptureRequest::addTransport: the normal levels stay
 
     // Pushes data view 0xF3, pumps and checks that it took. False when it did not (logged) or
     // when the capture ended in the pump.
@@ -209,6 +232,13 @@ private:
     void SkipLevel_();
 
     void SetClearColor_(uint32_t rgba);
+    // The date and noon overrides of saved_.season, logged. Needs the paused simulation.
+    void ApplySeason_();
+    // The key color for the next draw of the block, without throwing the backing store away: that
+    // draw forces a full redraw itself or redraws dirty rectangles.
+    void SetKeyColor_(uint32_t rgba);
+    // Partial passes: the tiles on the city edge as dirty rectangles, the block at (x, y).
+    void QueueEdgeTiles_(cISC43DRender* renderer, int x, int y) const;
     void RestoreClearColor_();
     // Sets the time of day of the lighting, when the render changed it.
     void SetTimeOfDay_(float time) const;
@@ -233,6 +263,11 @@ private:
 
     ModuleContext ctx_;
     std::function<void(bool ok)> onFinished_;
+    // The renders of this Start (Seasons::RenderPasses): each pass is a capture of its own,
+    // End_ starts the next one. passIndex_ is the one running.
+    CaptureRequest request_;
+    std::vector<Seasons::Pass> passes_;
+    size_t passIndex_ = 0;
     CaptureProgress progress_;
     Phase phase_ = Phase::Idle;
     uint32_t stepId_ = 0;
@@ -283,7 +318,26 @@ private:
     int handIndex_ = 0;              // the next tile of the block for the store
     std::vector<CaptureMath::TileRead> reads_;
     size_t readIndex_ = 0;
-    int pass_ = 0;                   // 0: over the first key color, 1: over the second
+    // 0: the whole window over the first key color. 1: over the second. 2: over the first again,
+    // drawn like pass 1 (partial_ only).
+    int pass_ = 0;
+    // Passes 2 and 1 redraw only the tiles on the city edge, as dirty rectangles. Both colors of
+    // those tiles then come from the same kind of draw.
+    bool partial_ = false;
+    bool partialOff_ = false;        // a partial pass did not clear the key color: off for this level
+    // Async readback (SnapshotReader::BeginRead): the first pass of a block is drawn, its copy
+    // started and the block parked here while the next block is drawn. Then it is collected and
+    // goes on as if it had been read at once.
+    struct ParkedBlock
+    {
+        CaptureMath::TileBlock block;
+        std::vector<CaptureMath::TileRead> reads;
+        uint32_t ticket = 0;
+        int w = 0, h = 0;
+    };
+    std::optional<ParkedBlock> parked_;
+    bool drawnOver_ = false;  // block_ was collected after another block was drawn
+    bool partialOffLogged_ = false;
     int viewportW_ = 0, viewportH_ = 0;
     int shakeTicks_ = 0;
 
@@ -301,6 +355,8 @@ private:
 
     SavedState saved_;
     std::optional<SC4AutoGamePause> pause_;
+    SeasonOverride season_;
+    bool seasonAfterSave_ = false;  // a save took the overrides away: apply them again
 
     using Clock = std::chrono::steady_clock;
     Clock::time_point startTime_{};

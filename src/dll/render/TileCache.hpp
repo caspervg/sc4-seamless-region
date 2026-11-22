@@ -1,8 +1,8 @@
 #pragma once
 
-// Render (W2-E): a bounded cache of neighbor tile textures.
+// Render: a bounded cache of neighbor tile textures.
 //
-// Decodes on one worker thread (below normal priority, runs only while a city is open),
+// Decodes on up to three worker threads (below normal priority, only while a city is open),
 // uploads on the game thread within the per-frame budget (Settings::uploadTilesPerFrame,
 // Settings::uploadMsPerFrame). Hard memory cap from Settings::tileCacheMB. Tiles that were
 // drawn least recently go first.
@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
 
 #include "core/GameAccess.hpp"
 #include "public/cIGZImGuiService.h"
@@ -57,12 +58,20 @@ public:
     // the ImGui frame). Either way the tile's spot on screen needs drawing again.
     void SetOnTileReady(std::function<void(const TileKey&)> callback);
 
+    // A ready texture or nullptr, like Acquire, but never queues a decode. For stand-ins: a
+    // tile of another zoom drawn while the right one loads.
+    const TileTexture* Peek(const TileKey& key);
+    // Forgets every queued and decoding tile (the textures stay). For a zoom or rotation change:
+    // the tiles of the old view are no longer on screen, and the new view asks for its own.
+    void DropQueued();
     // Starts a new draw pass for the "least recently drawn" order. Tiles acquired since the
     // last call count as drawn together and never evict each other.
     void BeginDrawPass();
     // The driver texture name for SC4DrawContext::SetTexture, or 0 when the texture cannot
     // be drawn right now (device lost).
     [[nodiscard]] uint32_t DriverTexture(const TileTexture& texture) const;
+    // One line of counters for the remote status command.
+    [[nodiscard]] std::string StatsText() const;
     // Decodes and uploads still to do. Zero when the cache is idle.
     [[nodiscard]] size_t PendingCount() const;
 
