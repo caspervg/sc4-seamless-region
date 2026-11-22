@@ -56,9 +56,10 @@ jobs:
         Copy-Item vendor/sc4-dll-utilities/LICENSE.txt (Join-Path $out 'LICENSE-sc4-dll-utilities.txt')
         Copy-Item vendor/sc4-render-services/LICENSE.txt (Join-Path $out 'LICENSE-sc4-render-services.txt')
         python tools/make-sbom.py --dll $dll --version '${{ github.ref_name }}' --output (Join-Path $out 'SC4SeamlessRegion.spdx.json')
-        Get-ChildItem -File $out | Get-FileHash -Algorithm SHA256 |
-          ForEach-Object { "$($_.Hash.ToLowerInvariant())  $(Split-Path -Leaf $_.Path)" } |
-          Set-Content (Join-Path $out 'SHA256SUMS.txt') -Encoding ascii
+        # LF line endings, so sha256sum -c reads it on any system.
+        $sums = Get-ChildItem -File $out | Get-FileHash -Algorithm SHA256 |
+          ForEach-Object { "$($_.Hash.ToLowerInvariant())  $(Split-Path -Leaf $_.Path)`n" }
+        [IO.File]::WriteAllText((Join-Path $out.FullName 'SHA256SUMS.txt'), -join $sums)
       build-output: release-package
       artifact-name: SC4SeamlessRegion-${{ github.ref_name }}-win32.zip
       attestation-subject-path: SC4SeamlessRegion.dll
