@@ -41,7 +41,10 @@ if(GIT_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
             set(SC4SR_APP_VERSION "${SC4SR_GIT_DESCRIBE}")
         endif()
 
-        string(REGEX REPLACE "^v" "" SC4SR_PROJECT_VERSION "${SC4SR_GIT_TAG}")
+        # project() takes numbers only: v1.0.0-rc.1 becomes 1.0.0.
+        if(SC4SR_GIT_TAG MATCHES "^v?([0-9]+\\.[0-9]+\\.[0-9]+)")
+            set(SC4SR_PROJECT_VERSION "${CMAKE_MATCH_1}")
+        endif()
     endif()
 endif()
 
