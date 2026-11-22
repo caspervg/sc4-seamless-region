@@ -9,6 +9,7 @@
 namespace
 {
     namespace MM = CaptureAddresses::ModelMaker;
+    namespace BL = CaptureAddresses::BackgroundLoader;
 
     uint8_t Flag(const void* modelMaker, const uint32_t offset)
     {
@@ -70,7 +71,14 @@ bool ModelLoadMonitor::IsIdle() const
         return false;
     }
     // Without background loading every load is done before the view change returns.
-    return !Flag(mm, MM::kBackgroundLoadingEnabled) || !Flag(mm, MM::kLoadingInBackground);
+    if (Flag(mm, MM::kBackgroundLoadingEnabled) && Flag(mm, MM::kLoadingInBackground)) {
+        return false;
+    }
+    // The loaded cells still have to be swapped in on the main thread. SC4DBPFLoading spreads
+    // that over several frames, after the loader is done.
+    const void* loader = GameAccess::ReadField<const void*>(mm, MM::kBackgroundLoader);
+    return !loader || GameAccess::ReadField<const void*>(loader, BL::kBacklogBegin) ==
+                          GameAccess::ReadField<const void*>(loader, BL::kBacklogEnd);
 }
 
 int ModelLoadMonitor::PendingCount() const
